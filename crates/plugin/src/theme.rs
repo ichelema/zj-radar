@@ -79,7 +79,7 @@ impl DerivedColors {
     /// unchanged (`dim_text_keeps_contrast_against_its_surface_in_both_polarities`).
     pub fn from_bg_fg(bg: Rgb, fg: Rgb) -> Self {
         let is_dark = luminance(bg) <= luminance(fg);
-        let recede = if is_dark { 0.30 } else { 0.08 };
+        let recede = if is_dark { 0.20 } else { 0.08 }; // local: 20% (upstream 0.30)
         let rail_bg = blend(bg, (0, 0, 0), recede);
         DerivedColors {
             rail_bg,
