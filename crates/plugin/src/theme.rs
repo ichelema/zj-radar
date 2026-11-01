@@ -104,8 +104,8 @@ fn luminance((r, g, b): Rgb) -> u32 {
 /// Neutral-dark fallback used until the terminal reports its own colors. A
 /// generic dark — NOT branded — so an unthemed/unreported terminal still gets a
 /// reasonable dark panel.
-pub const FALLBACK_BG: Rgb = (26, 27, 38);
-pub const FALLBACK_FG: Rgb = (192, 202, 220);
+pub const FALLBACK_BG: Rgb = (20, 36, 51); // local: #142433 (WezTerm nord0 custom), upstream (26, 27, 38)
+pub const FALLBACK_FG: Rgb = (216, 222, 233); // local: #D8DEE9 (WezTerm nord4), upstream (192, 202, 220)
 
 impl Default for DerivedColors {
     fn default() -> Self {
