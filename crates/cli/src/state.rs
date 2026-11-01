@@ -283,8 +283,8 @@ mod tests {
         let out = collect(
             vec![
                 raw(presence("live", 1, &[]), 5),
-                raw(presence("old", 1, &[]), 91),
-                raw(presence("gone", 1, &[]), 301),
+                raw(presence("old", 1, &[]), STALE_AFTER_SECS + 1), // local: relative alle soglie
+                raw(presence("gone", 1, &[]), DEAD_AFTER_SECS + 1),
                 raw("not json".into(), 0),
             ],
             None,
@@ -399,7 +399,7 @@ mod tests {
     fn needs_attention_skips_stale_unless_asked_and_drops_empties() {
         let files = || {
             vec![
-                raw(presence("old", 1, &[("status", "claude", "pending")]), 120),
+                raw(presence("old", 1, &[("status", "claude", "pending")]), STALE_AFTER_SECS + 1), // local
                 raw(presence("calm", 1, &[("status", "claude", "running")]), 0),
             ]
         };
@@ -462,7 +462,7 @@ mod tests {
                 {"pane_id": 15, "origin": "status", "kind": "codex", "status": "running", "label": "refactor"}]}]
         })
         .to_string();
-        let s = collect(vec![raw(busy, 3), raw(presence("old", 1, &[]), 120)], Some("main"));
+        let s = collect(vec![raw(busy, 3), raw(presence("old", 1, &[]), STALE_AFTER_SECS + 1)], Some("main")); // local
         insta::assert_snapshot!(render_human(&s));
     }
 

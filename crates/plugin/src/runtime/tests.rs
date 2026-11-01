@@ -1951,7 +1951,7 @@ fn cadence_seconds_maps_fast_and_slow() {
     // glue that replays `SetTimeout`) so this pure mapping is host-testable
     // and neither variant reads as dead code under `cargo test`.
     assert_eq!(Cadence::Fast.seconds(), 1.0);
-    assert_eq!(Cadence::Slow.seconds(), 60.0);
+    assert_eq!(Cadence::Slow.seconds(), 25.0); // local: 25s (upstream 60s)
 }
 
 #[test]

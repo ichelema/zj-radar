@@ -868,7 +868,7 @@ mod tests {
     fn stale_peer_is_flagged_and_skipped_by_cycle() {
         let mut s = Sessions::default();
         s.set_own(own("work"));
-        s.update_presences(vec![presence_aged("alpha", 1, 0, 200)]); // past STALE_AFTER_SECS, short of DEAD_AFTER_SECS
+        s.update_presences(vec![presence_aged("alpha", 1, 0, STALE_AFTER_SECS + 20)]); // past STALE_AFTER_SECS, short of DEAD_AFTER_SECS
         let badge = s.badge();
         let alpha = badge.iter().find(|b| b.name == "alpha").expect("stale peer still on the badge");
         assert!(alpha.stale, "a peer whose mtime age exceeds STALE_AFTER_SECS must flag stale");
@@ -884,7 +884,7 @@ mod tests {
     fn cycle_skips_a_stale_peer_and_lands_on_a_fresh_one_instead() {
         let mut s = Sessions::default();
         s.set_own(own("work"));
-        s.update_presences(vec![presence_aged("alpha", 1, 0, 200), presence("beta", 1, 0)]);
+        s.update_presences(vec![presence_aged("alpha", 1, 0, STALE_AFTER_SECS + 20), presence("beta", 1, 0)]);
         // Order: work (current), beta (fresh, before the stale bucket), alpha (stale, last).
         s.cycle(Direction::Next);
         let badge = s.badge();
@@ -901,7 +901,7 @@ mod tests {
 
         // The next read finds the same peer with an older mtime age (no
         // further heartbeat landed) — its badge row must flip to stale.
-        s.update_presences(vec![presence_aged("alpha", 1, 0, 200)]);
+        s.update_presences(vec![presence_aged("alpha", 1, 0, STALE_AFTER_SECS + 20)]);
         assert!(s.badge()[1].stale, "a peer whose age crossed STALE_AFTER_SECS must flip to stale");
     }
 
@@ -940,13 +940,13 @@ mod tests {
         let mut s = Sessions::default();
         s.set_own(own("work"));
 
-        let update = s.update_presences(vec![presence_aged("alpha", 1, 0, 200)]);
+        let update = s.update_presences(vec![presence_aged("alpha", 1, 0, STALE_AFTER_SECS + 20)]);
         assert!(update.dead.is_empty(), "a merely-stale peer must not be reported dead");
         let badge = s.badge();
         let alpha = badge.iter().find(|b| b.name == "alpha").expect("stale peer stays on the badge");
         assert!(alpha.stale, "between the thresholds the entry dims, nothing more");
 
-        let update = s.update_presences(vec![presence_aged("alpha", 1, 0, 400)]); // past DEAD_AFTER_SECS
+        let update = s.update_presences(vec![presence_aged("alpha", 1, 0, DEAD_AFTER_SECS + 100)]); // past DEAD_AFTER_SECS
         assert!(update.changed, "reaping a previously-shown entry is a badge change");
         assert_eq!(update.dead, vec!["alpha".to_string()], "the reaped name must be reported for the on-disk unlink");
         assert!(!s.badge().iter().any(|b| b.name == "alpha"), "a dead peer must be dropped from the badge");

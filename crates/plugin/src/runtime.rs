@@ -77,7 +77,7 @@ impl Cadence {
         match self {
             Cadence::Fast => 1.0,
             Cadence::Frame(fps) => 1.0 / f64::from(fps.max(1)),
-            Cadence::Slow => 60.0,
+            Cadence::Slow => 25.0, // local: 25s (upstream 60s), batte il presence heartbeat
         }
     }
 }
@@ -116,7 +116,7 @@ const PRESENCE_READ_TICK_INTERVAL: u64 = 5;
 /// command-origin build — no content edges, no Slow fires) satisfies it from
 /// its 1 Hz ticks, which is the whole point: keying the write on the Slow
 /// fire alone starved exactly the busiest sessions stale.
-const PRESENCE_HEARTBEAT_S: u64 = 60;
+const PRESENCE_HEARTBEAT_S: u64 = 25; // local: 25s (upstream 60s)
 
 /// How recent a sibling's presence write must be for a heartbeat to skip
 /// (`Effect::PersistPresence { unless_fresher_than: Some(_) }`) — the

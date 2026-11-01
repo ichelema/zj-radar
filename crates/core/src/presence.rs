@@ -28,7 +28,7 @@ pub const PRESENCE_VERSION: u32 = 1;
 /// ordinary scheduler jitter never flickers an entry, but a session that's
 /// genuinely gone quiet reads as such promptly. A missed beat marks stale;
 /// only [`DEAD_AFTER_SECS`] reaps.
-pub const STALE_AFTER_SECS: u64 = 90;
+pub const STALE_AFTER_SECS: u64 = 40; // local: 40s (upstream 90s)
 
 /// How old a peer's presence file must be before the entry is judged dead:
 /// reaped from the badge and unlinked by the runtime. Five missed 60s
@@ -40,7 +40,7 @@ pub const STALE_AFTER_SECS: u64 = 90;
 /// live peer is possible — and harmless, because dismissal is
 /// non-destructive by construction: the live session's next heartbeat
 /// republishes its file and the entry returns, fresh.
-pub const DEAD_AFTER_SECS: u64 = 300;
+pub const DEAD_AFTER_SECS: u64 = 90; // local: 90s (upstream 300s)
 
 /// A bounded, display-only view of another session's tab tree.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -92,13 +92,15 @@ fn current_session_is_flagged_and_listed_first() {
 #[test]
 fn include_stale_returns_a_stale_match() {
     let root = tempfile::tempdir().unwrap();
-    write_presence(root.path(), "/p/zj_radar.wasm", 10, WAITING, Duration::from_secs(120));
+    // local: età fra stale e dead, relativa alle soglie
+    let age = zj_radar_core::presence::STALE_AFTER_SECS + 20;
+    write_presence(root.path(), "/p/zj_radar.wasm", 10, WAITING, Duration::from_secs(age));
     state(root.path()).arg("--needs-attention").assert().code(1);
     let out = state(root.path()).args(["--needs-attention", "--include-stale", "--json"]).assert().code(0);
     let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
     assert_eq!(v["sessions"][0]["name"], "work");
     assert_eq!(v["sessions"][0]["stale"], true);
-    assert!(v["sessions"][0]["age_s"].as_u64().unwrap() >= 120);
+    assert!(v["sessions"][0]["age_s"].as_u64().unwrap() >= age);
 }
 
 #[cfg(unix)]
