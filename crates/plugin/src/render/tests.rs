@@ -1403,21 +1403,34 @@ fn comfortable_inserts_blank_line_between_tabs() {
     let s = render(&rows, &tight(&rows, ro_comfortable(24, 100)));
     // body lines: each idle row = 1 content + 1 gap = 2 lines each. Total body = 6.
     // But the last gap's trailing \n is stripped, so .lines() gives 7 total.
+    // local: Comfortable paints the rail bg, so the last gap line carries the
+    // paint and survives the trailing-\n strip → 8 lines (upstream: 7).
     assert_eq!(
         s.lines().count(),
-        7,
-        "comfortable: expected 7 lines (last gap stripped), got {}:\n{:?}",
+        8,
+        "comfortable: expected 8 lines (painted last gap kept), got {}:\n{:?}",
         s.lines().count(),
         s
     );
-    // Check that there is a blank line between tabs (an empty line between non-empty lines).
+    // Gap lines are painted, so "blank" means no visible text once SGR is stripped.
+    let blank = |l: &str| {
+        let (mut text, mut esc) = (String::new(), false);
+        for c in l.chars() {
+            match (esc, c) {
+                (true, 'm') => esc = false,
+                (true, _) => {}
+                (false, '\x1b') => esc = true,
+                (false, c) => text.push(c),
+            }
+        }
+        text.trim().is_empty()
+    };
     let body_lines: Vec<&str> = s.lines().skip(2).collect();
-    assert_eq!(body_lines.len(), 5);
-    // Odd-indexed body lines (0-based: 1, 3) should be blank gap lines.
-    assert!(body_lines[1].is_empty(), "body line 1 should be blank gap: {:?}", body_lines[1]);
-    assert!(body_lines[3].is_empty(), "body line 3 should be blank gap: {:?}", body_lines[3]);
-    // body_lines[4] is the last tab content (no trailing gap).
-    assert!(!body_lines[4].is_empty(), "body line 4 should be last tab content: {:?}", body_lines[4]);
+    assert_eq!(body_lines.len(), 6);
+    // Even-indexed body lines are tabs, odd-indexed ones are blank gaps.
+    for (i, line) in body_lines.iter().enumerate() {
+        assert_eq!(blank(line), i % 2 == 1, "body line {i} blank-gap mismatch: {:?}", line);
+    }
 }
 
 #[test]
@@ -1767,10 +1780,19 @@ fn comfortable_and_compact_emit_no_bg() {
         tab(1, "idle", display(Status::Idle, 0, 0, None)),
         TabRow { active: true, ..tab(2, "work", display(Status::Running, 0, 1, Some(detail))) },
     ];
-    for density in [crate::config::Density::Comfortable, crate::config::Density::Compact] {
-        let s = render(&rows, &RenderOpts { density, ..ro(30, 0) });
-        assert!(!is_painted(&s), "density {:?} must NOT emit a truecolor card band: {:?}", density, s);
-    }
+    // local: Compact stays unpainted; Comfortable paints only the rail bg.
+    let s = render(&rows, &RenderOpts { density: crate::config::Density::Compact, ..ro(30, 0) });
+    assert!(!is_painted(&s), "Compact must NOT emit a truecolor bg: {:?}", s);
+    let opts = RenderOpts { density: crate::config::Density::Comfortable, ..ro(30, 0) };
+    let s = render(&rows, &opts);
+    let rail = tc_bg(opts.theme.rail_bg);
+    assert!(is_painted(&s), "Comfortable must paint the rail bg: {:?}", s);
+    assert_eq!(
+        s.matches("\x1b[48;2;").count(),
+        s.matches(rail.as_str()).count(),
+        "Comfortable must paint only the rail bg, no card band: {:?}",
+        s
+    );
 }
 
 #[test]

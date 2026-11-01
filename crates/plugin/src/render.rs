@@ -1915,6 +1915,8 @@ fn render_strip(strip_folded: usize, opts: &RenderOpts) -> Vec<Line> {
 fn render_body(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) -> Vec<Line> {
     let width = opts.width;
     let cards = opts.density == Density::Cards;
+    // local: anche Comfortable dipinge il fondo rail (senza fasce card)
+    let paint = cards || opts.density == Density::Comfortable;
     let rail = tc_bg(opts.theme.rail_bg);
     // Zero tabs with a non-empty ledger still has something to show (spec §9's
     // floor: header + bottom region, no cards) — the header must not vanish
@@ -2000,21 +2002,21 @@ fn render_body(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) -> Vec
 
     // Header.
     for line in render_header(rows, opts, overflow, has_content, working) {
-        flat.push(paint_if_cards(line, cards, width, &rail));
+        flat.push(paint_if_cards(line, paint, width, &rail));
     }
 
     // Tree on: the current session heads its own live tab cards, and peer
     // sessions with their child tabs come after those cards, keeping the tree
     // grouped. Tree off: the whole compact badge block, as before the tree.
     for line in top_badge {
-        flat.push(paint_if_cards(line, cards, width, &rail));
+        flat.push(paint_if_cards(line, paint, width, &rail));
     }
 
     // Body: one card block per kept row. The inter-card gap is the same
     // rail-based blank on every row, so it is painted once and cloned.
     let active_child = tc_bg(opts.theme.surface_agent);
     let focused_child = tc_bg(opts.theme.surface_active);
-    let mut gap = paint_if_cards(Line::new("\n".to_string(), None, LineBg::Rail), cards, width, &rail);
+    let mut gap = paint_if_cards(Line::new("\n".to_string(), None, LineBg::Rail), paint, width, &rail);
     gap.bg = LineBg::None;
     for &(i, budget) in &plan {
         let row = &rows[i];
@@ -2023,11 +2025,12 @@ fn render_body(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) -> Vec
         // rides inside the value, so Cards finalization cannot forget it when
         // `Line` grows another lockstep field. Outside Cards density nothing
         // paints, so the map is never built at all.
-        let surfaces = cards.then(|| Surfaces {
+        // local: in Comfortable ogni superficie è il fondo rail, così niente fasce card
+        let surfaces = paint.then(|| Surfaces {
             rail: &rail,
-            card: card_tint(row, &opts.theme),
-            active_child: &active_child,
-            focused_child: &focused_child,
+            card: if cards { card_tint(row, &opts.theme) } else { rail.clone() },
+            active_child: if cards { &active_child } else { &rail },
+            focused_child: if cards { &focused_child } else { &rail },
         });
         let finalize = |line: Line| -> Line {
             let mut line = match surfaces.as_ref().and_then(|s| line.bg.escape(s)) {
@@ -2061,22 +2064,22 @@ fn render_body(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) -> Vec
     // Idle strip — directly under the local cards it summarizes, before any
     // peer tree, so the folded count never reads as a peer's.
     for line in render_strip(strip_folded, opts) {
-        flat.push(paint_if_cards(line, cards, width, &rail));
+        flat.push(paint_if_cards(line, paint, width, &rail));
     }
 
     // Peer sessions (in badge order: attention first), each heading followed
     // by as much of its tab tree as the leftover `child_budget` allows —
     // earlier peers fill first, and headings always render.
     for (heading, entry) in peer_headings {
-        flat.push(paint_if_cards(heading, cards, width, &rail));
+        flat.push(paint_if_cards(heading, paint, width, &rail));
         let children = render_peer_children(entry, child_budget, opts);
         child_budget -= children.len();
         for line in children {
-            flat.push(paint_if_cards(line, cards, width, &rail));
+            flat.push(paint_if_cards(line, paint, width, &rail));
         }
     }
     if let Some(line) = badge_spacer {
-        flat.push(paint_if_cards(line, cards, width, &rail));
+        flat.push(paint_if_cards(line, paint, width, &rail));
     }
 
     flat
@@ -2328,6 +2331,7 @@ pub fn render_rail(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) ->
         return RenderedRail::from_lines(vec![]);
     }
     let cards = opts.density == Density::Cards;
+    let paint = cards || opts.density == Density::Comfortable; // local
     let width = opts.width;
     let rail = tc_bg(opts.theme.rail_bg);
 
@@ -2339,7 +2343,7 @@ pub fn render_rail(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) ->
     // `leftover` measures — no special-casing needed.
     let leftover = opts.height.saturating_sub(flat.len());
     for line in render_bottom(rows, ledger, leftover, opts) {
-        flat.push(paint_if_cards(line, cards, width, &rail));
+        flat.push(paint_if_cards(line, paint, width, &rail));
     }
 
     // Final height clamp. The body is budgeted against `height - header_lines`, so
