@@ -1637,7 +1637,7 @@ fn render_header(rows: &[TabRow], opts: &RenderOpts, overflow: bool, has_content
         return vec![];
     }
     let width = opts.width;
-    let accent = Role::Accent.ansi();
+    let accent = "\x1b[38;2;126;190;208m"; // local: header #7ebed0 (upstream Role::Accent)
     let primary = if overflow { format!("{}▲", rows.len()) } else { format!("·{}", rows.len()) };
     let title = " RADAR";
     let title_w = UnicodeWidthStr::width(title);
