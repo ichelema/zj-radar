@@ -576,14 +576,17 @@ impl RenderedRail {
     }
 }
 
+/// local: colore di header e spine (upstream Role::Accent).
+const RADAR_ACCENT: &str = "\x1b[38;2;126;190;208m";
+
 /// Color of the active-tab spine (col-0 `▌`), by the tab's dominant status:
 /// accent (mauve) normally, attention (peach) when the tab is waiting/error so
 /// the focus cue carries the alarm. Single source for all three spine sites
 /// (line-1 header, `+N more`, active pane lines).
-fn spine_role(status: Status) -> Role {
+fn spine_color(status: Status) -> &'static str {
     match status {
-        Status::Pending | Status::Error => Role::Attention,
-        _ => Role::Accent,
+        Status::Pending | Status::Error => Role::Attention.ansi(),
+        _ => RADAR_ACCENT,
     }
 }
 
@@ -595,7 +598,7 @@ fn spine_role(status: Status) -> Role {
 /// `if active { "▌" } else { " " }` — they measure, they don't color.)
 fn spine_seg(active: bool, tab_status: Status) -> String {
     if active {
-        Seg::new(spine_role(tab_status).ansi(), "▌").to_string()
+        Seg::new(spine_color(tab_status), "▌").to_string()
     } else {
         " ".to_string()
     }
@@ -1637,7 +1640,7 @@ fn render_header(rows: &[TabRow], opts: &RenderOpts, overflow: bool, has_content
         return vec![];
     }
     let width = opts.width;
-    let accent = "\x1b[38;2;126;190;208m"; // local: header #7ebed0 (upstream Role::Accent)
+    let accent = RADAR_ACCENT; // local: header #7ebed0
     let primary = if overflow { format!("{}▲", rows.len()) } else { format!("·{}", rows.len()) };
     let title = " RADAR";
     let title_w = UnicodeWidthStr::width(title);

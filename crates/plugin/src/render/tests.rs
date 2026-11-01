@@ -359,7 +359,7 @@ fn active_row_has_accent_bar_idle_does_not() {
     let s = render(&rows, &ro(24, 0));
     let body: Vec<&str> = s.lines().skip(2).collect(); // skip 2-line header
     assert!(body[0].contains('▌')); // active row → bar
-    assert!(body[0].contains(Role::Accent.ansi())); // accent-colored bar
+    assert!(body[0].contains(RADAR_ACCENT)); // local: bar in RADAR_ACCENT
     assert!(!body[1].contains('▌')); // idle non-active → no bar
 }
 
@@ -713,7 +713,7 @@ fn render_glyph_role_colors_are_present() {
     assert!(!s.contains('#'), "'#' hex color literal found in render output");
     // Glyph/status indicators must use ANSI-16 role codes.
     // Accent role: header title bar + active-row bar (\x1b[35m)
-    assert!(s.contains(Role::Accent.ansi()), "expected accent role ANSI code not found");
+    assert!(s.contains(RADAR_ACCENT), "local: expected RADAR_ACCENT (header + active bar) not found");
     // Attention role: pending row glyph and "needs you" label (\x1b[91m)
     assert!(s.contains(Role::Attention.ansi()), "expected attention role ANSI code not found");
     // Working role: running row glyph (\x1b[33m)
@@ -973,7 +973,7 @@ fn child_prefix_is_tree_connector_with_optional_spine() {
     // accent normally, peach attention when waiting/error) — the same
     // spine_role coupling as the line-1 bar — then the connector + space.
     let running = child_prefix(true, Status::Running, Branch::Tee, conn);
-    assert!(running.starts_with(Role::Accent.ansi()), "accent spine: {running:?}");
+    assert!(running.starts_with(RADAR_ACCENT), "local: RADAR_ACCENT spine: {running:?}");
     assert!(
         running.contains('▌') && running.contains('├') && running.ends_with(' '),
         "spine + connector + space: {running:?}"
