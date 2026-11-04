@@ -653,14 +653,31 @@ unconditional: it is a public read surface, and `session_tree` is display-only.
 destination; the plugin never writes one) describes a session on another
 machine, copied into the cache by an external mirror. Its identity everywhere
 in `sessions.rs` is `Presence::label` (`host/session_name`), so a remote
-`work` and a local `work` stay two peers, and `Effect::SwitchSession` on it
-focuses the tab named after the label when one is open, else runs
+`work` and a local `work` stay two peers. `Effect::SwitchSession` on it never
+calls `switch_session`, which would create an empty local session under that
+name (`PluginRuntime::peer_switch`). It focuses, in order: the local pane
+already showing the session, found by content, not by tab name
+(`RadarState::guest_pane`: a live `Kind::Remote` foreground whose title
+Zellij's nested client set to `<session> | …`, a destination equal to `host`
+preferred); else the tab named after the label; else it runs
 `zellij action new-tab --name <label> -- ssh -t -- <host> zellij attach <name>`
-(`PluginRuntime::peer_switch`, under the existing `RunCommands`
-grant) rather than `switch_session`, which would create an empty local
-session under that name. A tab rather than a split: the remote Zellij is a
-nested guest, and the way back is a tab switch or a click on the (dimmed)
-rail of that tab.
+under the existing `RunCommands` grant. A tab rather than a split: the remote
+Zellij is a nested guest, and the way back is a tab switch or a click on that
+tab's rail. ssh hands the words after the host to the remote shell as one
+line, so `Presence::parse` admits a hosted file only with a shell-inert host
+and name. The click lands on the guest's tab, not on the remote tab or pane a
+tree row names, and two clicks faster than the new tab opens can open two
+(two clients on one remote session; nothing is lost).
+
+The mirror's contract follows from liveness riding the file mtime. Keep each
+copy's mtime equal to the remote file's. Copy a file only when its remote
+mtime changed since the last copy, so a `✕` dismiss or the dead-reap, which
+unlink the local copy, stick until the remote session writes again. Skip files
+already past `DEAD_AFTER_SECS`. Keep the copy lag under 15 s: a quiet
+session's own writes can be 75 s apart, and the fresh window is 90 s. Name the
+copies so they never collide with a local pid file
+(`zj-radar.presence.<prefix>-<pid>.json`), and write them through a temp name
+that does not end in `.json`.
 
 **Single writer: the presence-writer token.** Content must come from the rail
 with the freshest topology, and that is the most recently active one: Zellij
@@ -758,7 +775,7 @@ only moves the highlight and sets a "tap landed" flag; `Sessions::tick` runs
 on every timer fire while a selection is pending, and a fire whose interval
 saw a tap clears the flag and skips. Only a fire whose whole interval was
 tap-free commits, so the commit lands at least one quiet interval after the
-last tap. The target is re-resolved by session name, never list position, so
+last tap. The target is re-resolved by label (the session name, or `host/name`), never list position, so
 peers joining or leaving mid-cycle cannot retarget it; a selection that went
 stale is dropped. Landing back on the current session cancels. A commit emits
 `Effect::SwitchSession { name, tab_position }`.

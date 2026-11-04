@@ -106,6 +106,10 @@ title. It never overwrites a name you set by hand.
   agent clears on its own when you answer it.
 - **Click `✕`** on a dimmed session line in the badge to dismiss a session you
   know is dead. If it turns out to be alive, its next heartbeat brings it back.
+- **Click a remote session** (`host/name`, copied from another machine by a
+  mirror; see [design.md](design.md) → *Mirrored remote sessions*) to bring it
+  up over ssh. The rail focuses the pane that already shows it, in any tab, or
+  opens a tab attached to it.
 - Right-click does nothing yet: Zellij does not deliver right-clicks to
   plugins ([zellij#5350](https://github.com/zellij-org/zellij/issues/5350)).
 

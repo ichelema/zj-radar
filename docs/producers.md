@@ -381,7 +381,7 @@ it, so such a session is not listed.
 | `updated_epoch_s` | When the content was last written. |
 | `tabs` | `[{position, name, panes}]`, one per tab. |
 | `panes[]` | `{pane_id, origin, kind, status, label}`: tracked panes only. `origin` is `"status"` (agent) or `"command"` (observed command); plain shells and editors are excluded. `pane_id` and `origin` are absent in pre-v1 files. |
-| `host` | Optional, never written by the plugin: an ssh destination (an alias or `user@host`, ≤ 64 chars) set by a mirror that copies another machine's presence files into this cache. ssh hands the attach command to the remote shell as one line, so with a `host` both it and `session_name` must use only letters, digits and `._-` (the host also `@` and `:`) and not start with `-`; any other file is skipped. The peer is listed as `host/session_name`, and clicking it focuses the tab named `host/session_name` if one is open, else opens one running `ssh -t -- <host> zellij attach <session_name>` (a nested guest session; switch tab, or click the rail, to come back) instead of switching sessions. |
+| `host` | Optional, never written by the plugin: an ssh destination (an alias or `user@host`, ≤ 64 chars) set by a mirror that copies another machine's presence files into this cache. ssh hands the attach command to the remote shell as one line, so with a `host` both it and `session_name` must use only letters, digits and `._-` (the host also `@` and `:`) and not start with `-`; any other file is skipped. The peer is listed as `host/session_name`, and clicking it focuses the local pane already showing it (a live `ssh`-family session whose title Zellij's nested client set to `session_name | …`), else the tab named `host/session_name`, else opens one running `ssh -t -- <host> zellij attach <session_name>` (a nested guest session; switch tab, or click the rail, to come back) instead of switching sessions. The mirror's contract is in [design.md](design.md) → *Mirrored remote sessions*. |
 
 Status-origin panes sort before commands, then the 16-pane cap applies. An
 agent's `label` is its sticky task (falling back to the agent kind); a
@@ -413,7 +413,7 @@ session that lost its writer may briefly read as stale but is never reaped.
 | Field | Meaning |
 |---|---|
 | `v` | Output format version, independent of the file's `v`. |
-| `sessions[]` | One per live session (dead files and duplicates dropped), the current session first, then by name. |
+| `sessions[]` | One per live session (dead files and duplicates dropped), the current session first, then by label (`host/name` for a mirrored session). |
 | `name` | Zellij session name. |
 | `host` | Only for a mirrored remote session: the ssh destination from its presence file. Shown as `host/name` in the human output; such a session is never `current`. |
 | `current` | `true` when `name` equals `$ZELLIJ_SESSION_NAME`. |

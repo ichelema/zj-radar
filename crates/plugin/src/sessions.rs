@@ -225,6 +225,14 @@ impl Sessions {
         self.badge() != before
     }
 
+    /// `(host, session_name)` of the peer whose label is `label` when it is
+    /// a mirrored remote session (its presence carries a `host`); `None`
+    /// for a local peer, which `switch_session` serves.
+    pub(crate) fn remote_target(&self, label: &str) -> Option<(String, String)> {
+        let peer = self.peers.iter().find(|p| p.presence.label() == label)?;
+        Some((peer.presence.host.clone()?, peer.presence.session_name.clone()))
+    }
+
     /// Manually forget a peer by name — the in-memory half of the right-click
     /// dismiss gesture (`PluginRuntime::mouse_right_click`), the user-driven
     /// complement to the [`DEAD_AFTER_SECS`] auto-reap for a
@@ -241,14 +249,6 @@ impl Sessions {
     /// (`dismissed_but_alive_session_reappears_fresh_on_next_presence_write`).
     /// Returns whether the derived badge actually changed, same contract as
     /// the other mutators here.
-    /// `(host, session_name)` of the peer whose label is `label` when it is
-    /// a mirrored remote session (its presence carries a `host`); `None`
-    /// for a local peer, which `switch_session` serves.
-    pub(crate) fn remote_target(&self, label: &str) -> Option<(String, String)> {
-        let peer = self.peers.iter().find(|p| p.presence.label() == label)?;
-        Some((peer.presence.host.clone()?, peer.presence.session_name.clone()))
-    }
-
     pub(crate) fn dismiss(&mut self, name: &str) -> bool {
         let before = self.badge();
         self.peers.retain(|p| p.presence.label() != name);
