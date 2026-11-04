@@ -3974,8 +3974,8 @@ fn a_mirrored_remote_peer_attaches_over_ssh_instead_of_switching() {
         fresh(r#"{"session_name":"alpha","running":0,"attention":0}"#),
         fresh(r#"{"session_name":"alpha","running":0,"attention":0,"host":"vps"}"#),
     ]);
-    assert_eq!(rt.remote_attach_argv("alpha"), None, "a local peer stays on switch_session");
-    let argv = rt.remote_attach_argv("vps/alpha").expect("the mirrored peer has an ssh target");
+    assert_eq!(rt.peer_switch("alpha"), PeerSwitch::Local, "a local peer stays on switch_session");
+    let PeerSwitch::Attach(argv) = rt.peer_switch("vps/alpha") else { panic!("the mirrored peer has an ssh target") };
     assert_eq!(argv[0], "sh");
     assert_eq!(&argv[4..], ["work", "vps/alpha", "vps", "alpha"].map(str::to_string));
 
@@ -3997,13 +3997,14 @@ fn a_mirrored_remote_peer_attaches_over_ssh_instead_of_switching() {
     let mut path = dir.path().as_os_str().to_owned();
     path.push(":");
     path.push(std::env::var_os("PATH").unwrap_or_default());
-    let run = |existing: &str| {
+    let run_argv = |argv: &[String], existing: &str| {
         std::fs::write(&tabs, existing).unwrap();
         std::fs::write(&log, "").unwrap();
         let status = std::process::Command::new(&argv[0]).args(&argv[1..]).env("PATH", &path).status().unwrap();
         assert!(status.success());
         std::fs::read_to_string(&log).unwrap()
     };
+    let run = |existing: &str| run_argv(&argv, existing);
     assert_eq!(
         run("Tab #1\n"),
         "--session work action query-tab-names\n--session work action new-tab --name vps/alpha -- ssh -t -- vps zellij attach alpha\n",
@@ -4014,4 +4015,14 @@ fn a_mirrored_remote_peer_attaches_over_ssh_instead_of_switching() {
         "--session work action query-tab-names\n--session work action go-to-tab-name -- vps/alpha\n",
         "the tab exists: focus it instead of opening a twin"
     );
+    let mut nameless = argv.clone();
+    nameless[4] = String::new();
+    assert_eq!(
+        run_argv(&nameless, "Tab #1\n"),
+        "action query-tab-names\naction new-tab --name vps/alpha -- ssh -t -- vps zellij attach alpha\n",
+        "own session name not known yet: the bare `zellij action` targets the caller's session"
+    );
+
+    rt.presences_changed(vec![fresh(r#"{"session_name":"alpha","running":0,"attention":0}"#)]);
+    assert_eq!(rt.peer_switch("vps/alpha"), PeerSwitch::Gone, "a stale click on a vanished remote peer does nothing");
 }

@@ -683,8 +683,19 @@ fn presence_label(pane: &crate::rollup::PaneDisplay) -> &str {
     }
 }
 
+/// How a peer click or cycle commit reaches the peer ([`PluginRuntime::peer_switch`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PeerSwitch {
+    /// A local peer: `switch_session`.
+    Local,
+    /// A mirrored remote peer: run this argv ([`REMOTE_ATTACH_SCRIPT`]).
+    Attach(Vec<String>),
+    /// A remote label no longer in the roster: do nothing.
+    Gone,
+}
+
 /// `$1` own session name (may be empty), `$2` tab label, `$3` ssh host,
-/// `$4` remote session name. See `PluginRuntime::remote_attach_argv`.
+/// `$4` remote session name. See `PluginRuntime::peer_switch`.
 const REMOTE_ATTACH_SCRIPT: &str = "\
 own=$1; label=$2; host=$3; name=$4; \
 z() { if [ -n \"$own\" ]; then zellij --session \"$own\" \"$@\"; else zellij \"$@\"; fi; }; \
@@ -1278,26 +1289,32 @@ impl PluginRuntime {
         self.project(vec![], RadarChange::default(), self.last_now_epoch_s)
     }
 
-    /// The argv that brings up a mirrored remote peer (its presence carries a
-    /// `host`), or `None` for a local peer, which `Effect::SwitchSession`'s
-    /// `switch_session` serves. A `sh -c` script under the `RunCommands`
+    /// What `Effect::SwitchSession { name }` does, decided against the
+    /// current roster. A mirrored remote peer (its presence carries a
+    /// `host`) is brought up by a `sh -c` script under the `RunCommands`
     /// grant this plugin already holds (no new permission, which would void
     /// every existing grant): if a tab named after the peer already exists
     /// it is focused (`query-tab-names`, since `go-to-tab-name` exits 0 on
     /// a miss), else a new tab runs `ssh -t -- <host> zellij attach <name>`.
     /// A tab, not a split: the remote Zellij is a nested guest (0.45's
     /// `nested_session_handling`), and coming back is then a tab switch, or
-    /// a click on this rail — dimmed host chrome while the guest has the
-    /// input. Every value rides a positional parameter, never the script
-    /// text, and `--` precedes the host so a hostile presence file can't
-    /// smuggle an ssh option.
-    pub(crate) fn remote_attach_argv(&self, label: &str) -> Option<Vec<String>> {
-        let (host, name) = self.sessions.remote_target(label)?;
-        Some(
-            ["sh", "-c", REMOTE_ATTACH_SCRIPT, "zj-radar-attach", &self.own_session_name, label, &host, &name]
-                .map(str::to_string)
-                .to_vec(),
-        )
+    /// a click on this rail. Every value rides a positional parameter, never
+    /// the script text, `--` precedes the host, and `Presence::parse` admits
+    /// a hosted peer only with a shell-inert host and name — ssh hands the
+    /// words after the host to the remote shell as one line.
+    pub(crate) fn peer_switch(&self, label: &str) -> PeerSwitch {
+        match self.sessions.remote_target(label) {
+            Some((host, name)) => PeerSwitch::Attach(
+                ["sh", "-c", REMOTE_ATTACH_SCRIPT, "zj-radar-attach", &self.own_session_name, label, &host, &name]
+                    .map(str::to_string)
+                    .to_vec(),
+            ),
+            // Zellij refuses `/` in a session name, so only a `host/name`
+            // label carries one: its peer left the roster after the render,
+            // and `switch_session` would create an empty local session.
+            None if label.contains('/') => PeerSwitch::Gone,
+            None => PeerSwitch::Local,
+        }
     }
 
     pub(crate) fn presences_changed(&mut self, raw: Vec<(String, u64)>) -> Outcome {

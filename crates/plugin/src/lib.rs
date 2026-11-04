@@ -288,14 +288,15 @@ impl State {
                     let outcome = self.runtime.presences_changed(raw);
                     render |= self.handle_outcome(outcome);
                 }
-                Effect::SwitchSession { name, tab_position } => match self.runtime.remote_attach_argv(&name) {
+                Effect::SwitchSession { name, tab_position } => match self.runtime.peer_switch(&name) {
                     // A mirrored remote peer: `switch_session` would create an
                     // empty local session under its name instead.
-                    Some(argv) => {
+                    runtime::PeerSwitch::Attach(argv) => {
                         let args: Vec<&str> = argv.iter().map(String::as_str).collect();
                         run_command(&args, std::collections::BTreeMap::new());
                     }
-                    None => match tab_position {
+                    runtime::PeerSwitch::Gone => {}
+                    runtime::PeerSwitch::Local => match tab_position {
                         Some(pos) => switch_session_with_focus(&name, Some(pos), None),
                         None => switch_session(Some(&name)),
                     },
