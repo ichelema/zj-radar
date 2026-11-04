@@ -2,7 +2,7 @@ use super::*;
 use std::collections::HashMap;
 
 fn pane(id: u32, title: &str) -> TerminalPane {
-    TerminalPane { floating: false, id, title: title.to_string(), focused_in_tab: false }
+    TerminalPane { floating: false, id, title: title.to_string(), focused_in_tab: false, remote: None }
 }
 
 fn obs(origin: ObservationOrigin, status: Status, tick: u64) -> TrackedObservation {

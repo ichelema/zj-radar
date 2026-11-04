@@ -469,6 +469,7 @@ impl ZellijPlugin for State {
                             default_fg: p.default_fg,
                             exited: p.exited,
                             exit_status: p.exit_status,
+                            terminal_command: p.terminal_command,
                         })
                     })
                     .collect();

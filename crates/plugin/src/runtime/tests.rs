@@ -4028,37 +4028,31 @@ fn a_mirrored_remote_peer_attaches_over_ssh_instead_of_switching() {
 }
 
 #[test]
-fn a_remote_peer_already_shown_by_a_local_pane_is_focused_whatever_its_tab_is_called() {
+fn a_remote_peer_is_focused_on_the_pane_whose_command_attaches_to_it() {
     let mut rt = runtime_with_granted_permission();
     rt.presences_changed(vec![fresh(r#"{"session_name":"alpha","running":0,"attention":0,"host":"me@vps"}"#)]);
-    let titled = |id: u32, title: &str| TerminalPane { title: title.into(), ..pane(id) };
-    // Tab 0: a nested guest reached through another host; tab 1: through
-    // `vps`; tab 2: a look-alike title on a pane that is not a remote session.
-    rt.radar.set_tab_panes_for_position(0, vec![titled(5, "alpha | me@other ~")]);
-    rt.radar.set_tab_panes_for_position(1, vec![titled(7, "alpha")]);
-    rt.radar.set_tab_panes_for_position(2, vec![titled(9, "alpha | local"), titled(11, "alphabet | x")]);
-    for (id, dest) in [(5, "other"), (7, "vps"), (11, "vps")] {
-        rt.command_changed(id, &["ssh".into(), dest.into()], true);
-    }
-    rt.command_changed(9, &["cargo".into(), "test".into()], true);
-    rt.timer_fast(PermissionProbe::default());
-    rt.timer_fast(PermissionProbe::default()); // promote (DEBOUNCE_TICKS=2)
-
-    assert_eq!(
-        rt.peer_switch("me@vps/alpha"),
-        PeerSwitch::ShowPane(7),
-        "the pane whose ssh destination is the host wins"
-    );
-    rt.command_changed(7, &["zsh".into()], true);
-    rt.timer_fast(PermissionProbe::default());
-    rt.timer_fast(PermissionProbe::default());
-    assert_eq!(
-        rt.peer_switch("me@vps/alpha"),
-        PeerSwitch::ShowPane(5),
-        "with no destination match, the leftmost guest pane; a non-remote look-alike and `alphabet` never match"
-    );
-    rt.command_changed(5, &["zsh".into()], true);
-    rt.timer_fast(PermissionProbe::default());
-    rt.timer_fast(PermissionProbe::default());
-    assert!(matches!(rt.peer_switch("me@vps/alpha"), PeerSwitch::Attach(_)), "no guest pane left: attach over ssh");
+    let argv = |line: &str| line.split(' ').map(str::to_string).collect::<Vec<_>>();
+    let click = |rt: &PluginRuntime| rt.peer_switch("me@vps/alpha");
+    // Tab 0: two steps (`ssh`, then the attach inside), the same session on
+    // another host, and as another user. Tabs 1 and 2: one-line attaches typed
+    // in a shell — the tab names play no part.
+    rt.radar.set_tab_panes_for_position(0, vec![pane(3), pane(5), pane(6)]);
+    rt.radar.set_tab_panes_for_position(1, vec![pane(7)]);
+    rt.radar.set_tab_panes_for_position(2, vec![pane(9)]);
+    rt.command_changed(3, &argv("ssh me@vps"), true);
+    rt.command_changed(5, &argv("ssh -t me@other zellij attach alpha"), true);
+    rt.command_changed(6, &argv("ssh -t vps zellij attach alpha"), true);
+    assert!(matches!(click(&rt), PeerSwitch::Attach(_)), "two steps, another host, another user: never a guess");
+    rt.command_changed(9, &argv("ssh -t me@vps zellij attach alpha"), true);
+    rt.command_changed(7, &argv("ssh -t me@vps zellij --layout remote attach --create alpha"), true);
+    assert_eq!(click(&rt), PeerSwitch::ShowPane(7), "no debounce wait, and the leftmost of two wins");
+    rt.command_changed(7, &argv("zsh"), true);
+    assert_eq!(click(&rt), PeerSwitch::ShowPane(9), "back at its shell, a pane no longer shows the session");
+    // A pane created with the attach as its own command (the rail's attach tab).
+    let remote = crate::command::remote_attach_target(&argv("/usr/bin/ssh -t -- me@vps zellij attach alpha"));
+    rt.radar.set_tab_panes_for_position(1, vec![TerminalPane { remote, ..pane(11) }]);
+    assert_eq!(click(&rt), PeerSwitch::ShowPane(11));
+    rt.radar.set_tab_panes_for_position(1, vec![]);
+    rt.radar.set_tab_panes_for_position(2, vec![]);
+    assert!(matches!(click(&rt), PeerSwitch::Attach(_)), "panes closed: attach over ssh");
 }

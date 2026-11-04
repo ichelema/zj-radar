@@ -688,7 +688,7 @@ fn presence_label(pane: &crate::rollup::PaneDisplay) -> &str {
 pub(crate) enum PeerSwitch {
     /// A local peer: `switch_session`.
     Local,
-    /// A local pane already shows the remote peer ([`RadarState::guest_pane`]): focus it.
+    /// A local pane already shows the remote peer ([`RadarState::remote_attach_pane`]): focus it.
     ShowPane(u32),
     /// A mirrored remote peer: run this argv ([`REMOTE_ATTACH_SCRIPT`]).
     Attach(Vec<String>),
@@ -1293,8 +1293,9 @@ impl PluginRuntime {
 
     /// What `Effect::SwitchSession { name }` does, decided against the
     /// current roster. A mirrored remote peer (its presence carries a
-    /// `host`) that a local pane already shows is focused there, whatever
-    /// its tab is called ([`RadarState::guest_pane`]). Otherwise it is
+    /// `host`) that a local pane's running command attaches to is focused
+    /// there, whatever its tab is called ([`RadarState::remote_attach_pane`]).
+    /// Otherwise it is
     /// brought up by a `sh -c` script under the `RunCommands`
     /// grant this plugin already holds (no new permission, which would void
     /// every existing grant): if a tab named after the peer already exists
@@ -1308,7 +1309,7 @@ impl PluginRuntime {
     /// words after the host to the remote shell as one line.
     pub(crate) fn peer_switch(&self, label: &str) -> PeerSwitch {
         match self.sessions.remote_target(label) {
-            Some((host, name)) => match self.radar.guest_pane(&name, &host) {
+            Some((host, name)) => match self.radar.remote_attach_pane(&name, &host) {
                 Some(pane_id) => PeerSwitch::ShowPane(pane_id),
                 None => PeerSwitch::Attach(
                     ["sh", "-c", REMOTE_ATTACH_SCRIPT, "zj-radar-attach", &self.own_session_name, label, &host, &name]

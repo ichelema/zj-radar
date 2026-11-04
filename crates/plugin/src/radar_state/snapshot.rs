@@ -12,12 +12,13 @@
 //! `RadarState`, which owns the stores; this module never learns there is more
 //! than one store.
 
+use crate::command::RemoteAttach;
 use crate::kind::Kind;
 use crate::ledger::{Ledger, LedgerEntry};
 use crate::observation::{ObservationOrigin, TrackedObservation};
 use crate::status::Status;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const RADAR_SNAPSHOT_V: u32 = 3;
 /// The pre-ledger record shape: identical wire format to v3 except the
@@ -47,6 +48,10 @@ struct RadarSnapshot {
     /// defaults to empty on load rather than rejecting the snapshot.
     #[serde(default)]
     ledger: Vec<LedgerEntry>,
+    /// `RadarState::remote_attach`, added within v3: an older record lacks
+    /// it and an older reader ignores it, so the version stays.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    remote_attach: BTreeMap<u32, RemoteAttach>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,19 +80,23 @@ struct LegacyPaneSnapshot {
 /// module needing to know which store an observation came from. `ledger` is
 /// this instance's own ring; it is unioned with the existing snapshot's ring
 /// (if any) via `Ledger::merge` so no instance's completions are lost on write.
+/// `remote_attach` replaces the existing record's map, never unions with it:
+/// every instance sees every `CommandChanged`, and a union would bring back
+/// an entry whose ssh has since exited.
 pub(crate) fn to_json<'a>(
     current: impl Iterator<Item = (u32, &'a TrackedObservation)>,
     live_panes: Option<&HashSet<u32>>,
     existing: Option<&str>,
     tick: u64,
     ledger: Vec<LedgerEntry>,
+    remote_attach: &HashMap<u32, RemoteAttach>,
 ) -> String {
     let mut snapshot_tick = tick;
     let mut observations: BTreeMap<(u32, ObservationOrigin), TrackedObservation> = BTreeMap::new();
     let mut merged_ledger = ledger;
 
     if let Some(raw) = existing {
-        if let Some((existing_observations, existing_tick, existing_ledger)) = load(raw) {
+        if let Some((existing_observations, existing_tick, existing_ledger, _)) = load(raw) {
             snapshot_tick = snapshot_tick.max(existing_tick);
             for (pane_id, observation) in existing_observations {
                 if live_panes.is_some_and(|live| !live.contains(&pane_id)) {
@@ -108,13 +117,14 @@ pub(crate) fn to_json<'a>(
         tick: snapshot_tick,
         observations: observations.into_iter().map(|((pane_id, _), obs)| SnapshotEntry { pane_id, obs }).collect(),
         ledger: merged_ledger,
+        remote_attach: remote_attach.iter().map(|(&id, target)| (id, target.clone())).collect(),
     };
     serde_json::to_string(&snapshot).unwrap_or_default()
 }
 
-/// Resolved observations, the snapshot tick, and the persisted ledger — what
-/// every version-specific loader hands back to `load`.
-type LoadedSnapshot = (Vec<(u32, TrackedObservation)>, u64, Vec<LedgerEntry>);
+/// Resolved observations, the snapshot tick, the persisted ledger, and the
+/// remote attach map — what every version-specific loader hands back to `load`.
+type LoadedSnapshot = (Vec<(u32, TrackedObservation)>, u64, Vec<LedgerEntry>, HashMap<u32, RemoteAttach>);
 
 /// Parse a snapshot string into resolved observations, the snapshot tick, and
 /// the persisted ledger. Dispatches on the `v` field: the current v3 record,
@@ -150,7 +160,7 @@ fn load_v3(snapshot: RadarSnapshot) -> Option<LoadedSnapshot> {
     // sourced string.
     let observations = snapshot.observations.into_iter().map(|entry| (entry.pane_id, entry.obs.sanitized())).collect();
     let ledger = snapshot.ledger.into_iter().map(LedgerEntry::sanitized).collect();
-    Some((observations, snapshot.tick, ledger))
+    Some((observations, snapshot.tick, ledger, snapshot.remote_attach.into_iter().collect()))
 }
 
 fn load_legacy_status(snapshot: LegacyStatusSnapshot) -> Option<LoadedSnapshot> {
@@ -182,5 +192,5 @@ fn load_legacy_status(snapshot: LegacyStatusSnapshot) -> Option<LoadedSnapshot> 
             )
         })
         .collect();
-    Some((observations, snapshot.tick, Vec::new()))
+    Some((observations, snapshot.tick, Vec::new(), HashMap::new()))
 }

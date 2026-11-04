@@ -1,7 +1,7 @@
 //! Session radar state: live tabs/panes plus source-specific observations.
 //! No zellij-tile dependency.
 
-use crate::command::{CommandStore, EpochSecs, Tick};
+use crate::command::{self, CommandStore, EpochSecs, RemoteAttach, Tick};
 use crate::config;
 use crate::ledger::{Ledger, LedgerEntry, LedgerOutcome};
 use crate::observation::{ObservationOrigin, TrackedObservation};
@@ -99,6 +99,7 @@ pub(crate) struct RawPane {
     pub default_fg: Option<String>,
     pub exited: bool,
     pub exit_status: Option<i32>,
+    pub terminal_command: Option<String>,
 }
 
 impl PaneUpdate {
@@ -137,11 +138,17 @@ impl PaneUpdate {
             }
             let mut title = p.title;
             payload::sanitize_in_place(&mut title, payload::MAX_TAB_NAME_CHARS);
+            // Zellij joins the command and its arguments with spaces, unquoted:
+            // re-split, as ssh re-splits a remote command anyway.
+            let remote = p.terminal_command.as_deref().filter(|_| !p.exited).and_then(|line| {
+                command::remote_attach_target(&line.split_whitespace().map(str::to_string).collect::<Vec<_>>())
+            });
             tab_panes.entry(p.tab_pos).or_default().push(TerminalPane {
                 id: p.id,
                 title,
                 focused_in_tab: p.is_focused,
                 floating: p.is_floating,
+                remote,
             });
             live.insert(p.id);
             if p.exited {
@@ -277,6 +284,11 @@ pub(crate) struct RadarState {
     /// entries drop on first absence, since a cwd is cheap to re-resolve if
     /// the pane flashes back.
     absent_once: HashMap<u32, Option<(TabId, String)>>,
+    /// Pane → the remote Zellij session its foreground command attaches to
+    /// (`ssh -t box zellij attach work` typed in a shell), from
+    /// `CommandChanged`. Persisted, so a rail loaded after the command started
+    /// still knows it; nothing `rows()` reads.
+    remote_attach: HashMap<u32, RemoteAttach>,
     /// Monotonic mutation counter over everything `rows()` reads — bumped by
     /// [`touch`](Self::touch) at every entry point that changed row-visible
     /// state. Two consumers: the [`rows`](Self::rows) memo below, and the
@@ -330,7 +342,7 @@ impl RadarState {
     }
 
     pub(crate) fn load_snapshot(&mut self, raw: &str) -> Option<u64> {
-        let (observations, tick, ledger) = snapshot::load(raw)?;
+        let (observations, tick, ledger, remote_attach) = snapshot::load(raw)?;
         // Touch only after the fallible parse: a corrupt snapshot changes
         // nothing rows-visible and must not bump the generation.
         self.touch();
@@ -358,6 +370,7 @@ impl RadarState {
             }
         }
         self.ledger.replace(ledger);
+        self.remote_attach = remote_attach;
         Some(tick)
     }
 
@@ -365,7 +378,7 @@ impl RadarState {
         // Both stores' observations carry their own `origin`, so the snapshot
         // module keys the merge on it — no need to tag the two iterators here.
         let current = self.status.observations().chain(self.command.observations());
-        snapshot::to_json(current, self.live_panes.as_ref(), existing, tick, self.ledger.to_vec())
+        snapshot::to_json(current, self.live_panes.as_ref(), existing, tick, self.ledger.to_vec(), &self.remote_attach)
     }
 
     /// Target tab position for an `attention-next`/`attention-prev` command, or
@@ -543,6 +556,7 @@ impl RadarState {
             if was_remote_running {
                 self.arm_flash(pane_id, tick);
             }
+            displaced_any |= self.remote_attach.remove(&pane_id).is_some();
             // A dead pane root is definitive producer death for the pushed
             // status too — the agent-rooted pane (`zellij run -- claude`)
             // never returns to a shell prompt, so this flag is its only
@@ -600,6 +614,9 @@ impl RadarState {
         self.ledger_receded(dropped_command, &prune_index, &status_tracked);
         self.pane_cwd.retain(|id, _| effective_live.contains(id));
         self.cwd_bootstrap_attempted.retain(|id| effective_live.contains(id));
+        let attached = self.remote_attach.len();
+        self.remote_attach.retain(|id, _| effective_live.contains(id));
+        let pruned_any = pruned_any || self.remote_attach.len() != attached;
         // Track this update's fresh focus for notification suppression. It no
         // longer drives rail state (no focus recede) — see `note_focus`. `settle`
         // still gates the notifier: `panes_changed` carries trustworthy focus, so
@@ -717,6 +734,17 @@ impl RadarState {
         if cleared {
             self.touch();
         }
+        // Every argv decides the entry anew, whatever the foreground flag: a
+        // pane created with `ssh … zellij attach x` reports it as a childless
+        // root (`false`), and a return to the shell drops it.
+        let target = command::remote_attach_target(command);
+        let attach_changed = self.remote_attach.get(&pane_id) != target.as_ref();
+        if attach_changed {
+            match target {
+                Some(target) => self.remote_attach.insert(pane_id, target),
+                None => self.remote_attach.remove(&pane_id),
+            };
+        }
         RadarChange {
             // `CommandChanged` is the chattiest event in the system, and this
             // handler only ever changes something rows-visible on the
@@ -726,8 +754,9 @@ impl RadarState {
             render: cleared,
             settle: false,
             // Persist only when we actually cleared, so a newly-opened tab
-            // rehydrates the idle from the snapshot rather than the stale status.
-            snapshot: SnapshotWrite::now_if(cleared),
+            // rehydrates the idle from the snapshot rather than the stale status,
+            // or when the pane's remote attach changed.
+            snapshot: SnapshotWrite::now_if(cleared || attach_changed),
             snapshot_pane: Some(pane_id),
             ..RadarChange::default()
         }
@@ -1064,31 +1093,20 @@ impl RadarState {
         self.tab_panes.get(&position).map(|panes| panes.iter().map(|p| p.id).collect()).unwrap_or_default()
     }
 
-    /// The local pane already showing remote session `session` as a nested
-    /// Zellij guest, found by content, not by tab name: its foreground is a
-    /// live remote session launcher (`Kind::Remote` Running, e.g. a bare
-    /// `ssh vps`; a Done one has left the guest behind), and
-    /// its title is the one Zellij's guest client writes to its terminal —
-    /// `<session> | <focused pane title>`, or `<session>` alone
-    /// (`zellij_utils::shared::make_terminal_title`). Among several, one
-    /// whose destination is `host` (sans `user@`) wins, then the leftmost tab.
-    pub(crate) fn guest_pane(&self, session: &str, host: &str) -> Option<u32> {
-        let prefix = format!("{session} | ");
-        let dest = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    /// The local pane already showing remote session `session` on `host`,
+    /// whatever its tab is called: the leftmost pane whose running command
+    /// attaches to exactly that session on exactly that destination
+    /// ([`command::remote_attach_target`]) — its own command
+    /// (`TerminalPane::remote`) or its shell's foreground one
+    /// (`remote_attach`). `None` sends the caller to a fresh attach.
+    pub(crate) fn remote_attach_pane(&self, session: &str, host: &str) -> Option<u32> {
+        let want = RemoteAttach { dest: command::remote_identity(host), session: session.to_string() };
         let mut tabs: Vec<_> = self.tab_panes.iter().collect();
         tabs.sort_unstable_by_key(|(pos, _)| **pos);
         tabs.into_iter()
             .flat_map(|(_, panes)| panes)
-            .filter(|p| p.title == session || p.title.starts_with(&prefix))
-            .filter_map(|p| {
-                self.command
-                    .get(p.id)
-                    .filter(|o| o.kind == crate::kind::Kind::Remote && o.status == Status::Running)
-                    .map(|o| (p.id, o))
-            })
-            // `false` sorts first, and `min_by_key` keeps the first of equals.
-            .min_by_key(|(_, o)| o.msg.split_once(' ').map(|(_, d)| d) != Some(dest))
-            .map(|(id, _)| id)
+            .find(|p| p.remote.as_ref() == Some(&want) || self.remote_attach.get(&p.id) == Some(&want))
+            .map(|p| p.id)
     }
 
     /// The STATUS-PIPE observation for `pane_id`, or `None` if the status

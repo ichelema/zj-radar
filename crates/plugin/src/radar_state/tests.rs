@@ -255,7 +255,7 @@ fn snapshot_load_scrubs_hostile_ledger_strings() {
     };
     let json =
         format!(r#"{{"v":3,"tick":1,"observations":[],"ledger":[{}]}}"#, serde_json::to_string(&hostile).unwrap());
-    let (_, _, ledger) = snapshot::load(&json).expect("valid snapshot");
+    let (_, _, ledger, _) = snapshot::load(&json).expect("valid snapshot");
     assert_eq!(ledger[0].tab_name, "evil tab");
     assert_eq!(ledger[0].label, "ab");
 }
@@ -276,7 +276,7 @@ fn snapshot_load_scrubs_hostile_observation_strings() {
     let mut entry = serde_json::to_value(&hostile).unwrap();
     entry["pane_id"] = 4.into();
     let json = format!(r#"{{"v":3,"tick":1,"observations":[{entry}]}}"#);
-    let (observations, _, _) = snapshot::load(&json).expect("valid snapshot");
+    let (observations, _, _, _) = snapshot::load(&json).expect("valid snapshot");
     let obs = &observations[0].1;
     assert_eq!(obs.repo, "repo");
     assert_eq!(obs.branch, "branch");
@@ -439,7 +439,8 @@ fn panes_changed_persists_only_on_exit_displace_or_prune() {
     // A Done sits on pane 7; the same topology re-reports with only a title
     // change — still nothing displaced or pruned.
     radar.status_mut().apply(payload_in_repo(7, Status::Done, "repo"), 2, 100);
-    let retitled = TerminalPane { floating: false, id: 7, title: "retitled".into(), focused_in_tab: true };
+    let retitled =
+        TerminalPane { floating: false, id: 7, title: "retitled".into(), focused_in_tab: true, remote: None };
     let change = radar.panes_changed(pane_update(HashMap::from([(0, vec![retitled])])), 3, 0, config::NamingMode::Off);
     assert!(change.snapshot != SnapshotWrite::Now, "title-only churn must not persist");
 
@@ -696,6 +697,47 @@ fn finished_command_pane_carries_outcome_through_rows() {
     let detail = row.display.detail.as_ref().unwrap();
     assert_eq!(detail.msg, "cargo build", "msg stays pure (tag is structural)");
     assert_eq!(detail.outcome, Some(ExitOutcome::Failed(Some(2))));
+}
+
+#[test]
+fn a_remote_attach_survives_the_snapshot_and_leaves_with_its_command_or_pane() {
+    let argv = |line: &str| line.split(' ').map(str::to_string).collect::<Vec<_>>();
+    let both = || pane_update(HashMap::from([(0, vec![pane(7), pane(8)])]));
+    let mut radar = RadarState::default();
+    radar.tabs_changed(vec![tab(10, 0, "anything", true)]);
+    radar.panes_changed(both(), 1, 0, config::NamingMode::Off);
+    let change = radar.command_changed(7, &argv("ssh -t vps zellij attach work"), true, 2);
+    assert!(change.snapshot == SnapshotWrite::Now, "a new attach persists at once");
+    let change = radar.command_changed(7, &argv("ssh -t vps zellij attach work"), true, 3);
+    assert!(change.snapshot != SnapshotWrite::Now, "the same attach again changes nothing");
+    radar.command_changed(8, &argv("ssh -t vps zellij attach other"), false, 3); // a childless command-pane root
+
+    // A rail loaded later finds both panes through the file.
+    let json = radar.snapshot_json(None, 3);
+    let mut late = RadarState::default();
+    late.load_snapshot(&json).unwrap();
+    late.set_tab_panes_for_position(0, vec![pane(7), pane(8)]);
+    assert_eq!(late.remote_attach_pane("work", "vps"), Some(7));
+    assert_eq!(late.remote_attach_pane("other", "vps"), Some(8));
+    assert_eq!(late.remote_attach_pane("work", "me@vps"), None, "another remote user is another peer");
+
+    // Back at the shell: the drop persists, and the existing file never unions it back.
+    let change = radar.command_changed(7, &argv("zsh"), true, 4);
+    assert!(change.snapshot == SnapshotWrite::Now);
+    late.load_snapshot(&radar.snapshot_json(Some(&json), 4)).unwrap();
+    assert_eq!(late.remote_attach_pane("work", "vps"), None);
+
+    // The pane's own command exits: the entry leaves with it, and that persists.
+    let exit = PaneUpdate { exits: vec![(8, Some(0))], ..both() };
+    assert!(radar.panes_changed(exit, 5, 0, config::NamingMode::Off).snapshot == SnapshotWrite::Now);
+    assert!(radar.remote_attach.is_empty());
+
+    // A closed pane keeps its entry through the one-manifest grace, then leaves.
+    radar.command_changed(7, &argv("ssh vps zellij a work"), true, 6);
+    radar.panes_changed(pane_update(HashMap::new()), 7, 0, config::NamingMode::Off);
+    assert!(radar.remote_attach.contains_key(&7), "a break-pane flash looks like this");
+    let change = radar.panes_changed(pane_update(HashMap::new()), 8, 0, config::NamingMode::Off);
+    assert!(change.snapshot == SnapshotWrite::Now && radar.remote_attach.is_empty());
 }
 
 #[test]
@@ -1404,7 +1446,7 @@ proptest! {
                     for (pos, ids) in layout {
                         let panes = ids
                             .iter()
-                            .map(|&id| TerminalPane { floating: false,
+                            .map(|&id| TerminalPane { floating: false, remote: None,
                                 id,
                                 title: format!("p{id}"),
                                 // Mark the drawn focus pane focused_in_tab. When the
@@ -1582,7 +1624,21 @@ fn raw_pane(id: u32, tab_pos: usize) -> RawPane {
         default_fg: None,
         exited: false,
         exit_status: None,
+        terminal_command: None,
     }
+}
+
+#[test]
+fn from_raw_reads_a_remote_attach_from_a_running_command_pane_only() {
+    let attach = Some("/usr/bin/ssh -t -- box zellij attach work".to_string());
+    let update = PaneUpdate::from_raw(vec![
+        RawPane { terminal_command: attach.clone(), ..raw_pane(1, 0) },
+        RawPane { terminal_command: attach, exited: true, ..raw_pane(2, 0) },
+        RawPane { terminal_command: Some("ssh box".into()), ..raw_pane(3, 0) },
+    ]);
+    let remote: Vec<_> = update.tab_panes[&0].iter().map(|p| p.remote.clone()).collect();
+    let work = RemoteAttach { dest: "box".into(), session: "work".into() };
+    assert_eq!(remote, [Some(work), None, None], "an exited command no longer shows the session");
 }
 
 #[test]
