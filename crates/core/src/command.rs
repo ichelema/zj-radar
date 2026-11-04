@@ -480,26 +480,27 @@ fn remote_destination(token: &str) -> String {
     }
 }
 
-/// Compact an `ssh`/`mosh`-family invocation into `"<exe> <destination>"` and
-/// report whether a remote command follows the destination —
-/// `ssh box cargo build` is bounded work (a `Job`, still a Command), while a
-/// bare `ssh box` is a live session (the `Remote` class). ssh's argv doesn't
-/// fit `ToolRule`'s columns: `first_non_option` would surface `2222` from
-/// `ssh -p 2222 prod-db`, since ssh's value-taking short options aren't
-/// modelled by that generic scan. Options keep being parsed AFTER the
-/// destination (OpenSSH re-enters getopt past the host; mosh's Getopt::Long
-/// accepts options anywhere), so `ssh prod-db -p 2222` is still a session:
-/// only the first post-destination non-option token starts the remote
-/// command, and `--` ends option parsing outright (everything after it is
-/// positional).
-fn display_remote(exe: &str, args: &[String]) -> (String, bool) {
-    // `mosh-client <ip> <port>` is the only two-positional-arg shape any
-    // DEFAULT_REMOTE exe takes: its second token is the port (the AES key rides
-    // an env var, never argv), never a remote command — so it never earns the
-    // Job treatment the way `ssh box cargo build`'s trailing words do.
-    let trailing_is_cmd = exe != "mosh-client";
+/// Where an `ssh`/`mosh`-family argv's destination and remote command sit:
+/// the option scan shared by [`display_remote`] and [`remote_attach_target`].
+struct RemoteArgv<'a> {
+    /// The first surviving non-option token, as written.
+    dest: Option<&'a str>,
+    /// Index into `args` of the second: the remote command's first word
+    /// (mosh-client's port, for that exe).
+    cmd_start: Option<usize>,
+}
+
+/// ssh's argv doesn't fit `ToolRule`'s columns: `first_non_option` would
+/// surface `2222` from `ssh -p 2222 prod-db`, since ssh's value-taking short
+/// options aren't modelled by that generic scan. Options keep being parsed
+/// AFTER the destination (OpenSSH re-enters getopt past the host; mosh's
+/// Getopt::Long accepts options anywhere), so `ssh prod-db -p 2222` is still
+/// a session: only the first post-destination non-option token starts the
+/// remote command, and `--` ends option parsing outright (everything after it
+/// is positional).
+fn scan_remote<'a>(exe: &str, args: &'a [String]) -> RemoteArgv<'a> {
     let value_opts = if exe == "autossh" { AUTOSSH_VALUE_OPTS } else { SSH_VALUE_OPTS };
-    let mut dest: Option<String> = None;
+    let mut scan = RemoteArgv { dest: None, cmd_start: None };
     let mut positional_only = false;
     let mut i = 0;
     while i < args.len() {
@@ -533,18 +534,31 @@ fn display_remote(exe: &str, args: &[String]) -> (String, bool) {
                 continue;
             }
         }
-        match dest {
-            // First surviving non-option token: the destination.
-            None => {
-                dest = Some(remote_destination(arg));
-                i += 1;
-            }
-            // Second: the remote command starts here (or mosh-client's port).
-            Some(d) => return (raw_display(&[exe, &d]), trailing_is_cmd),
+        if scan.dest.is_none() {
+            scan.dest = Some(arg);
+            i += 1;
+        } else {
+            scan.cmd_start = Some(i);
+            break;
         }
     }
-    match dest {
-        Some(d) => (raw_display(&[exe, &d]), false),
+    scan
+}
+
+/// Compact an `ssh`/`mosh`-family invocation into `"<exe> <destination>"` and
+/// report whether a remote command follows the destination —
+/// `ssh box cargo build` is bounded work (a `Job`, still a Command), while a
+/// bare `ssh box` is a live session (the `Remote` class). The argv grammar is
+/// [`scan_remote`]'s.
+fn display_remote(exe: &str, args: &[String]) -> (String, bool) {
+    // `mosh-client <ip> <port>` is the only two-positional-arg shape any
+    // DEFAULT_REMOTE exe takes: its second token is the port (the AES key rides
+    // an env var, never argv), never a remote command — so it never earns the
+    // Job treatment the way `ssh box cargo build`'s trailing words do.
+    let trailing_is_cmd = exe != "mosh-client";
+    let scan = scan_remote(exe, args);
+    match scan.dest {
+        Some(d) => (raw_display(&[exe, &remote_destination(d)]), trailing_is_cmd && scan.cmd_start.is_some()),
         None => (exe.to_string(), false),
     }
 }
