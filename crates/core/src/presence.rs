@@ -20,6 +20,15 @@ pub const MAX_PANES_PER_TAB: usize = 16;
 pub const MAX_LABEL_CHARS: usize = 96;
 pub const MAX_TOKEN_CHARS: usize = 24;
 
+/// Whether `s` reaches a shell command line unquoted without changing it:
+/// non-empty, only ASCII alphanumerics, `._-` and `extra`, and no leading
+/// `-` (an option).
+pub(crate) fn shell_inert(s: &str, extra: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with('-')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c) || extra.contains(c))
+}
+
 /// Current file schema version, written as `v`.
 pub const PRESENCE_VERSION: u32 = 1;
 
@@ -119,17 +128,12 @@ impl Presence {
         }
         let clean = |s: &str, max: usize| s == crate::payload::sanitize(s, max);
         // A hosted peer's host and name reach a remote shell: ssh joins the
-        // words after the destination into one command line. Only
-        // shell-inert characters pass, and no leading `-` (an option).
-        let inert = |s: &str, extra: &str| {
-            !s.starts_with('-')
-                && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c) || extra.contains(c))
-        };
+        // words after the destination into one command line.
         let ok = !p.session_name.is_empty()
             && clean(&p.session_name, MAX_SESSION_NAME_CHARS)
-            && p.host.as_deref().is_none_or(|h| {
-                !h.is_empty() && h.len() <= MAX_HOST_CHARS && inert(h, "@:") && inert(&p.session_name, "")
-            })
+            && p.host
+                .as_deref()
+                .is_none_or(|h| h.len() <= MAX_HOST_CHARS && shell_inert(h, "@:") && shell_inert(&p.session_name, ""))
             && p.tabs.iter().all(|tab| {
                 clean(&tab.name, MAX_LABEL_CHARS)
                     && tab.panes.iter().all(|pane| {
