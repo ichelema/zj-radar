@@ -3977,7 +3977,7 @@ fn a_mirrored_remote_peer_attaches_over_ssh_instead_of_switching() {
     let argv = rt.remote_attach_argv("vps/alpha").expect("the mirrored peer has an ssh target");
     let own = rt.own_session_name.clone();
     assert!(!own.is_empty());
-    let expected = ["zellij", "--session", own.as_str(), "action", "new-pane", "--name", "vps/alpha", "--"];
+    let expected = ["zellij", "--session", own.as_str(), "action", "new-tab", "--name", "vps/alpha", "--"];
     assert_eq!(argv[..expected.len()], expected.map(str::to_string));
     assert_eq!(argv[expected.len()..], ["ssh", "-t", "--", "vps", "zellij", "attach", "alpha"].map(str::to_string));
 }

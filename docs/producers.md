@@ -381,7 +381,7 @@ it, so such a session is not listed.
 | `updated_epoch_s` | When the content was last written. |
 | `tabs` | `[{position, name, panes}]`, one per tab. |
 | `panes[]` | `{pane_id, origin, kind, status, label}`: tracked panes only. `origin` is `"status"` (agent) or `"command"` (observed command); plain shells and editors are excluded. `pane_id` and `origin` are absent in pre-v1 files. |
-| `host` | Optional, never written by the plugin: an ssh destination (an alias or `user@host`, ≤ 64 chars) set by a mirror that copies another machine's presence files into this cache. The peer is listed as `host/session_name`, and clicking it opens a pane running `ssh -t -- <host> zellij attach <session_name>` instead of switching sessions. |
+| `host` | Optional, never written by the plugin: an ssh destination (an alias or `user@host`, ≤ 64 chars) set by a mirror that copies another machine's presence files into this cache. The peer is listed as `host/session_name`, and clicking it opens a tab running `ssh -t -- <host> zellij attach <session_name>` (a nested guest session; switch tab, or click the rail, to come back) instead of switching sessions. |
 
 Status-origin panes sort before commands, then the 16-pane cap applies. An
 agent's `label` is its sticky task (falling back to the agent kind); a

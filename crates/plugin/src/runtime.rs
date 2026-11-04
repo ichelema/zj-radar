@@ -1270,13 +1270,16 @@ impl PluginRuntime {
         self.project(vec![], RadarChange::default(), self.last_now_epoch_s)
     }
 
-    /// The argv that opens a pane attached to a mirrored remote peer (its
+    /// The argv that opens a tab attached to a mirrored remote peer (its
     /// presence carries a `host`), or `None` for a local peer, which
     /// `Effect::SwitchSession`'s `switch_session` serves. Goes through
-    /// `zellij action new-pane` under the `RunCommands` grant this plugin
+    /// `zellij action new-tab` under the `RunCommands` grant this plugin
     /// already holds, so no new permission (which would void every existing
-    /// grant) is needed. `--` before the host keeps a hostile presence file
-    /// from smuggling an ssh option.
+    /// grant) is needed. A tab, not a split: the remote Zellij is a nested
+    /// guest (0.45's `nested_session_handling`), and coming back is then a
+    /// tab switch, or a click on this rail — dimmed host chrome while the
+    /// guest has the input. `--` before the host keeps a hostile presence
+    /// file from smuggling an ssh option.
     pub(crate) fn remote_attach_argv(&self, label: &str) -> Option<Vec<String>> {
         let (host, name) = self.sessions.remote_target(label)?;
         let mut argv = vec!["zellij".to_string()];
@@ -1284,7 +1287,7 @@ impl PluginRuntime {
             argv.extend(["--session".to_string(), self.own_session_name.clone()]);
         }
         argv.extend(
-            ["action", "new-pane", "--name", label, "--", "ssh", "-t", "--", &host, "zellij", "attach", &name]
+            ["action", "new-tab", "--name", label, "--", "ssh", "-t", "--", &host, "zellij", "attach", &name]
                 .map(str::to_string),
         );
         Some(argv)
