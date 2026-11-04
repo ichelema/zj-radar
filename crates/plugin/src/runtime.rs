@@ -683,6 +683,14 @@ fn presence_label(pane: &crate::rollup::PaneDisplay) -> &str {
     }
 }
 
+/// `$1` own session name (may be empty), `$2` tab label, `$3` ssh host,
+/// `$4` remote session name. See `PluginRuntime::remote_attach_argv`.
+const REMOTE_ATTACH_SCRIPT: &str = "\
+own=$1; label=$2; host=$3; name=$4; \
+z() { if [ -n \"$own\" ]; then zellij --session \"$own\" \"$@\"; else zellij \"$@\"; fi; }; \
+if z action query-tab-names 2>/dev/null | grep -Fxq -- \"$label\"; then z action go-to-tab-name -- \"$label\"; \
+else z action new-tab --name \"$label\" -- ssh -t -- \"$host\" zellij attach \"$name\"; fi";
+
 impl PluginRuntime {
     pub(crate) fn load(
         &mut self,
@@ -1270,27 +1278,26 @@ impl PluginRuntime {
         self.project(vec![], RadarChange::default(), self.last_now_epoch_s)
     }
 
-    /// The argv that opens a tab attached to a mirrored remote peer (its
-    /// presence carries a `host`), or `None` for a local peer, which
-    /// `Effect::SwitchSession`'s `switch_session` serves. Goes through
-    /// `zellij action new-tab` under the `RunCommands` grant this plugin
-    /// already holds, so no new permission (which would void every existing
-    /// grant) is needed. A tab, not a split: the remote Zellij is a nested
-    /// guest (0.45's `nested_session_handling`), and coming back is then a
-    /// tab switch, or a click on this rail — dimmed host chrome while the
-    /// guest has the input. `--` before the host keeps a hostile presence
-    /// file from smuggling an ssh option.
+    /// The argv that brings up a mirrored remote peer (its presence carries a
+    /// `host`), or `None` for a local peer, which `Effect::SwitchSession`'s
+    /// `switch_session` serves. A `sh -c` script under the `RunCommands`
+    /// grant this plugin already holds (no new permission, which would void
+    /// every existing grant): if a tab named after the peer already exists
+    /// it is focused (`query-tab-names`, since `go-to-tab-name` exits 0 on
+    /// a miss), else a new tab runs `ssh -t -- <host> zellij attach <name>`.
+    /// A tab, not a split: the remote Zellij is a nested guest (0.45's
+    /// `nested_session_handling`), and coming back is then a tab switch, or
+    /// a click on this rail — dimmed host chrome while the guest has the
+    /// input. Every value rides a positional parameter, never the script
+    /// text, and `--` precedes the host so a hostile presence file can't
+    /// smuggle an ssh option.
     pub(crate) fn remote_attach_argv(&self, label: &str) -> Option<Vec<String>> {
         let (host, name) = self.sessions.remote_target(label)?;
-        let mut argv = vec!["zellij".to_string()];
-        if !self.own_session_name.is_empty() {
-            argv.extend(["--session".to_string(), self.own_session_name.clone()]);
-        }
-        argv.extend(
-            ["action", "new-tab", "--name", label, "--", "ssh", "-t", "--", &host, "zellij", "attach", &name]
-                .map(str::to_string),
-        );
-        Some(argv)
+        Some(
+            ["sh", "-c", REMOTE_ATTACH_SCRIPT, "zj-radar-attach", &self.own_session_name, label, &host, &name]
+                .map(str::to_string)
+                .to_vec(),
+        )
     }
 
     pub(crate) fn presences_changed(&mut self, raw: Vec<(String, u64)>) -> Outcome {

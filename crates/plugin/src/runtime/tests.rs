@@ -3968,6 +3968,7 @@ fn theme_switch_to_an_unusable_palette_falls_back() {
 
 #[test]
 fn a_mirrored_remote_peer_attaches_over_ssh_instead_of_switching() {
+    use std::os::unix::fs::PermissionsExt;
     let mut rt = runtime_with_granted_permission();
     rt.presences_changed(vec![
         fresh(r#"{"session_name":"alpha","running":0,"attention":0}"#),
@@ -3975,9 +3976,42 @@ fn a_mirrored_remote_peer_attaches_over_ssh_instead_of_switching() {
     ]);
     assert_eq!(rt.remote_attach_argv("alpha"), None, "a local peer stays on switch_session");
     let argv = rt.remote_attach_argv("vps/alpha").expect("the mirrored peer has an ssh target");
-    let own = rt.own_session_name.clone();
-    assert!(!own.is_empty());
-    let expected = ["zellij", "--session", own.as_str(), "action", "new-tab", "--name", "vps/alpha", "--"];
-    assert_eq!(argv[..expected.len()], expected.map(str::to_string));
-    assert_eq!(argv[expected.len()..], ["ssh", "-t", "--", "vps", "zellij", "attach", "alpha"].map(str::to_string));
+    assert_eq!(argv[0], "sh");
+    assert_eq!(&argv[4..], ["work", "vps/alpha", "vps", "alpha"].map(str::to_string));
+
+    // Run the script against a stub `zellij` that logs its argv and answers
+    // `query-tab-names` from a file, so both branches are exercised.
+    let dir = tempfile::TempDir::new().unwrap();
+    let log = dir.path().join("log");
+    let tabs = dir.path().join("tabs");
+    std::fs::write(
+        dir.path().join("zellij"),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\ncase \"$*\" in *query-tab-names*) cat {tabs};; esac\nexit 0\n",
+            log = log.display(),
+            tabs = tabs.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(dir.path().join("zellij"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut path = dir.path().as_os_str().to_owned();
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    let run = |existing: &str| {
+        std::fs::write(&tabs, existing).unwrap();
+        std::fs::write(&log, "").unwrap();
+        let status = std::process::Command::new(&argv[0]).args(&argv[1..]).env("PATH", &path).status().unwrap();
+        assert!(status.success());
+        std::fs::read_to_string(&log).unwrap()
+    };
+    assert_eq!(
+        run("Tab #1\n"),
+        "--session work action query-tab-names\n--session work action new-tab --name vps/alpha -- ssh -t -- vps zellij attach alpha\n",
+        "no such tab yet: open it"
+    );
+    assert_eq!(
+        run("Tab #1\nvps/alpha\n"),
+        "--session work action query-tab-names\n--session work action go-to-tab-name -- vps/alpha\n",
+        "the tab exists: focus it instead of opening a twin"
+    );
 }

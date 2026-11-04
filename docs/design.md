@@ -654,7 +654,8 @@ destination; the plugin never writes one) describes a session on another
 machine, copied into the cache by an external mirror. Its identity everywhere
 in `sessions.rs` is `Presence::label` (`host/session_name`), so a remote
 `work` and a local `work` stay two peers, and `Effect::SwitchSession` on it
-runs `zellij action new-tab --name <label> -- ssh -t -- <host> zellij attach <name>`
+focuses the tab named after the label when one is open, else runs
+`zellij action new-tab --name <label> -- ssh -t -- <host> zellij attach <name>`
 (`PluginRuntime::remote_attach_argv`, under the existing `RunCommands`
 grant) rather than `switch_session`, which would create an empty local
 session under that name. A tab rather than a split: the remote Zellij is a
