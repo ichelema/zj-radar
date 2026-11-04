@@ -4026,3 +4026,39 @@ fn a_mirrored_remote_peer_attaches_over_ssh_instead_of_switching() {
     rt.presences_changed(vec![fresh(r#"{"session_name":"alpha","running":0,"attention":0}"#)]);
     assert_eq!(rt.peer_switch("vps/alpha"), PeerSwitch::Gone, "a stale click on a vanished remote peer does nothing");
 }
+
+#[test]
+fn a_remote_peer_already_shown_by_a_local_pane_is_focused_whatever_its_tab_is_called() {
+    let mut rt = runtime_with_granted_permission();
+    rt.presences_changed(vec![fresh(r#"{"session_name":"alpha","running":0,"attention":0,"host":"me@vps"}"#)]);
+    let titled = |id: u32, title: &str| TerminalPane { title: title.into(), ..pane(id) };
+    // Tab 0: a nested guest reached through another host; tab 1: through
+    // `vps`; tab 2: a look-alike title on a pane that is not a remote session.
+    rt.radar.set_tab_panes_for_position(0, vec![titled(5, "alpha | me@other ~")]);
+    rt.radar.set_tab_panes_for_position(1, vec![titled(7, "alpha")]);
+    rt.radar.set_tab_panes_for_position(2, vec![titled(9, "alpha | local"), titled(11, "alphabet | x")]);
+    for (id, dest) in [(5, "other"), (7, "vps"), (11, "vps")] {
+        rt.command_changed(id, &["ssh".into(), dest.into()], true);
+    }
+    rt.command_changed(9, &["cargo".into(), "test".into()], true);
+    rt.timer_fast(PermissionProbe::default());
+    rt.timer_fast(PermissionProbe::default()); // promote (DEBOUNCE_TICKS=2)
+
+    assert_eq!(
+        rt.peer_switch("me@vps/alpha"),
+        PeerSwitch::ShowPane(7),
+        "the pane whose ssh destination is the host wins"
+    );
+    rt.command_changed(7, &["zsh".into()], true);
+    rt.timer_fast(PermissionProbe::default());
+    rt.timer_fast(PermissionProbe::default());
+    assert_eq!(
+        rt.peer_switch("me@vps/alpha"),
+        PeerSwitch::ShowPane(5),
+        "with no destination match, the leftmost guest pane; a non-remote look-alike and `alphabet` never match"
+    );
+    rt.command_changed(5, &["zsh".into()], true);
+    rt.timer_fast(PermissionProbe::default());
+    rt.timer_fast(PermissionProbe::default());
+    assert!(matches!(rt.peer_switch("me@vps/alpha"), PeerSwitch::Attach(_)), "no guest pane left: attach over ssh");
+}

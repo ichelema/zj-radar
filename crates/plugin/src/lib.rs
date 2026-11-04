@@ -295,6 +295,9 @@ impl State {
                         let args: Vec<&str> = argv.iter().map(String::as_str).collect();
                         run_command(&args, std::collections::BTreeMap::new());
                     }
+                    runtime::PeerSwitch::ShowPane(pane_id) => {
+                        show_pane_with_id(PaneId::Terminal(pane_id), false, true);
+                    }
                     runtime::PeerSwitch::Gone => {}
                     runtime::PeerSwitch::Local => match tab_position {
                         Some(pos) => switch_session_with_focus(&name, Some(pos), None),

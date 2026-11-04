@@ -1064,6 +1064,33 @@ impl RadarState {
         self.tab_panes.get(&position).map(|panes| panes.iter().map(|p| p.id).collect()).unwrap_or_default()
     }
 
+    /// The local pane already showing remote session `session` as a nested
+    /// Zellij guest, found by content, not by tab name: its foreground is a
+    /// live remote session launcher (`Kind::Remote` Running, e.g. a bare
+    /// `ssh vps`; a Done one has left the guest behind), and
+    /// its title is the one Zellij's guest client writes to its terminal —
+    /// `<session> | <focused pane title>`, or `<session>` alone
+    /// (`zellij_utils::shared::make_terminal_title`). Among several, one
+    /// whose destination is `host` (sans `user@`) wins, then the leftmost tab.
+    pub(crate) fn guest_pane(&self, session: &str, host: &str) -> Option<u32> {
+        let prefix = format!("{session} | ");
+        let dest = host.rsplit_once('@').map_or(host, |(_, h)| h);
+        let mut tabs: Vec<_> = self.tab_panes.iter().collect();
+        tabs.sort_unstable_by_key(|(pos, _)| **pos);
+        tabs.into_iter()
+            .flat_map(|(_, panes)| panes)
+            .filter(|p| p.title == session || p.title.starts_with(&prefix))
+            .filter_map(|p| {
+                self.command
+                    .get(p.id)
+                    .filter(|o| o.kind == crate::kind::Kind::Remote && o.status == Status::Running)
+                    .map(|o| (p.id, o))
+            })
+            // `false` sorts first, and `min_by_key` keeps the first of equals.
+            .min_by_key(|(_, o)| o.msg.split_once(' ').map(|(_, d)| d) != Some(dest))
+            .map(|(id, _)| id)
+    }
+
     /// The STATUS-PIPE observation for `pane_id`, or `None` if the status
     /// store isn't tracking it. Deliberately narrower than `resolve` (which
     /// also falls back to the command store): the pending-pane acknowledge
