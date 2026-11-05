@@ -882,7 +882,9 @@ impl RadarState {
     /// meant to (animation vs. a scheduled one-shot are different reasons to
     /// tick, and conflating them would blur what each predicate promises).
     pub(crate) fn needs_fast_ticks(&self) -> bool {
-        self.status.needs_ticks() || self.command.needs_ticks()
+        self.status.needs_ticks()
+            || self.command.needs_ticks()
+            || self.shown_guests().any(TrackedObservation::animating)
     }
 
     /// Some observation spins at full speed right now: animating
@@ -895,7 +897,16 @@ impl RadarState {
         let spinning = |o: &TrackedObservation| {
             o.animating() && now_tick.saturating_sub(o.last_change_tick) <= crate::render::EASE_AFTER_TICKS
         };
-        self.status.observations().any(|(_, o)| spinning(o)) || self.command.observations().any(|(_, o)| spinning(o))
+        self.status.observations().any(|(_, o)| spinning(o))
+            || self.command.observations().any(|(_, o)| spinning(o))
+            || self.shown_guests().any(spinning)
+    }
+
+    /// The remote sessions' views a live attached pane shows right now
+    /// (`guests` through `attach_of`): the ones whose spinners the cadence
+    /// must keep turning. A view no pane shows animates nothing.
+    fn shown_guests(&self) -> impl Iterator<Item = &TrackedObservation> {
+        self.tab_panes.values().flatten().filter_map(|p| self.guests.get(self.attach_of(p)?))
     }
 
     /// Apply the user's `interactive_commands` extras to the command store

@@ -4047,6 +4047,8 @@ fn a_pane_attached_to_a_remote_session_shows_that_sessions_agent() {
     rt.radar.set_tab_panes_for_position(0, vec![pane(17)]);
     let attach: Vec<String> = "ssh -t vps zellij attach alpha".split(' ').map(str::to_string).collect();
     rt.command_changed(17, &attach, true);
+    rt.timer_fast(PermissionProbe::default());
+    rt.timer_fast(PermissionProbe::default()); // past the debounce: the ssh row itself is steady
     let peer = |status: &str| {
         fresh(&format!(
             r#"{{"session_name":"alpha","running":0,"attention":1,"host":"vps","tabs":[{{"position":0,"name":"t","panes":[{{"origin":"status","kind":"claude","status":"{status}","label":"plan the day"}}]}}]}}"#
@@ -4068,6 +4070,12 @@ fn a_pane_attached_to_a_remote_session_shows_that_sessions_agent() {
     assert!(own.tabs[0].panes.is_empty(), "and published once, by the remote session");
 
     assert!(!rt.presences_changed(vec![peer("pending")]).render, "an unchanged view repaints nothing");
+    assert!(!rt.radar.needs_fast_ticks(), "a waiting remote agent animates nothing");
+    rt.presences_changed(vec![peer("running")]);
+    assert!(
+        rt.radar.needs_fast_ticks() && rt.radar.has_full_speed_spinner(rt.tick),
+        "a working remote agent keeps the spinner turning, like a local one"
+    );
     rt.presences_changed(vec![]);
     assert_ne!(
         rt.radar.rows(rt.tick)[0].display.panes[0].kind(),
