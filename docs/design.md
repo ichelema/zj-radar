@@ -684,7 +684,14 @@ the connection elsewhere (`-l`, `-p`, `-F`, `-o User|Port|HostName`, mosh's
 `--ssh`), when `attach --index` picks the session by position, when the
 remote command holds a quote, or when a wrapper runs the launcher (`sudo -A
 ssh` logs in as root). Any argv outside this grammar falls through to the
-tab name and then to a new attach tab, never to a guessed pane. The known miss is the two-step login
+tab name and then to a new attach tab, never to a guessed pane. The same match
+drives the attached pane's own row: in place of its ssh line it shows the
+remote session's most urgent published pane, an agent ahead of a command on
+equal status (`Sessions::guest_views`, `RadarState::set_guests`), and the tab
+takes that severity. The view is command-origin, so it never enters this
+session's own presence (counts or tree), carries no `✓`, and never notifies:
+the remote session is counted once, on its own badge line. It refreshes on
+each presence read. The known miss is the two-step login
 (`ssh box`, then `zellij attach work` inside it): the local argv names no
 session, and Zellij does not expose a nested guest's session name to
 plugins. The click lands on the guest's pane, not on the remote tab or pane a

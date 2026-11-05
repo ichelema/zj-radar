@@ -663,8 +663,10 @@ fn presence_counts(rows: &[TabRow]) -> (usize, usize, Option<usize>) {
 /// Interactive panes are noise), status-origin ahead of commands so agents
 /// are never truncated behind a tab full of builds, capped per tab. Shared by
 /// `own_presence` and its fingerprint so the two cannot drift.
-fn presence_panes(row: &TabRow) -> impl Iterator<Item = &crate::rollup::PaneDisplay> {
-    let tracked = || row.display.panes.iter().filter(|p| p.status().is_some());
+/// A pane showing a mirrored remote session's view is that session's to
+/// publish, not this one's (`RadarState::shows_guest`).
+fn presence_panes<'r>(row: &'r TabRow, radar: &'r RadarState) -> impl Iterator<Item = &'r crate::rollup::PaneDisplay> {
+    let tracked = || row.display.panes.iter().filter(|p| p.status().is_some() && !radar.shows_guest(p.pane_id()));
     tracked()
         .filter(|p| p.is_status_origin())
         .chain(tracked().filter(|p| !p.is_status_origin()))
@@ -1328,7 +1330,8 @@ impl PluginRuntime {
     pub(crate) fn presences_changed(&mut self, raw: Vec<(String, u64)>) -> Outcome {
         self.sessions.set_show_trees(self.config.session_tree);
         let update = self.sessions.update_presences(raw);
-        let change = RadarChange { render: update.changed, ..RadarChange::default() };
+        let guests_changed = self.radar.set_guests(self.sessions.guest_views(), self.tick);
+        let change = RadarChange { render: update.changed || guests_changed, ..RadarChange::default() };
         let mut out = self.project(vec![], change, self.last_now_epoch_s);
         for name in update.dead {
             out.effects.push(Effect::DismissPresence { name });
@@ -1363,7 +1366,7 @@ impl PluginRuntime {
                 .map(|row| PresenceTab {
                     position: row.tab_position(),
                     name: crate::payload::sanitize(&row.name, MAX_LABEL_CHARS),
-                    panes: presence_panes(row)
+                    panes: presence_panes(row, &self.radar)
                         .map(|pane| {
                             let status_origin = pane.is_status_origin();
                             PresencePane {
@@ -1404,7 +1407,7 @@ impl PluginRuntime {
         for (i, r) in rows.iter().enumerate() {
             if i < MAX_TABS {
                 (r.tab_position(), &r.name).hash(&mut h);
-                for pane in presence_panes(r) {
+                for pane in presence_panes(r, &self.radar) {
                     (pane.pane_id(), pane.is_status_origin(), pane.kind().as_source(), pane.render_status().as_wire())
                         .hash(&mut h);
                     presence_label(pane).hash(&mut h);

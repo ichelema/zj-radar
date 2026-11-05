@@ -111,7 +111,9 @@ title. It never overwrites a name you set by hand.
   up over ssh. The rail focuses the pane that already shows it, in any tab, or
   opens a tab attached to it. A pane counts when its command names the
   session: connect with `ssh -t <host> zellij attach <name>` in one line, not
-  `ssh <host>` followed by `zellij attach <name>`.
+  `ssh <host>` followed by `zellij attach <name>`. Such a pane's row shows the
+  remote session's most urgent agent and its status instead of the ssh line,
+  refreshed on each presence read (up to a minute while the rail is idle).
 - Right-click does nothing yet: Zellij does not deliver right-clicks to
   plugins ([zellij#5350](https://github.com/zellij-org/zellij/issues/5350)).
 

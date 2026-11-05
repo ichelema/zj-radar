@@ -565,7 +565,7 @@ fn scan_remote<'a>(exe: &str, args: &'a [String]) -> RemoteArgv<'a> {
 
 /// A remote Zellij session that an `ssh`/`mosh` argv attaches to
 /// ([`remote_attach_target`]).
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RemoteAttach {
     /// The destination exactly as written (`box`, `me@box`, `10.0.0.5`).
     pub dest: String,

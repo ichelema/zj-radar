@@ -33,7 +33,8 @@
 
 use std::collections::HashMap;
 
-use crate::presence::{Presence, PresenceTab};
+use crate::command::RemoteAttach;
+use crate::presence::{Presence, PresencePane, PresenceTab};
 use crate::radar_state::Direction;
 
 // Liveness thresholds are shared with the CLI's `state` command — see
@@ -223,6 +224,24 @@ impl Sessions {
         let before = self.badge();
         self.own = Some(p);
         self.badge() != before
+    }
+
+    /// Each fresh mirrored remote session's most urgent published pane, keyed
+    /// by its attach target: what a local pane attached to that session shows
+    /// in place of its ssh line (`RadarState::set_guests`). An agent outranks a
+    /// command on equal status; a session publishing no pane has no entry.
+    pub(crate) fn guest_views(&self) -> Vec<(RemoteAttach, &PresencePane)> {
+        self.peers
+            .iter()
+            .filter(|peer| !peer.stale())
+            .filter_map(|peer| {
+                let p = &peer.presence;
+                let pane = p.tabs.iter().flat_map(|tab| &tab.panes).max_by_key(|pane| {
+                    (crate::status::Status::from_wire(&pane.status), pane.origin.as_deref() == Some("status"))
+                })?;
+                Some((RemoteAttach { dest: p.host.clone()?, session: p.session_name.clone() }, pane))
+            })
+            .collect()
     }
 
     /// `(host, session_name)` of the peer whose label is `label` when it is
@@ -445,6 +464,36 @@ mod tests {
             ]}]
         });
         (json.to_string(), 0)
+    }
+
+    #[test]
+    fn guest_views_are_each_fresh_remote_sessions_most_urgent_pane() {
+        let hosted = |name: &str, panes: serde_json::Value, age: u64| {
+            let json = serde_json::json!({
+                "v": 1, "session_name": name, "running": 0, "attention": 0, "host": "vps",
+                "tabs": [{"position": 0, "name": "t", "panes": panes}]
+            });
+            (json.to_string(), age)
+        };
+        let pane = |origin: &str, kind: &str, status: &str, label: &str| serde_json::json!({"origin": origin, "kind": kind, "status": status, "label": label});
+        let mut s = Sessions::default();
+        s.update_presences(vec![
+            // Pending outranks running; an agent outranks a command on equal status.
+            hosted(
+                "work",
+                serde_json::json!([
+                    pane("status", "claude", "running", "a"),
+                    pane("command", "test", "pending", "cargo test"),
+                    pane("status", "codex", "pending", "b"),
+                ]),
+                0,
+            ),
+            hosted("idle", serde_json::json!([]), 0),
+            hosted("old", serde_json::json!([pane("status", "claude", "pending", "c")]), STALE_AFTER_SECS + 1),
+            peer_with_tree("local"),
+        ]);
+        let views: Vec<_> = s.guest_views().into_iter().map(|(t, p)| (t.dest, t.session, p.label.clone())).collect();
+        assert_eq!(views, [("vps".to_string(), "work".to_string(), "b".to_string())]);
     }
 
     #[test]

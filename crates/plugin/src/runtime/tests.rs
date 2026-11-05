@@ -4028,6 +4028,42 @@ fn a_mirrored_remote_peer_attaches_over_ssh_instead_of_switching() {
 }
 
 #[test]
+fn a_pane_attached_to_a_remote_session_shows_that_sessions_agent() {
+    let mut rt = runtime_with_granted_permission();
+    rt.tabs_changed(vec![tab(0, "local", true)]);
+    rt.radar.set_tab_panes_for_position(0, vec![pane(17)]);
+    let attach: Vec<String> = "ssh -t vps zellij attach alpha".split(' ').map(str::to_string).collect();
+    rt.command_changed(17, &attach, true);
+    let peer = |status: &str| {
+        fresh(&format!(
+            r#"{{"session_name":"alpha","running":0,"attention":1,"host":"vps","tabs":[{{"position":0,"name":"t","panes":[{{"origin":"status","kind":"claude","status":"{status}","label":"plan the day"}}]}}]}}"#
+        ))
+    };
+    assert!(rt.presences_changed(vec![peer("pending")]).render);
+
+    let rows = rt.radar.rows(rt.tick);
+    let display = &rows[0].display;
+    assert_eq!(display.status, Status::Pending, "the tab takes the remote agent's severity");
+    let shown = &display.panes[0];
+    assert_eq!(
+        (shown.pane_id(), shown.kind(), shown.status(), shown.msg()),
+        (17, crate::kind::Kind::Claude, Some(Status::Pending), "plan the day")
+    );
+    assert!(!shown.has_unacknowledged_status_pending(), "no ✓: the agent is not this session's to acknowledge");
+    let own = rt.own_presence();
+    assert_eq!((own.running, own.attention), (0, 0), "counted once, on the remote session's badge line");
+    assert!(own.tabs[0].panes.is_empty(), "and published once, by the remote session");
+
+    assert!(!rt.presences_changed(vec![peer("pending")]).render, "an unchanged view repaints nothing");
+    rt.presences_changed(vec![]);
+    assert_ne!(
+        rt.radar.rows(rt.tick)[0].display.panes[0].kind(),
+        crate::kind::Kind::Claude,
+        "no view: the ssh row is back"
+    );
+}
+
+#[test]
 fn a_remote_peer_is_focused_on_the_pane_whose_command_attaches_to_it() {
     let mut rt = runtime_with_granted_permission();
     rt.presences_changed(vec![fresh(r#"{"session_name":"alpha","running":0,"attention":0,"host":"me@vps"}"#)]);

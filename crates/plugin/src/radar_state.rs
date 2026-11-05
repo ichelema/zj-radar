@@ -290,6 +290,12 @@ pub(crate) struct RadarState {
     /// `CommandChanged`. Persisted, so a rail loaded after the command started
     /// still knows it; nothing `rows()` reads.
     remote_attach: HashMap<u32, RemoteAttach>,
+    /// Mirrored remote session → the observation a local pane attached to it
+    /// shows in place of its ssh line ([`set_guests`](Self::set_guests)).
+    /// Command-origin on purpose: it stays out of this session's own presence
+    /// counts, carries no `✓` acknowledge, and never notifies (the notifier
+    /// reads the stores only). Read by `rows()`.
+    guests: HashMap<RemoteAttach, TrackedObservation>,
     /// Monotonic mutation counter over everything `rows()` reads — bumped by
     /// [`touch`](Self::touch) at every entry point that changed row-visible
     /// state. Two consumers: the [`rows`](Self::rows) memo below, and the
@@ -732,9 +738,6 @@ impl RadarState {
             }
             false
         };
-        if cleared {
-            self.touch();
-        }
         // Every argv decides the entry anew, whatever the foreground flag: a
         // pane created with `ssh … zellij attach x` reports it as a childless
         // root (`false`), and a return to the shell drops it.
@@ -746,13 +749,18 @@ impl RadarState {
                 None => self.remote_attach.remove(&pane_id),
             };
         }
+        // An attach edge can swap the pane's row for a remote session's view.
+        if cleared || attach_changed {
+            self.touch();
+        }
         RadarChange {
             // `CommandChanged` is the chattiest event in the system, and this
             // handler only ever changes something rows-visible on the
             // prompt-return clear (a fresh foreground command mutates the
             // *pending* debounce maps; the row appears when the TIMER promotes
-            // it, and that tick renders). Repaint only on the clear.
-            render: cleared,
+            // it, and that tick renders). Repaint only on the clear, or on an
+            // attach edge (the pane may now show a remote session's view).
+            render: cleared || attach_changed,
             settle: false,
             // Persist only when we actually cleared, so a newly-opened tab
             // rehydrates the idle from the snapshot rather than the stale status,
@@ -1108,11 +1116,60 @@ impl RadarState {
         let want = RemoteAttach { dest: host.to_string(), session: session.to_string() };
         let mut tabs: Vec<_> = self.tab_panes.iter().collect();
         tabs.sort_unstable_by_key(|(pos, _)| **pos);
-        tabs.into_iter()
-            .flat_map(|(_, panes)| panes)
-            .filter(|p| !p.exited)
-            .find(|p| p.remote.as_ref() == Some(&want) || self.remote_attach.get(&p.id) == Some(&want))
-            .map(|p| p.id)
+        tabs.into_iter().flat_map(|(_, panes)| panes).find(|p| self.attach_of(p) == Some(&want)).map(|p| p.id)
+    }
+
+    /// The remote session a live pane's command attaches to: its own command
+    /// (`TerminalPane::remote`), else its shell's foreground one
+    /// (`remote_attach`). An exited pane attaches to nothing, whatever argv a
+    /// late `CommandChanged` left for it.
+    fn attach_of<'a>(&'a self, pane: &'a TerminalPane) -> Option<&'a RemoteAttach> {
+        (!pane.exited).then(|| pane.remote.as_ref().or_else(|| self.remote_attach.get(&pane.id))).flatten()
+    }
+
+    /// Whether pane `pane_id` shows a mirrored remote session's view
+    /// (`guests`) in place of its own observation.
+    pub(crate) fn shows_guest(&self, pane_id: u32) -> bool {
+        let pane = self.tab_panes.values().flatten().find(|p| p.id == pane_id);
+        pane.and_then(|p| self.attach_of(p)).is_some_and(|target| self.guests.contains_key(target))
+    }
+
+    /// Replace the remote sessions' views (`Sessions::guest_views`) that
+    /// attached panes show. A view whose status, kind and label are unchanged
+    /// keeps its `last_change_tick`, so its spinner phase does not restart.
+    /// Reports — and `touch`es on — a change only.
+    pub(crate) fn set_guests(&mut self, views: Vec<(RemoteAttach, &crate::presence::PresencePane)>, tick: u64) -> bool {
+        let guests: HashMap<RemoteAttach, TrackedObservation> = views
+            .into_iter()
+            .map(|(target, pane)| {
+                let (status, kind) = (Status::from_wire(&pane.status), crate::kind::Kind::from_source(&pane.kind));
+                let kept =
+                    self.guests.get(&target).filter(|o| o.status == status && o.kind == kind && o.msg == pane.label);
+                let observation = TrackedObservation {
+                    origin: ObservationOrigin::Command,
+                    status,
+                    repo: String::new(),
+                    branch: String::new(),
+                    msg: pane.label.clone(),
+                    task: String::new(),
+                    kind,
+                    last_change_tick: kept.map_or(tick, |o| o.last_change_tick),
+                    ever_active: true,
+                    exit_code: None,
+                    completed_epoch_s: None,
+                    pending_epoch_s: None,
+                    acknowledged: false,
+                    tasks: Default::default(),
+                };
+                (target, observation)
+            })
+            .collect();
+        let changed = guests != self.guests;
+        if changed {
+            self.guests = guests;
+            self.touch();
+        }
+        changed
     }
 
     /// The STATUS-PIPE observation for `pane_id`, or `None` if the status
@@ -1352,7 +1409,13 @@ impl RadarState {
     /// second lookup feeds the muted Interactive label from the command store's
     /// quiet pendings; `roll_up` owns the precedence between the two.
     fn tab_display(&self, panes: &[TerminalPane]) -> TabDisplay {
-        rollup::roll_up(panes, |id| self.resolve(id), |id| self.command.quiet_identity(id))
+        // A pane attached to a mirrored remote session shows that session's
+        // most urgent pane instead of its own ssh line (`guests`).
+        let guest = |id: u32| {
+            let pane = panes.iter().find(|p| p.id == id)?;
+            self.guests.get(self.attach_of(pane)?)
+        };
+        rollup::roll_up(panes, |id| guest(id).or_else(|| self.resolve(id)), |id| self.command.quiet_identity(id))
     }
 
     /// Roll a tab up by position, treating an absent pane list as no panes.
