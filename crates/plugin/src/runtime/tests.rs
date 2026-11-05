@@ -850,6 +850,19 @@ fn command_is_inert_without_permission() {
 }
 
 #[test]
+fn session_refresh_reads_the_peers_now_on_the_visible_rail_only() {
+    let reads = |out: &Outcome| out.effects.iter().filter(|e| matches!(e, Effect::ReadPresences)).count();
+    let mut ungranted = PluginRuntime { config: config(), ..Default::default() };
+    assert_eq!(reads(&ungranted.control_pipe("session-refresh")), 0);
+
+    let mut runtime = granted_runtime();
+    assert_eq!(reads(&runtime.control_pipe("session-refresh")), 1, "a mirror's nudge reads at once");
+    runtime.visibility_changed(false);
+    assert_eq!(reads(&runtime.control_pipe("session-refresh")), 0, "a hidden rail paints nothing anyway");
+    assert_eq!(reads(&runtime.visibility_changed(true)), 1, "so it reads on its reveal instead");
+}
+
+#[test]
 fn command_no_op_when_no_attention() {
     let mut runtime = granted_runtime();
     runtime.tabs_changed(vec![tab(0, "a", true)]);

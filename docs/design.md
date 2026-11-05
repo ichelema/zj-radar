@@ -706,7 +706,10 @@ already past `DEAD_AFTER_SECS`. Keep the copy lag under 15 s: a quiet
 session's own writes can be 75 s apart, and the fresh window is 90 s. Name the
 copies so they never collide with a local pid file
 (`zj-radar.presence.<prefix>-<pid>.json`), and write them through a temp name
-that does not end in `.json`.
+that does not end in `.json`. After a pass that copied anything, send
+`session-refresh` on `zj_radar.cmd.v1` to each local session: rails read peer
+files on their own scan, up to a Slow minute apart, so without the nudge a
+remote edge can wait that long after landing.
 
 **Single writer: the presence-writer token.** Content must come from the rail
 with the freshest topology, and that is the most recently active one: Zellij

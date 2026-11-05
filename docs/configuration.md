@@ -154,6 +154,12 @@ keybinds {
   after the last tap; landing back on your own session cancels. A committed
   switch lands on the target's attention tab if it has one. With only one
   session running these verbs do nothing.
+- `session-refresh` re-reads the other sessions' presence files at once,
+  instead of on the rail's next scan (up to a minute away on an idle rail).
+  It is meant for a script that copies presence files into the cache, such as
+  a mirror of another machine ([design.md](design.md) → *Mirrored remote
+  sessions*): `zellij --session <name> pipe --name zj_radar.cmd.v1 -- session-refresh`.
+  Only the visible rail reads; a rail coming back into view reads on its own.
 
 These binds broadcast too, for the reason above: in a session without a
 rail they do nothing.

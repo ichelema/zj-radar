@@ -1115,7 +1115,8 @@ impl PluginRuntime {
     /// deterministic target tab and emit `SwitchTab`; `SessionNext/Prev`
     /// advance the cross-session cycle selection (`Sessions::cycle`) and
     /// render the highlight move — the actual switch is a *later* idle-commit
-    /// (see `timer`), not an immediate effect here. Inert until permission is
+    /// (see `timer`), not an immediate effect here; `SessionRefresh` reads the
+    /// peers' presence files now. Inert until permission is
     /// granted, mirroring `mouse_click`: session switching is
     /// `ChangeApplicationState` territory, same as `SwitchTab`.
     ///
@@ -1136,10 +1137,8 @@ impl PluginRuntime {
         if !self.permission.granted() || self.hidden {
             return Outcome::none();
         }
-        let dir = match verb {
-            Verb::AttentionNext | Verb::SessionNext => Direction::Next,
-            Verb::AttentionPrev | Verb::SessionPrev => Direction::Prev,
-        };
+        let dir =
+            if matches!(verb, Verb::AttentionNext | Verb::SessionNext) { Direction::Next } else { Direction::Prev };
         match verb {
             Verb::AttentionNext | Verb::AttentionPrev => match self.radar.next_attention_tab(dir) {
                 Some(position) => Outcome::with_effects(false, vec![Effect::SwitchTab { position }]),
@@ -1155,6 +1154,7 @@ impl PluginRuntime {
                 self.arm_timer_if_needed(self.last_now_epoch_s, &mut effects);
                 Outcome::with_effects(render, effects)
             }
+            Verb::SessionRefresh => Outcome::with_effects(false, self.read_presences_now()),
         }
     }
 
@@ -1265,7 +1265,18 @@ impl PluginRuntime {
         // background tab counts as visible) deliberately does not claim here:
         // Zellij pairs it with a `TabUpdate`, whose claim covers it.
         let change = RadarChange { render: true, force_render: true, ..RadarChange::default() };
-        self.project(self.presence_claim(true), change, self.last_now_epoch_s)
+        // A hidden rail skips `session-refresh`, so a reveal reads the peers
+        // itself rather than show them as of its last scan.
+        let mut fx = self.presence_claim(true);
+        fx.extend(self.read_presences_now());
+        self.project(fx, change, self.last_now_epoch_s)
+    }
+
+    /// Read the peers' presence files now (`Effect::ReadPresences`), and
+    /// restart the decimated scan's interval from here.
+    fn read_presences_now(&mut self) -> Vec<Effect> {
+        self.last_presence_scan = Some(self.tick);
+        vec![Effect::ReadPresences]
     }
 
     /// A fresh read of every peer session's presence file, each paired with

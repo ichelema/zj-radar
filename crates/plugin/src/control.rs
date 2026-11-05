@@ -16,6 +16,9 @@ pub(crate) enum Verb {
     AttentionPrev,
     SessionNext,
     SessionPrev,
+    /// Re-read the peer sessions' presence files now: a script that copies
+    /// them into the cache (a mirror of another machine) says one landed.
+    SessionRefresh,
 }
 
 /// Parse a bare verb string. Trims surrounding whitespace; case-sensitive
@@ -26,6 +29,7 @@ pub(crate) fn parse(s: &str) -> Option<Verb> {
         "attention-prev" => Some(Verb::AttentionPrev),
         "session-next" => Some(Verb::SessionNext),
         "session-prev" => Some(Verb::SessionPrev),
+        "session-refresh" => Some(Verb::SessionRefresh),
         _ => None,
     }
 }
@@ -51,6 +55,7 @@ mod tests {
     fn session_cycle_verbs_parse() {
         assert_eq!(parse("session-next"), Some(Verb::SessionNext));
         assert_eq!(parse("session-prev"), Some(Verb::SessionPrev));
+        assert_eq!(parse("session-refresh"), Some(Verb::SessionRefresh));
     }
 
     /// docs/configuration.md is where users copy their `MessagePlugin`
