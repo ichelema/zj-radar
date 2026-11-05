@@ -756,8 +756,12 @@ fn classify(command: &[String]) -> (String, Kind) {
         // command is the Remote class (an interactive login, or a `-N -L`
         // tunnel). A raw display that collapsed to the bare exe found no
         // destination at all (`ssh` bare, `ssh -V`) — an ordinary command,
-        // not a session.
-        let kind = if raw == exe || has_remote_cmd { Kind::Command } else { Kind::Remote };
+        // not a session. A remote command that attaches to a Zellij session
+        // (`ssh -t box zellij attach work`) is a live session too.
+        // ponytail: an attach the argv cannot vouch for (`ssh -p 2222 box zellij a w`)
+        // still spins as a Job; a looser attach check would fix it if anyone hits it.
+        let bounded = has_remote_cmd && remote_attach_target(command).is_none();
+        let kind = if raw == exe || bounded { Kind::Command } else { Kind::Remote };
         return (sanitize(&raw, MAX_MSG_CHARS), kind);
     }
 

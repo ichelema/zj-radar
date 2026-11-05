@@ -117,6 +117,10 @@ fn classify_routes_remote_launchers_by_trailing_command() {
     // A trailing remote command is bounded work — a Job, still Kind::Command.
     assert_eq!(classify(&argv(&["ssh", "box", "cargo", "build"])).1, Kind::Command);
     assert_eq!(display(&argv(&["ssh", "box", "cargo", "build"])), "ssh box");
+    // ...unless it attaches to a remote Zellij session: that is a live session.
+    let attach = argv(&["ssh", "-t", "box", "zellij", "--layout", "remote", "attach", "--create", "work"]);
+    assert_eq!(classify(&attach), ("ssh box".to_string(), Kind::Remote));
+    assert_eq!(classify(&argv(&["ssh", "box", "zellij", "ls"])).1, Kind::Command);
 }
 
 /// Pin the display half of `classify` across every branch of the table-driven
