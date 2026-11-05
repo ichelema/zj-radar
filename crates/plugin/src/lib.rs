@@ -416,7 +416,23 @@ impl ZellijPlugin for State {
     }
 
     fn update(&mut self, event: Event) -> bool {
-        match event {
+        // Zellij 0.45 can drop the PermissionRequestResult of a grant it found
+        // in its cache while this plugin was still loading (a session created
+        // with `--create-background`), yet it does apply the grant: an event
+        // only `ReadApplicationState` delivers is that proof.
+        let reads_state = matches!(
+            event,
+            Event::ModeUpdate(_)
+                | Event::TabUpdate(_)
+                | Event::PaneUpdate(_)
+                | Event::CwdChanged(..)
+                | Event::CommandChanged(..)
+        );
+        let granted_now = reads_state && {
+            let outcome = self.runtime.permission_proven();
+            self.handle_outcome(outcome)
+        };
+        let render = match event {
             Event::TabUpdate(tabs) => {
                 let tabs = tabs
                     .into_iter()
@@ -510,22 +526,18 @@ impl ZellijPlugin for State {
                 let outcome = self.runtime.visibility_changed(visible);
                 self.handle_outcome(outcome)
             }
-            Event::CwdChanged(pane_id, path, _clients) => {
-                if let PaneId::Terminal(id) = pane_id {
-                    let outcome = self.runtime.cwd_changed(id, path.to_string_lossy().to_string());
-                    return self.handle_outcome(outcome);
-                }
-                false // plugin panes: nothing observed, nothing to repaint
+            Event::CwdChanged(PaneId::Terminal(id), path, _clients) => {
+                let outcome = self.runtime.cwd_changed(id, path.to_string_lossy().to_string());
+                self.handle_outcome(outcome)
             }
-            Event::CommandChanged(pane_id, command, is_foreground, _clients) => {
-                if let PaneId::Terminal(id) = pane_id {
-                    let outcome = self.runtime.command_changed(id, &command, is_foreground);
-                    return self.handle_outcome(outcome);
-                }
-                false // plugin panes: nothing observed, nothing to repaint
+            Event::CommandChanged(PaneId::Terminal(id), command, is_foreground, _clients) => {
+                let outcome = self.runtime.command_changed(id, &command, is_foreground);
+                self.handle_outcome(outcome)
             }
+            // Plugin panes' cwd and command: nothing observed, nothing to repaint.
             _ => false,
-        }
+        };
+        render || granted_now
     }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {

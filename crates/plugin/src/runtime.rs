@@ -1410,6 +1410,19 @@ impl PluginRuntime {
         Outcome::with_effects(true, effects)
     }
 
+    /// An event only `ReadApplicationState` delivers arrived. While our own
+    /// request is in flight that is the grant itself — Zellij 0.45 can drop
+    /// the `PermissionRequestResult` of a cached grant asked for during load —
+    /// so it resolves exactly as that result would (marker included, which
+    /// unblocks the session's other rails). Anything else: nothing to do.
+    pub(crate) fn permission_proven(&mut self) -> Outcome {
+        if self.permission.is_requesting() {
+            self.permission_result(true)
+        } else {
+            Outcome::none()
+        }
+    }
+
     pub(crate) fn cwd_changed(&mut self, pane_id: u32, path: String) -> Outcome {
         let change = self.radar.cwd_changed(pane_id, path, self.config.naming);
         self.project(vec![], change, crate::clock::now_epoch_s())

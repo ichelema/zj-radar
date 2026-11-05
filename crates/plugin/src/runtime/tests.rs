@@ -438,6 +438,36 @@ fn permission_result_persists_marker_and_updates_selectability() {
 }
 
 #[test]
+fn a_state_event_during_our_request_is_the_grant_and_nothing_else_is() {
+    // Zellij 0.45 can drop the PermissionRequestResult of a cached grant
+    // asked for during load; the first ReadApplicationState event proves it.
+    let mut requesting = PluginRuntime::default();
+    requesting.record_permission_request_started();
+    assert_eq!(requesting.permission_proven(), granted_result_from_requesting());
+    assert!(requesting.permission.granted());
+    assert_eq!(requesting.permission_proven(), Outcome::none(), "resolved once, then inert");
+
+    // Waiting on a peer's marker, or denied: such a rail gets no state event,
+    // and a stray call must not grant it.
+    let mut waiting = PluginRuntime::default();
+    waiting.load(config(), None, PermissionProbe { marker: None, lock_acquired: false });
+    assert_eq!(waiting.permission_proven(), Outcome::none());
+    assert!(waiting.permission.is_waiting());
+    let mut denied = PluginRuntime::default();
+    denied.load(config(), None, PermissionProbe { marker: Some(PermissionMarker::Denied), lock_acquired: false });
+    assert_eq!(denied.permission_proven(), Outcome::none());
+    assert!(denied.permission.denied());
+}
+
+/// What `permission_result(true)` hands back from `Requesting`: the proof
+/// must resolve exactly as the lost result would have.
+fn granted_result_from_requesting() -> Outcome {
+    let mut runtime = PluginRuntime::default();
+    runtime.record_permission_request_started();
+    runtime.permission_result(true)
+}
+
+#[test]
 fn timer_promotion_persists_snapshot_for_late_spawned_instances() {
     // A tick that promotes a debounced command to Running (or confirms a
     // Done) MUTATES the command store, so it must persist the shared
