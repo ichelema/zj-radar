@@ -140,7 +140,7 @@ impl PaneUpdate {
             payload::sanitize_in_place(&mut title, payload::MAX_TAB_NAME_CHARS);
             // Zellij joins the command and its arguments with spaces, unquoted:
             // re-split, as ssh re-splits a remote command anyway.
-            let remote = p.terminal_command.as_deref().filter(|_| !p.exited).and_then(|line| {
+            let remote = p.terminal_command.as_deref().and_then(|line| {
                 command::remote_attach_target(&line.split_whitespace().map(str::to_string).collect::<Vec<_>>())
             });
             tab_panes.entry(p.tab_pos).or_default().push(TerminalPane {
@@ -149,6 +149,7 @@ impl PaneUpdate {
                 focused_in_tab: p.is_focused,
                 floating: p.is_floating,
                 remote,
+                exited: p.exited,
             });
             live.insert(p.id);
             if p.exited {
@@ -757,7 +758,10 @@ impl RadarState {
             // rehydrates the idle from the snapshot rather than the stale status,
             // or when the pane's remote attach changed.
             snapshot: SnapshotWrite::now_if(cleared || attach_changed),
-            snapshot_pane: Some(pane_id),
+            // An attach edge is written by every instance: the pane's owner
+            // can be unnameable while the rails' topologies disagree, and a
+            // lost drop would leave the file pointing at a shell.
+            snapshot_pane: (!attach_changed).then_some(pane_id),
             ..RadarChange::default()
         }
     }
@@ -1094,17 +1098,19 @@ impl RadarState {
     }
 
     /// The local pane already showing remote session `session` on `host`,
-    /// whatever its tab is called: the leftmost pane whose running command
-    /// attaches to exactly that session on exactly that destination
-    /// ([`command::remote_attach_target`]) — its own command
+    /// whatever its tab is called: the leftmost live pane whose running
+    /// command attaches to exactly that session on exactly that destination
+    /// as written ([`command::remote_attach_target`]) — its own command
     /// (`TerminalPane::remote`) or its shell's foreground one
-    /// (`remote_attach`). `None` sends the caller to a fresh attach.
+    /// (`remote_attach`). An exited pane never counts, whatever argv a late
+    /// `CommandChanged` left for it. `None` sends the caller to a fresh attach.
     pub(crate) fn remote_attach_pane(&self, session: &str, host: &str) -> Option<u32> {
-        let want = RemoteAttach { dest: command::remote_identity(host), session: session.to_string() };
+        let want = RemoteAttach { dest: host.to_string(), session: session.to_string() };
         let mut tabs: Vec<_> = self.tab_panes.iter().collect();
         tabs.sort_unstable_by_key(|(pos, _)| **pos);
         tabs.into_iter()
             .flat_map(|(_, panes)| panes)
+            .filter(|p| !p.exited)
             .find(|p| p.remote.as_ref() == Some(&want) || self.remote_attach.get(&p.id) == Some(&want))
             .map(|p| p.id)
     }

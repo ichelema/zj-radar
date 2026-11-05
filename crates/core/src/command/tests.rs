@@ -1540,18 +1540,14 @@ fn remote_attach_target_reads_the_session_an_ssh_argv_attaches_to() {
     assert_eq!(target(&["ssh", "-t", "box", "zellij", "--session=work", "options", "--x", "y"]), work);
     // The remote command in one argument, as ssh joins and the far shell re-splits it.
     assert_eq!(target(&["ssh", "-t", "box", "zellij attach work"]), work);
-    assert_eq!(target(&["ssh", "-t", "box", "'zellij", "attach", "work'"]), work);
     assert_eq!(target(&["ssh", "-t", "box", "/usr/bin/zellij", "attach", "work"]), work);
-    // Launcher options, other launchers, and the rail's own attach tab.
-    assert_eq!(target(&["ssh", "-p", "2222", "-t", "box", "zellij", "attach", "work"]), work);
-    assert_eq!(target(&["ssh", "-t", "box", "-p", "2222", "zellij", "attach", "work"]), work);
+    // Launcher options that keep the target, other launchers, and the rail's own attach tab.
+    assert_eq!(target(&["ssh", "-4", "-C", "-o", "ServerAliveInterval=30", "-t", "box", "zellij", "a", "work"]), work);
     assert_eq!(target(&["autossh", "-M", "0", "-t", "box", "zellij", "attach", "work"]), work);
     assert_eq!(target(&["mosh", "box", "--", "zellij", "attach", "work"]), work);
-    assert_eq!(target(&["ssh", "-t", "--", "box", "zellij", "attach", "work"]), work);
-    assert_eq!(target(&["TERM=xterm", "/usr/bin/ssh", "-t", "box", "zellij", "attach", "work"]), work);
-    // The identity keeps `user@`, drops the port and the URI dressing.
+    assert_eq!(target(&["/usr/bin/ssh", "-t", "--", "box", "zellij", "attach", "work"]), work);
+    // The destination stays exactly as written.
     assert_eq!(target(&["ssh", "-t", "me@box", "zellij", "attach", "-c", "work"]), hit("me@box", "work"));
-    assert_eq!(target(&["ssh", "ssh://me@box:2222/", "zellij", "attach", "work"]), hit("me@box", "work"));
     assert_eq!(target(&["ssh", "me@10.0.0.5", "zellij", "attach", "my-work_2.0"]), hit("me@10.0.0.5", "my-work_2.0"));
 }
 
@@ -1575,11 +1571,34 @@ fn remote_attach_target_is_none_unless_the_argv_names_one_session_safely() {
     // An option this grammar does not know: never guess past it.
     none(&["ssh", "box", "zellij", "--unknown", "attach", "work"]);
     none(&["ssh", "box", "zellij", "attach", "-cb", "work"]);
-    // A remote user set by option: the destination no longer says whose sessions.
+    // `--index` picks a session by position, and wins over a name.
+    none(&["ssh", "box", "zellij", "attach", "--index", "1", "work"]);
+    none(&["ssh", "box", "zellij", "attach", "work", "--index", "1"]);
+    none(&["ssh", "box", "zellij", "attach", "--index=1", "work"]);
+    // An option that retargets the connection: the destination no longer
+    // says which user, port, host or ssh config the far end is.
     none(&["ssh", "-l", "root", "box", "zellij", "attach", "work"]);
-    none(&["ssh", "-lroot", "box", "zellij", "attach", "work"]);
+    none(&["ssh", "-tlroot", "box", "zellij", "attach", "work"]);
+    none(&["ssh", "box", "-l", "root", "zellij", "attach", "work"]);
     none(&["ssh", "-o", "User=root", "box", "zellij", "attach", "work"]);
     none(&["ssh", "-oUser root", "box", "zellij", "attach", "work"]);
+    none(&["ssh", "-o", "User\troot", "box", "zellij", "attach", "work"]);
+    none(&["ssh", "-o", " user root", "box", "zellij", "attach", "work"]);
+    none(&["ssh", "-p", "2202", "box", "zellij", "attach", "work"]);
+    none(&["ssh", "-p2202", "box", "zellij", "attach", "work"]);
+    none(&["ssh", "-o", "Port=2202", "box", "zellij", "attach", "work"]);
+    none(&["ssh", "-o", "HostName=other", "box", "zellij", "attach", "work"]);
+    none(&["ssh", "-F", "/tmp/cfg", "box", "zellij", "attach", "work"]);
+    none(&["mosh", "--ssh", "ssh -l root", "box", "--", "zellij", "attach", "work"]);
+    none(&["mosh", "--ssh=ssh -l root", "box", "--", "zellij", "attach", "work"]);
+    none(&["ssh", "ssh://me@box:2222/", "zellij", "attach", "work"]);
+    // A wrapper changes who connects: `sudo -A ssh` logs in as root.
+    none(&["sudo", "ssh", "box", "zellij", "attach", "work"]);
+    none(&["env", "ssh", "box", "zellij", "attach", "work"]);
+    // A quote groups words on the far shell: `'my work'` is one name.
+    none(&["ssh", "box", "zellij attach 'my work'"]);
+    none(&["ssh", "box", "zellij", "attach", "'my", "work'"]);
+    none(&["ssh", "-t", "box", "'zellij", "attach", "work'"]);
     // A name or host the shell would touch.
     none(&["ssh", "box", "zellij", "attach", "a;id"]);
     none(&["ssh", "box", "zellij", "attach", "$(id)"]);
@@ -1592,13 +1611,4 @@ fn remote_attach_target_is_none_unless_the_argv_names_one_session_safely() {
     none(&[]);
     // An unrelated `-o` still parses.
     assert!(remote_attach_target(&argv(&["ssh", "-o", "UserKnownHostsFile=x", "box", "zellij", "a", "w"])).is_some());
-}
-
-#[test]
-fn remote_identity_keeps_the_user_and_drops_the_port() {
-    assert_eq!(remote_identity("box"), "box");
-    assert_eq!(remote_identity("me@box"), "me@box");
-    assert_eq!(remote_identity("me@10.0.0.5:22"), "me@10.0.0.5");
-    assert_eq!(remote_identity("ssh://me@box:2222/x"), "me@box");
-    assert_eq!(remote_identity("[::1]:22"), "::1");
 }

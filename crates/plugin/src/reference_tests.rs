@@ -483,6 +483,7 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
                     title: p.msg.clone(),
                     focused_in_tab: false,
                     remote: None,
+                    exited: false,
                 }
             })
             .collect();
@@ -600,6 +601,7 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
                         title: p.msg.clone(),
                         focused_in_tab: false,
                         remote: None,
+                        exited: false,
                     }
                 })
                 .collect();

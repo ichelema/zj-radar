@@ -31,9 +31,10 @@ pub(crate) struct TerminalPane {
     /// A floating (not tiled) pane.
     pub floating: bool,
     /// The remote Zellij session this pane's own command attaches to
-    /// (`PaneInfo::terminal_command`, a pane created with a command), while
-    /// that command runs.
+    /// (`PaneInfo::terminal_command`, a pane created with a command).
     pub remote: Option<crate::command::RemoteAttach>,
+    /// `PaneInfo::exited`: the pane's own command has ended (a held pane).
+    pub exited: bool,
 }
 
 /// The one pane of a tab the user is actually in. Zellij reports focus per

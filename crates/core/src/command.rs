@@ -488,10 +488,15 @@ struct RemoteArgv<'a> {
     /// Index into `args` of the second: the remote command's first word
     /// (mosh-client's port, for that exe).
     cmd_start: Option<usize>,
-    /// An option set the remote user (`-l bob`, `-o User=bob`), so the
-    /// destination alone does not say whose sessions the far end lists.
-    sets_user: bool,
+    /// An option points the connection somewhere the destination as written
+    /// does not say: the remote user (`-l`, `-o User`), the port (`-p`,
+    /// `-o Port`), the host (`-o HostName`), the config file (`-F`), or
+    /// mosh's whole ssh command (`--ssh`).
+    retargets: bool,
 }
+
+/// The `-o` keys that move the connection off the destination as written.
+const RETARGET_KEYS: &[&str] = &["user", "port", "hostname"];
 
 /// ssh's argv doesn't fit `ToolRule`'s columns: `first_non_option` would
 /// surface `2222` from `ssh -p 2222 prod-db`, since ssh's value-taking short
@@ -503,7 +508,7 @@ struct RemoteArgv<'a> {
 /// is positional).
 fn scan_remote<'a>(exe: &str, args: &'a [String]) -> RemoteArgv<'a> {
     let value_opts = if exe == "autossh" { AUTOSSH_VALUE_OPTS } else { SSH_VALUE_OPTS };
-    let mut scan = RemoteArgv { dest: None, cmd_start: None, sets_user: false };
+    let mut scan = RemoteArgv { dest: None, cmd_start: None, retargets: false };
     let mut positional_only = false;
     let mut i = 0;
     while i < args.len() {
@@ -519,6 +524,7 @@ fn scan_remote<'a>(exe: &str, args: &'a [String]) -> RemoteArgv<'a> {
                 continue;
             }
             if arg.starts_with("--") {
+                scan.retargets |= split_inline(arg).0 == "--ssh";
                 i += if REMOTE_VALUE_LONG_OPTS.contains(&arg) { 2 } else { 1 };
                 continue;
             }
@@ -537,8 +543,10 @@ fn scan_remote<'a>(exe: &str, args: &'a [String]) -> RemoteArgv<'a> {
                     } else {
                         &rest[idx + c.len_utf8()..]
                     };
-                    let key = value.split(['=', ' ']).next().unwrap_or("");
-                    scan.sets_user |= c == 'l' || (c == 'o' && key.eq_ignore_ascii_case("user"));
+                    // ssh_config splits a key from its value on `=` or any whitespace.
+                    let key = value.trim_start().split(|c: char| c == '=' || c.is_ascii_whitespace()).next();
+                    let key_retargets = key.is_some_and(|k| RETARGET_KEYS.iter().any(|r| k.eq_ignore_ascii_case(r)));
+                    scan.retargets |= matches!(c, 'l' | 'p' | 'F') || (c == 'o' && key_retargets);
                 }
                 i += if takes_next { 2 } else { 1 };
                 continue;
@@ -559,7 +567,7 @@ fn scan_remote<'a>(exe: &str, args: &'a [String]) -> RemoteArgv<'a> {
 /// ([`remote_attach_target`]).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RemoteAttach {
-    /// The destination's [`remote_identity`].
+    /// The destination exactly as written (`box`, `me@box`, `10.0.0.5`).
     pub dest: String,
     /// The remote session's name.
     pub session: String,
@@ -575,55 +583,46 @@ const ZELLIJ_VALUE_OPTS: &[&str] = &[
     "--data-dir", "--max-panes", "--layout-string", "--server",
 ];
 const ZELLIJ_FLAGS: &[&str] = &["-d", "--debug"];
-/// `zellij attach`'s options that take a value, and its flags.
-const ATTACH_VALUE_OPTS: &[&str] = &["--index", "-t", "--token", "--ca-cert"];
+/// `zellij attach`'s options that take a value, and its flags. `--index`
+/// is not among them: [`attach_session`] refuses it outright.
+const ATTACH_VALUE_OPTS: &[&str] = &["-t", "--token", "--ca-cert"];
 const ATTACH_FLAGS: &[&str] = &[
     "-c", "--create", "-b", "--create-background", "-f", "--force-run-commands", "-r", "--remember", "--forget",
     "--insecure", "--close-on-exit", "--start-suspended",
 ];
-
-/// A destination as a remote peer's identity: [`remote_destination`]'s host
-/// with any `user@` kept, since Zellij sessions are per remote user — `box`
-/// and `root@box` list different sessions.
-pub fn remote_identity(token: &str) -> String {
-    let host = remote_destination(token);
-    let bare = token.strip_prefix("ssh://").unwrap_or(token);
-    match bare.split_once('/').map_or(bare, |(authority, _)| authority).rsplit_once('@') {
-        Some((user, _)) => format!("{user}@{host}"),
-        None => host,
-    }
-}
 
 /// The remote Zellij session an `ssh`/`autossh`/`mosh` argv attaches to,
 /// when its remote command is a `zellij` invocation that names one:
 /// `ssh -t box zellij attach work`, `ssh box zellij --layout x a -c work`,
 /// `ssh box zellij -s work`. ssh joins the words after the destination into
 /// one command line and the remote shell splits it again, so they are
-/// re-split on whitespace here, edge quotes dropped (`ssh box 'zellij a
-/// work'`). Anything outside this grammar — an unknown option, a remote user
-/// set by option, a name or host the shell would touch — is `None`: the
-/// caller then opens a fresh attach rather than guess a pane.
+/// re-split on whitespace here. Anything outside this grammar is `None`, and
+/// the caller opens a fresh attach rather than guess a pane: an unknown
+/// option, an option that retargets the connection ([`RemoteArgv`]), a quote
+/// in the remote command (the shell would group words), a name or host the
+/// shell would touch, or a wrapper (`sudo -A ssh` logs in as another user —
+/// the argv is read as Zellij reports it, never peeled).
 pub fn remote_attach_target(argv: &[String]) -> Option<RemoteAttach> {
-    let (command, exe) = effective_program(argv);
+    let (launcher, args) = argv.split_first()?;
+    let exe = program_name(launcher);
     if !ATTACH_LAUNCHERS.contains(&exe) {
         return None;
     }
-    let args = &command[1..];
     let scan = scan_remote(exe, args);
     let (dest, start) = (scan.dest?, scan.cmd_start?);
-    if scan.sets_user {
+    let line = args[start..].join(" ");
+    if scan.retargets || line.contains(['\'', '"']) {
         return None;
     }
-    let line = args[start..].join(" ");
-    let words: Vec<&str> = line.split_whitespace().map(|w| w.trim_matches(['\'', '"'])).collect();
+    let words: Vec<&str> = line.split_whitespace().collect();
     let (zellij, rest) = words.split_first()?;
     if basename(zellij) != "zellij" {
         return None;
     }
     let session = zellij_session(rest)?;
-    let dest = remote_identity(dest);
     let inert = crate::presence::shell_inert;
-    (inert(session, "") && inert(&dest, "@:")).then(|| RemoteAttach { dest, session: session.to_string() })
+    (inert(session, "") && inert(dest, "@:"))
+        .then(|| RemoteAttach { dest: dest.to_string(), session: session.to_string() })
 }
 
 /// Split `--opt=value` into the option and its inline value.
@@ -671,6 +670,10 @@ fn zellij_session<'a>(words: &[&'a str]) -> Option<&'a str> {
 /// `zellij attach`'s session argument: its first positional word, before
 /// `options` or `--` (the initial command).
 fn attach_session<'a>(args: &[&'a str]) -> Option<&'a str> {
+    // `--index` wins over a name wherever it sits.
+    if args.iter().any(|word| split_inline(word).0 == "--index") {
+        return None;
+    }
     let mut rest = args;
     while let Some((&word, tail)) = rest.split_first() {
         rest = tail;

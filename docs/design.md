@@ -670,18 +670,21 @@ The pane is found from the argv that opened the connection, never from a
 title or a tab name. `command::remote_attach_target` reads an `ssh`,
 `autossh` or `mosh` argv whose remote command is `zellij … attach|a <name>`
 or `zellij -s <name>`, with zellij 0.45's global and `attach` options, and
-with the remote command quoted as one argument. Two sources feed it: a pane
-created with the command (`PaneInfo::terminal_command`, until it exits), and
-a shell's foreground argv (`CommandChanged`, kept per pane in
-`RadarState::remote_attach`). An entry leaves on the return to the shell, on
-the pane's exit and on its close. It rides the session snapshot, so a rail
-loaded later knows it; a write replaces the file's map instead of merging it,
-so an exited ssh never comes back. The destination compares as written, with
-`user@` kept and the port dropped (`command::remote_identity`): `ssh box` and
-`ssh 10.0.0.5` are two hosts even when the ssh config maps one to the other,
-and an argv that sets the user by option (`-l`, `-o User=`) is not read. Any
-argv outside this grammar falls through to the tab name and then to a new
-attach tab, never to a guessed pane. The known miss is the two-step login
+with the remote command passed as one argument. Two sources feed it: a pane
+created with the command (`PaneInfo::terminal_command`), and a shell's
+foreground argv (`CommandChanged`, kept per pane in
+`RadarState::remote_attach`). An exited pane never matches. An entry leaves
+on the return to the shell, on the pane's exit and on its close. It rides the
+session snapshot, so a rail loaded later knows it; every instance writes an
+attach edge, and a write replaces the file's map instead of merging it, so an
+exited ssh never comes back. The destination compares exactly as written:
+`ssh box`, `ssh me@box` and `ssh 10.0.0.5` are three hosts even when the ssh
+config maps them to one machine. An argv is not read when an option points
+the connection elsewhere (`-l`, `-p`, `-F`, `-o User|Port|HostName`, mosh's
+`--ssh`), when `attach --index` picks the session by position, when the
+remote command holds a quote, or when a wrapper runs the launcher (`sudo -A
+ssh` logs in as root). Any argv outside this grammar falls through to the
+tab name and then to a new attach tab, never to a guessed pane. The known miss is the two-step login
 (`ssh box`, then `zellij attach work` inside it): the local argv names no
 session, and Zellij does not expose a nested guest's session name to
 plugins. The click lands on the guest's pane, not on the remote tab or pane a

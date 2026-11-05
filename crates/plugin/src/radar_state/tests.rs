@@ -439,8 +439,14 @@ fn panes_changed_persists_only_on_exit_displace_or_prune() {
     // A Done sits on pane 7; the same topology re-reports with only a title
     // change — still nothing displaced or pruned.
     radar.status_mut().apply(payload_in_repo(7, Status::Done, "repo"), 2, 100);
-    let retitled =
-        TerminalPane { floating: false, id: 7, title: "retitled".into(), focused_in_tab: true, remote: None };
+    let retitled = TerminalPane {
+        floating: false,
+        id: 7,
+        title: "retitled".into(),
+        focused_in_tab: true,
+        remote: None,
+        exited: false,
+    };
     let change = radar.panes_changed(pane_update(HashMap::from([(0, vec![retitled])])), 3, 0, config::NamingMode::Off);
     assert!(change.snapshot != SnapshotWrite::Now, "title-only churn must not persist");
 
@@ -738,6 +744,25 @@ fn a_remote_attach_survives_the_snapshot_and_leaves_with_its_command_or_pane() {
     assert!(radar.remote_attach.contains_key(&7), "a break-pane flash looks like this");
     let change = radar.panes_changed(pane_update(HashMap::new()), 8, 0, config::NamingMode::Off);
     assert!(change.snapshot == SnapshotWrite::Now && radar.remote_attach.is_empty());
+}
+
+#[test]
+fn an_exited_pane_never_shows_a_remote_session_whatever_argv_arrives_late() {
+    let argv = |line: &str| line.split(' ').map(str::to_string).collect::<Vec<_>>();
+    let attach = "ssh -t -- vps zellij attach work";
+    let command_pane = |exited: bool| {
+        let raw = RawPane { terminal_command: Some(attach.into()), exited, ..raw_pane(8, 0) };
+        PaneUpdate { exits: if exited { vec![(8, Some(0))] } else { Vec::new() }, ..PaneUpdate::from_raw(vec![raw]) }
+    };
+    let mut radar = RadarState::default();
+    radar.tabs_changed(vec![tab(10, 0, "anything", true)]);
+    radar.panes_changed(command_pane(false), 1, 0, config::NamingMode::Off);
+    let change = radar.command_changed(8, &argv(attach), false, 1);
+    assert_eq!(change.snapshot_pane, None, "an attach edge is written by every instance");
+    assert_eq!(radar.remote_attach_pane("work", "vps"), Some(8));
+    radar.panes_changed(command_pane(true), 2, 0, config::NamingMode::Off);
+    radar.command_changed(8, &argv(attach), false, 3); // the root's argv, reported after its exit
+    assert_eq!(radar.remote_attach_pane("work", "vps"), None, "a held pane shows no session");
 }
 
 #[test]
@@ -1446,7 +1471,7 @@ proptest! {
                     for (pos, ids) in layout {
                         let panes = ids
                             .iter()
-                            .map(|&id| TerminalPane { floating: false, remote: None,
+                            .map(|&id| TerminalPane { floating: false, remote: None, exited: false,
                                 id,
                                 title: format!("p{id}"),
                                 // Mark the drawn focus pane focused_in_tab. When the
@@ -1629,16 +1654,16 @@ fn raw_pane(id: u32, tab_pos: usize) -> RawPane {
 }
 
 #[test]
-fn from_raw_reads_a_remote_attach_from_a_running_command_pane_only() {
+fn from_raw_reads_a_command_panes_remote_attach_and_its_exit() {
     let attach = Some("/usr/bin/ssh -t -- box zellij attach work".to_string());
     let update = PaneUpdate::from_raw(vec![
         RawPane { terminal_command: attach.clone(), ..raw_pane(1, 0) },
         RawPane { terminal_command: attach, exited: true, ..raw_pane(2, 0) },
         RawPane { terminal_command: Some("ssh box".into()), ..raw_pane(3, 0) },
     ]);
-    let remote: Vec<_> = update.tab_panes[&0].iter().map(|p| p.remote.clone()).collect();
-    let work = RemoteAttach { dest: "box".into(), session: "work".into() };
-    assert_eq!(remote, [Some(work), None, None], "an exited command no longer shows the session");
+    let work = Some(RemoteAttach { dest: "box".into(), session: "work".into() });
+    let seen: Vec<_> = update.tab_panes[&0].iter().map(|p| (p.remote.clone(), p.exited)).collect();
+    assert_eq!(seen, [(work.clone(), false), (work, true), (None, false)]);
 }
 
 #[test]
