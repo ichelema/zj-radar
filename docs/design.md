@@ -315,6 +315,14 @@ peers wait on a marker and then request after Zellij has cached the answer.
 One prompt instead of one per tab. Without writable session files it degrades
 to every instance prompting. `setup zellij` normally pre-seeds the grant into
 `permissions.kdl` so no prompt appears at all ([`install.md`](install.md#permissions)).
+The elected instance does not rely on `PermissionRequestResult` alone: Zellij
+0.45 can drop that event for a cached grant requested while the plugin is
+still loading (reproducible with `attach --create-background`), while still
+applying the grant. The first event only `ReadApplicationState` delivers
+(`ModeUpdate`, `TabUpdate`, `PaneUpdate`, `CwdChanged`, `CommandChanged`)
+therefore resolves an in-flight request as granted and writes the marker
+(`PluginRuntime::permission_proven`). Without it that instance stayed on the
+needs-permission face, heartbeating the lock, and its peers waited forever.
 
 **Subscriptions.** `TabUpdate`, `PaneUpdate`, `CwdChanged`, `CommandChanged`,
 `Timer`, `Mouse`, `PermissionRequestResult`, `ModeUpdate` (carries
