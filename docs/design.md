@@ -655,17 +655,36 @@ machine, copied into the cache by an external mirror. Its identity everywhere
 in `sessions.rs` is `Presence::label` (`host/session_name`), so a remote
 `work` and a local `work` stay two peers. `Effect::SwitchSession` on it never
 calls `switch_session`, which would create an empty local session under that
-name (`PluginRuntime::peer_switch`). It focuses, in order: the local pane
-already showing the session, found by content, not by tab name
-(`RadarState::guest_pane`: a live `Kind::Remote` foreground whose title
-Zellij's nested client set to `<session> | …`, a destination equal to `host`
-preferred); else the tab named after the label; else it runs
+name (`PluginRuntime::peer_switch`). It focuses, in order: the leftmost local
+pane whose running command attaches to exactly that session on exactly that
+destination (`RadarState::remote_attach_pane`); else the tab named after the
+label; else it runs
 `zellij action new-tab --name <label> -- ssh -t -- <host> zellij attach <name>`
 under the existing `RunCommands` grant. A tab rather than a split: the remote
 Zellij is a nested guest, and the way back is a tab switch or a click on that
 tab's rail. ssh hands the words after the host to the remote shell as one
 line, so `Presence::parse` admits a hosted file only with a shell-inert host
-and name. The click lands on the guest's tab, not on the remote tab or pane a
+and name.
+
+The pane is found from the argv that opened the connection, never from a
+title or a tab name. `command::remote_attach_target` reads an `ssh`,
+`autossh` or `mosh` argv whose remote command is `zellij … attach|a <name>`
+or `zellij -s <name>`, with zellij 0.45's global and `attach` options, and
+with the remote command quoted as one argument. Two sources feed it: a pane
+created with the command (`PaneInfo::terminal_command`, until it exits), and
+a shell's foreground argv (`CommandChanged`, kept per pane in
+`RadarState::remote_attach`). An entry leaves on the return to the shell, on
+the pane's exit and on its close. It rides the session snapshot, so a rail
+loaded later knows it; a write replaces the file's map instead of merging it,
+so an exited ssh never comes back. The destination compares as written, with
+`user@` kept and the port dropped (`command::remote_identity`): `ssh box` and
+`ssh 10.0.0.5` are two hosts even when the ssh config maps one to the other,
+and an argv that sets the user by option (`-l`, `-o User=`) is not read. Any
+argv outside this grammar falls through to the tab name and then to a new
+attach tab, never to a guessed pane. The known miss is the two-step login
+(`ssh box`, then `zellij attach work` inside it): the local argv names no
+session, and Zellij does not expose a nested guest's session name to
+plugins. The click lands on the guest's pane, not on the remote tab or pane a
 tree row names, and two clicks faster than the new tab opens can open two
 (two clients on one remote session; nothing is lost).
 

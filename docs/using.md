@@ -109,7 +109,9 @@ title. It never overwrites a name you set by hand.
 - **Click a remote session** (`host/name`, copied from another machine by a
   mirror; see [design.md](design.md) → *Mirrored remote sessions*) to bring it
   up over ssh. The rail focuses the pane that already shows it, in any tab, or
-  opens a tab attached to it.
+  opens a tab attached to it. A pane counts when its command names the
+  session: connect with `ssh -t <host> zellij attach <name>` in one line, not
+  `ssh <host>` followed by `zellij attach <name>`.
 - Right-click does nothing yet: Zellij does not deliver right-clicks to
   plugins ([zellij#5350](https://github.com/zellij-org/zellij/issues/5350)).
 
