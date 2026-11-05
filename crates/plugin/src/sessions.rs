@@ -33,7 +33,8 @@
 
 use std::collections::HashMap;
 
-use crate::presence::{Presence, PresenceTab};
+use crate::command::RemoteAttach;
+use crate::presence::{Presence, PresencePane, PresenceTab};
 use crate::radar_state::Direction;
 
 // Liveness thresholds are shared with the CLI's `state` command — see
@@ -184,7 +185,7 @@ impl Sessions {
         let mut by_name: HashMap<String, Peer> = HashMap::new();
         for (json, age_secs) in raw {
             let Some(p) = Presence::parse(&json) else { continue };
-            match by_name.entry(p.session_name.clone()) {
+            match by_name.entry(p.label()) {
                 std::collections::hash_map::Entry::Occupied(kept)
                     if kept.get().presence.updated_epoch_s > p.updated_epoch_s => {} // existing is strictly fresher: keep it
                 std::collections::hash_map::Entry::Occupied(mut kept) => {
@@ -203,7 +204,7 @@ impl Sessions {
             .into_values()
             .filter(|p| {
                 if p.dead() {
-                    dead.push(p.presence.session_name.clone());
+                    dead.push(p.presence.label());
                 }
                 !p.dead()
             })
@@ -225,6 +226,32 @@ impl Sessions {
         self.badge() != before
     }
 
+    /// Each fresh mirrored remote session's most urgent published pane, keyed
+    /// by its attach target: what a local pane attached to that session shows
+    /// in place of its ssh line (`RadarState::set_guests`). An agent outranks a
+    /// command on equal status; a session publishing no pane has no entry.
+    pub(crate) fn guest_views(&self) -> Vec<(RemoteAttach, &PresencePane)> {
+        self.peers
+            .iter()
+            .filter(|peer| !peer.stale())
+            .filter_map(|peer| {
+                let p = &peer.presence;
+                let pane = p.tabs.iter().flat_map(|tab| &tab.panes).max_by_key(|pane| {
+                    (crate::status::Status::from_wire(&pane.status), pane.origin.as_deref() == Some("status"))
+                })?;
+                Some((RemoteAttach { dest: p.host.clone()?, session: p.session_name.clone() }, pane))
+            })
+            .collect()
+    }
+
+    /// `(host, session_name)` of the peer whose label is `label` when it is
+    /// a mirrored remote session (its presence carries a `host`); `None`
+    /// for a local peer, which `switch_session` serves.
+    pub(crate) fn remote_target(&self, label: &str) -> Option<(String, String)> {
+        let peer = self.peers.iter().find(|p| p.presence.label() == label)?;
+        Some((peer.presence.host.clone()?, peer.presence.session_name.clone()))
+    }
+
     /// Manually forget a peer by name — the in-memory half of the right-click
     /// dismiss gesture (`PluginRuntime::mouse_right_click`), the user-driven
     /// complement to the [`DEAD_AFTER_SECS`] auto-reap for a
@@ -243,7 +270,7 @@ impl Sessions {
     /// the other mutators here.
     pub(crate) fn dismiss(&mut self, name: &str) -> bool {
         let before = self.badge();
-        self.peers.retain(|p| p.presence.session_name != name);
+        self.peers.retain(|p| p.presence.label() != name);
         self.badge() != before
     }
 
@@ -269,7 +296,7 @@ impl Sessions {
         // same as "nothing selected" — restart below rather than advance
         // from a position it no longer occupies.
         let current_position =
-            self.selection.as_ref().and_then(|sel| selectable.iter().position(|s| s.presence.session_name == sel.name));
+            self.selection.as_ref().and_then(|sel| selectable.iter().position(|s| s.presence.label() == sel.name));
         self.selection = match (current_position, selectable.len()) {
             (_, 0) => None,
             (None, _) => {
@@ -277,7 +304,7 @@ impl Sessions {
                 // the first non-current entry (index 0 is the current
                 // session, when own is known).
                 selectable.iter().position(|s| !s.is_current).map(|index| SelectionState {
-                    name: selectable[index].presence.session_name.clone(),
+                    name: selectable[index].presence.label(),
                     taps_since_last_fire: true,
                 })
             }
@@ -286,10 +313,7 @@ impl Sessions {
                     Direction::Next => (index + 1) % len,
                     Direction::Prev => (index + len - 1) % len,
                 };
-                Some(SelectionState {
-                    name: selectable[next].presence.session_name.clone(),
-                    taps_since_last_fire: true,
-                })
+                Some(SelectionState { name: selectable[next].presence.label(), taps_since_last_fire: true })
             }
         };
         self.badge() != before
@@ -319,12 +343,12 @@ impl Sessions {
         let name = sel.name.clone();
         self.selection = None; // committing, cancelling, or dropping a vanished/staled selection all clear
         let order = self.ordered();
-        let entry = order.iter().find(|s| s.presence.session_name == name)?; // vanished session: nothing to commit
+        let entry = order.iter().find(|s| s.presence.label() == name)?; // vanished session: nothing to commit
         if entry.is_current || entry.stale {
             return None; // cancel gesture, or the selection lapsed into staleness before commit
         }
         Some(CommitTarget {
-            name: entry.presence.session_name.clone(),
+            name: entry.presence.label(),
             attention_tab_position: entry.presence.attention_tab_position,
         })
     }
@@ -339,12 +363,12 @@ impl Sessions {
         order
             .into_iter()
             .map(|s| BadgeEntry {
-                name: s.presence.session_name.clone(),
+                name: s.presence.label(),
                 running: s.presence.running,
                 attention: s.presence.attention,
                 attention_tab_position: s.presence.attention_tab_position,
                 is_current: s.is_current,
-                selected: selected_name == Some(s.presence.session_name.as_str()),
+                selected: selected_name == Some(s.presence.label().as_str()),
                 stale: s.stale,
                 // The current session's own tree never renders (its tabs are
                 // the local cards). Peer trees only when shown, agent panes
@@ -392,7 +416,7 @@ impl Sessions {
         let mut attention: Vec<OrderedEntry> = Vec::new();
         let mut rest: Vec<OrderedEntry> = Vec::new();
         let mut stale: Vec<OrderedEntry> = Vec::new();
-        let own_name = self.own.as_ref().map(|p| p.session_name.as_str());
+        let own_name = self.own.as_ref().map(Presence::label);
         for peer in &self.peers {
             // WHY: a peer presence sharing our own session's name is
             // necessarily either a stale corpse of this very session (pid-
@@ -403,7 +427,7 @@ impl Sessions {
             // (see its doc comment) — it must always win a name collision,
             // so the colliding peer is dropped outright rather than shown
             // as a second line for the same name.
-            if own_name == Some(peer.presence.session_name.as_str()) {
+            if own_name.as_deref() == Some(peer.presence.label().as_str()) {
                 continue;
             }
             let entry = OrderedEntry { presence: &peer.presence, is_current: false, stale: peer.stale() };
@@ -416,7 +440,7 @@ impl Sessions {
             }
         }
         fn by_name(a: &OrderedEntry<'_>, b: &OrderedEntry<'_>) -> std::cmp::Ordering {
-            a.presence.session_name.cmp(&b.presence.session_name)
+            a.presence.label().cmp(&b.presence.label())
         }
         attention.sort_by(by_name);
         rest.sort_by(by_name);
@@ -440,6 +464,36 @@ mod tests {
             ]}]
         });
         (json.to_string(), 0)
+    }
+
+    #[test]
+    fn guest_views_are_each_fresh_remote_sessions_most_urgent_pane() {
+        let hosted = |name: &str, panes: serde_json::Value, age: u64| {
+            let json = serde_json::json!({
+                "v": 1, "session_name": name, "running": 0, "attention": 0, "host": "vps",
+                "tabs": [{"position": 0, "name": "t", "panes": panes}]
+            });
+            (json.to_string(), age)
+        };
+        let pane = |origin: &str, kind: &str, status: &str, label: &str| serde_json::json!({"origin": origin, "kind": kind, "status": status, "label": label});
+        let mut s = Sessions::default();
+        s.update_presences(vec![
+            // Pending outranks running; an agent outranks a command on equal status.
+            hosted(
+                "work",
+                serde_json::json!([
+                    pane("status", "claude", "running", "a"),
+                    pane("command", "test", "pending", "cargo test"),
+                    pane("status", "codex", "pending", "b"),
+                ]),
+                0,
+            ),
+            hosted("idle", serde_json::json!([]), 0),
+            hosted("old", serde_json::json!([pane("status", "claude", "pending", "c")]), STALE_AFTER_SECS + 1),
+            peer_with_tree("local"),
+        ]);
+        let views: Vec<_> = s.guest_views().into_iter().map(|(t, p)| (t.dest, t.session, p.label.clone())).collect();
+        assert_eq!(views, [("vps".to_string(), "work".to_string(), "b".to_string())]);
     }
 
     #[test]
@@ -961,5 +1015,21 @@ mod tests {
         let changed = s.cycle(Direction::Next);
         assert!(!changed, "cycle with nothing to select must return false (no badge change)");
         assert!(!s.wants_fast_cadence(), "cycle with nothing to select must not set up a pending selection");
+    }
+
+    #[test]
+    fn remote_peer_is_its_own_identity_beside_a_local_namesake() {
+        let mut s = Sessions::default();
+        s.update_presences(vec![
+            presence("work", 1, 0),
+            (r#"{"session_name":"work","running":2,"attention":0,"host":"vps"}"#.to_string(), 0),
+        ]);
+        let names: Vec<String> = s.badge().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["vps/work".to_string(), "work".to_string()], "same name, two peers");
+        assert_eq!(s.remote_target("vps/work"), Some(("vps".to_string(), "work".to_string())));
+        assert_eq!(s.remote_target("work"), None, "a local peer has no ssh target");
+        assert!(s.dismiss("vps/work"));
+        let names: Vec<String> = s.badge().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["work".to_string()], "dismiss by label spares the local namesake");
     }
 }

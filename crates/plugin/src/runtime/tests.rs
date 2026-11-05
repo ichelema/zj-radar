@@ -850,6 +850,19 @@ fn command_is_inert_without_permission() {
 }
 
 #[test]
+fn session_refresh_reads_the_peers_now_on_the_visible_rail_only() {
+    let reads = |out: &Outcome| out.effects.iter().filter(|e| matches!(e, Effect::ReadPresences)).count();
+    let mut ungranted = PluginRuntime { config: config(), ..Default::default() };
+    assert_eq!(reads(&ungranted.control_pipe("session-refresh")), 0);
+
+    let mut runtime = granted_runtime();
+    assert_eq!(reads(&runtime.control_pipe("session-refresh")), 1, "a mirror's nudge reads at once");
+    runtime.visibility_changed(false);
+    assert_eq!(reads(&runtime.control_pipe("session-refresh")), 0, "a hidden rail paints nothing anyway");
+    assert_eq!(reads(&runtime.visibility_changed(true)), 1, "so it reads on its reveal instead");
+}
+
+#[test]
 fn command_no_op_when_no_attention() {
     let mut runtime = granted_runtime();
     runtime.tabs_changed(vec![tab(0, "a", true)]);
@@ -3964,4 +3977,139 @@ fn theme_switch_to_an_unusable_palette_falls_back() {
     let out = rt.mode_changed(Some("work".into()), crate::mode::Mode::Normal, None);
     assert!(out.render);
     assert_eq!(rt.theme, theme::DerivedColors::default());
+}
+
+#[test]
+fn a_mirrored_remote_peer_attaches_over_ssh_instead_of_switching() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut rt = runtime_with_granted_permission();
+    rt.presences_changed(vec![
+        fresh(r#"{"session_name":"alpha","running":0,"attention":0}"#),
+        fresh(r#"{"session_name":"alpha","running":0,"attention":0,"host":"vps"}"#),
+    ]);
+    assert_eq!(rt.peer_switch("alpha"), PeerSwitch::Local, "a local peer stays on switch_session");
+    let PeerSwitch::Attach(argv) = rt.peer_switch("vps/alpha") else { panic!("the mirrored peer has an ssh target") };
+    assert_eq!(argv[0], "sh");
+    assert_eq!(&argv[4..], ["work", "vps/alpha", "vps", "alpha"].map(str::to_string));
+
+    // Run the script against a stub `zellij` that logs its argv and answers
+    // `query-tab-names` from a file, so both branches are exercised.
+    let dir = tempfile::TempDir::new().unwrap();
+    let log = dir.path().join("log");
+    let tabs = dir.path().join("tabs");
+    std::fs::write(
+        dir.path().join("zellij"),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\ncase \"$*\" in *query-tab-names*) cat {tabs};; esac\nexit 0\n",
+            log = log.display(),
+            tabs = tabs.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(dir.path().join("zellij"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut path = dir.path().as_os_str().to_owned();
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    let run_argv = |argv: &[String], existing: &str| {
+        std::fs::write(&tabs, existing).unwrap();
+        std::fs::write(&log, "").unwrap();
+        let status = std::process::Command::new(&argv[0]).args(&argv[1..]).env("PATH", &path).status().unwrap();
+        assert!(status.success());
+        std::fs::read_to_string(&log).unwrap()
+    };
+    let run = |existing: &str| run_argv(&argv, existing);
+    assert_eq!(
+        run("Tab #1\n"),
+        "--session work action query-tab-names\n--session work action new-tab --name vps/alpha -- ssh -t -- vps zellij attach alpha\n",
+        "no such tab yet: open it"
+    );
+    assert_eq!(
+        run("Tab #1\nvps/alpha\n"),
+        "--session work action query-tab-names\n--session work action go-to-tab-name -- vps/alpha\n",
+        "the tab exists: focus it instead of opening a twin"
+    );
+    let mut nameless = argv.clone();
+    nameless[4] = String::new();
+    assert_eq!(
+        run_argv(&nameless, "Tab #1\n"),
+        "action query-tab-names\naction new-tab --name vps/alpha -- ssh -t -- vps zellij attach alpha\n",
+        "own session name not known yet: the bare `zellij action` targets the caller's session"
+    );
+
+    rt.presences_changed(vec![fresh(r#"{"session_name":"alpha","running":0,"attention":0}"#)]);
+    assert_eq!(rt.peer_switch("vps/alpha"), PeerSwitch::Gone, "a stale click on a vanished remote peer does nothing");
+}
+
+#[test]
+fn a_pane_attached_to_a_remote_session_shows_that_sessions_agent() {
+    let mut rt = runtime_with_granted_permission();
+    rt.tabs_changed(vec![tab(0, "local", true)]);
+    rt.radar.set_tab_panes_for_position(0, vec![pane(17)]);
+    let attach: Vec<String> = "ssh -t vps zellij attach alpha".split(' ').map(str::to_string).collect();
+    rt.command_changed(17, &attach, true);
+    rt.timer_fast(PermissionProbe::default());
+    rt.timer_fast(PermissionProbe::default()); // past the debounce: the ssh row itself is steady
+    let peer = |status: &str| {
+        fresh(&format!(
+            r#"{{"session_name":"alpha","running":0,"attention":1,"host":"vps","tabs":[{{"position":0,"name":"t","panes":[{{"origin":"status","kind":"claude","status":"{status}","label":"plan the day"}}]}}]}}"#
+        ))
+    };
+    assert!(rt.presences_changed(vec![peer("pending")]).render);
+
+    let rows = rt.radar.rows(rt.tick);
+    let display = &rows[0].display;
+    assert_eq!(display.status, Status::Pending, "the tab takes the remote agent's severity");
+    let shown = &display.panes[0];
+    assert_eq!(
+        (shown.pane_id(), shown.kind(), shown.status(), shown.msg()),
+        (17, crate::kind::Kind::Claude, Some(Status::Pending), "plan the day")
+    );
+    assert!(!shown.has_unacknowledged_status_pending(), "no ✓: the agent is not this session's to acknowledge");
+    let own = rt.own_presence();
+    assert_eq!((own.running, own.attention), (0, 0), "counted once, on the remote session's badge line");
+    assert!(own.tabs[0].panes.is_empty(), "and published once, by the remote session");
+
+    assert!(!rt.presences_changed(vec![peer("pending")]).render, "an unchanged view repaints nothing");
+    assert!(!rt.radar.needs_fast_ticks(), "a waiting remote agent animates nothing");
+    rt.presences_changed(vec![peer("running")]);
+    assert!(
+        rt.radar.needs_fast_ticks() && rt.radar.has_full_speed_spinner(rt.tick),
+        "a working remote agent keeps the spinner turning, like a local one"
+    );
+    rt.presences_changed(vec![]);
+    assert_ne!(
+        rt.radar.rows(rt.tick)[0].display.panes[0].kind(),
+        crate::kind::Kind::Claude,
+        "no view: the ssh row is back"
+    );
+}
+
+#[test]
+fn a_remote_peer_is_focused_on_the_pane_whose_command_attaches_to_it() {
+    let mut rt = runtime_with_granted_permission();
+    rt.presences_changed(vec![fresh(r#"{"session_name":"alpha","running":0,"attention":0,"host":"me@vps"}"#)]);
+    let argv = |line: &str| line.split(' ').map(str::to_string).collect::<Vec<_>>();
+    let click = |rt: &PluginRuntime| rt.peer_switch("me@vps/alpha");
+    // Tab 0: two steps (`ssh`, then the attach inside), the same session on
+    // another host, and as another user. Tabs 1 and 2: one-line attaches typed
+    // in a shell — the tab names play no part.
+    rt.radar.set_tab_panes_for_position(0, vec![pane(3), pane(5), pane(6)]);
+    rt.radar.set_tab_panes_for_position(1, vec![pane(7)]);
+    rt.radar.set_tab_panes_for_position(2, vec![pane(9)]);
+    rt.command_changed(3, &argv("ssh me@vps"), true);
+    rt.command_changed(5, &argv("ssh -t me@other zellij attach alpha"), true);
+    rt.command_changed(6, &argv("ssh -t vps zellij attach alpha"), true);
+    assert!(matches!(click(&rt), PeerSwitch::Attach(_)), "two steps, another host, another user: never a guess");
+    rt.command_changed(9, &argv("ssh -t me@vps zellij attach alpha"), true);
+    rt.command_changed(7, &argv("ssh -t me@vps zellij --layout remote attach --create alpha"), true);
+    assert_eq!(click(&rt), PeerSwitch::ShowPane(7), "no debounce wait, and the leftmost of two wins");
+    rt.command_changed(7, &argv("zsh"), true);
+    assert_eq!(click(&rt), PeerSwitch::ShowPane(9), "back at its shell, a pane no longer shows the session");
+    // A pane created with the attach as its own command (the rail's attach tab).
+    let remote = crate::command::remote_attach_target(&argv("/usr/bin/ssh -t -- me@vps zellij attach alpha"));
+    rt.radar.set_tab_panes_for_position(1, vec![TerminalPane { remote, ..pane(11) }]);
+    assert_eq!(click(&rt), PeerSwitch::ShowPane(11));
+    rt.radar.set_tab_panes_for_position(1, vec![]);
+    rt.radar.set_tab_panes_for_position(2, vec![]);
+    assert!(matches!(click(&rt), PeerSwitch::Attach(_)), "panes closed: attach over ssh");
 }

@@ -649,6 +649,68 @@ truncates over-cap content and rejects the whole file if any field fails to
 survive `payload::sanitize` unchanged. `zj-radar state` is why the tree is
 unconditional: it is a public read surface, and `session_tree` is display-only.
 
+**Mirrored remote sessions.** A presence file carrying `host` (an ssh
+destination; the plugin never writes one) describes a session on another
+machine, copied into the cache by an external mirror. Its identity everywhere
+in `sessions.rs` is `Presence::label` (`host/session_name`), so a remote
+`work` and a local `work` stay two peers. `Effect::SwitchSession` on it never
+calls `switch_session`, which would create an empty local session under that
+name (`PluginRuntime::peer_switch`). It focuses, in order: the leftmost local
+pane whose running command attaches to exactly that session on exactly that
+destination (`RadarState::remote_attach_pane`); else the tab named after the
+label; else it runs
+`zellij action new-tab --name <label> -- ssh -t -- <host> zellij attach <name>`
+under the existing `RunCommands` grant. A tab rather than a split: the remote
+Zellij is a nested guest, and the way back is a tab switch or a click on that
+tab's rail. ssh hands the words after the host to the remote shell as one
+line, so `Presence::parse` admits a hosted file only with a shell-inert host
+and name.
+
+The pane is found from the argv that opened the connection, never from a
+title or a tab name. `command::remote_attach_target` reads an `ssh`,
+`autossh` or `mosh` argv whose remote command is `zellij … attach|a <name>`
+or `zellij -s <name>`, with zellij 0.45's global and `attach` options, and
+with the remote command passed as one argument. Two sources feed it: a pane
+created with the command (`PaneInfo::terminal_command`), and a shell's
+foreground argv (`CommandChanged`, kept per pane in
+`RadarState::remote_attach`). An exited pane never matches. An entry leaves
+on the return to the shell, on the pane's exit and on its close. It rides the
+session snapshot, so a rail loaded later knows it; every instance writes an
+attach edge, and a write replaces the file's map instead of merging it, so an
+exited ssh never comes back. The destination compares exactly as written:
+`ssh box`, `ssh me@box` and `ssh 10.0.0.5` are three hosts even when the ssh
+config maps them to one machine. An argv is not read when an option points
+the connection elsewhere (`-l`, `-p`, `-F`, `-o User|Port|HostName`, mosh's
+`--ssh`), when `attach --index` picks the session by position, when the
+remote command holds a quote, or when a wrapper runs the launcher (`sudo -A
+ssh` logs in as root). Any argv outside this grammar falls through to the
+tab name and then to a new attach tab, never to a guessed pane. The same match
+drives the attached pane's own row: in place of its ssh line it shows the
+remote session's most urgent published pane, an agent ahead of a command on
+equal status (`Sessions::guest_views`, `RadarState::set_guests`), and the tab
+takes that severity. The view is command-origin, so it never enters this
+session's own presence (counts or tree), carries no `✓`, and never notifies:
+the remote session is counted once, on its own badge line. It refreshes on
+each presence read. The known miss is the two-step login
+(`ssh box`, then `zellij attach work` inside it): the local argv names no
+session, and Zellij does not expose a nested guest's session name to
+plugins. The click lands on the guest's pane, not on the remote tab or pane a
+tree row names, and two clicks faster than the new tab opens can open two
+(two clients on one remote session; nothing is lost).
+
+The mirror's contract follows from liveness riding the file mtime. Keep each
+copy's mtime equal to the remote file's. Copy a file only when its remote
+mtime changed since the last copy, so a `✕` dismiss or the dead-reap, which
+unlink the local copy, stick until the remote session writes again. Skip files
+already past `DEAD_AFTER_SECS`. Keep the copy lag under 15 s: a quiet
+session's own writes can be 75 s apart, and the fresh window is 90 s. Name the
+copies so they never collide with a local pid file
+(`zj-radar.presence.<prefix>-<pid>.json`), and write them through a temp name
+that does not end in `.json`. After a pass that copied anything, send
+`session-refresh` on `zj_radar.cmd.v1` to each local session: rails read peer
+files on their own scan, up to a Slow minute apart, so without the nudge a
+remote edge can wait that long after landing.
+
 **Single writer: the presence-writer token.** Content must come from the rail
 with the freshest topology, and that is the most recently active one: Zellij
 sends `TabUpdate`/`PaneUpdate` only to the active tab's plugins, so a hidden
@@ -745,7 +807,7 @@ only moves the highlight and sets a "tap landed" flag; `Sessions::tick` runs
 on every timer fire while a selection is pending, and a fire whose interval
 saw a tap clears the flag and skips. Only a fire whose whole interval was
 tap-free commits, so the commit lands at least one quiet interval after the
-last tap. The target is re-resolved by session name, never list position, so
+last tap. The target is re-resolved by label (the session name, or `host/name`), never list position, so
 peers joining or leaving mid-cycle cannot retarget it; a selection that went
 stale is dropped. Landing back on the current session cancels. A commit emits
 `Effect::SwitchSession { name, tab_position }`.

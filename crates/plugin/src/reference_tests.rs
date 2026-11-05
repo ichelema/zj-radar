@@ -477,7 +477,14 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
             .iter()
             .map(|p| {
                 live.insert(p.pane_id);
-                TerminalPane { floating: false, id: p.pane_id, title: p.msg.clone(), focused_in_tab: false }
+                TerminalPane {
+                    floating: false,
+                    id: p.pane_id,
+                    title: p.msg.clone(),
+                    focused_in_tab: false,
+                    remote: None,
+                    exited: false,
+                }
             })
             .collect();
         if !terminal_panes.is_empty() {
@@ -588,7 +595,14 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
                 .iter()
                 .map(|p| {
                     live2.insert(p.pane_id);
-                    TerminalPane { floating: false, id: p.pane_id, title: p.msg.clone(), focused_in_tab: false }
+                    TerminalPane {
+                        floating: false,
+                        id: p.pane_id,
+                        title: p.msg.clone(),
+                        focused_in_tab: false,
+                        remote: None,
+                        exited: false,
+                    }
                 })
                 .collect();
             if !terminal_panes.is_empty() {

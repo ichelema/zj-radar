@@ -480,26 +480,35 @@ fn remote_destination(token: &str) -> String {
     }
 }
 
-/// Compact an `ssh`/`mosh`-family invocation into `"<exe> <destination>"` and
-/// report whether a remote command follows the destination —
-/// `ssh box cargo build` is bounded work (a `Job`, still a Command), while a
-/// bare `ssh box` is a live session (the `Remote` class). ssh's argv doesn't
-/// fit `ToolRule`'s columns: `first_non_option` would surface `2222` from
-/// `ssh -p 2222 prod-db`, since ssh's value-taking short options aren't
-/// modelled by that generic scan. Options keep being parsed AFTER the
-/// destination (OpenSSH re-enters getopt past the host; mosh's Getopt::Long
-/// accepts options anywhere), so `ssh prod-db -p 2222` is still a session:
-/// only the first post-destination non-option token starts the remote
-/// command, and `--` ends option parsing outright (everything after it is
-/// positional).
-fn display_remote(exe: &str, args: &[String]) -> (String, bool) {
-    // `mosh-client <ip> <port>` is the only two-positional-arg shape any
-    // DEFAULT_REMOTE exe takes: its second token is the port (the AES key rides
-    // an env var, never argv), never a remote command — so it never earns the
-    // Job treatment the way `ssh box cargo build`'s trailing words do.
-    let trailing_is_cmd = exe != "mosh-client";
+/// Where an `ssh`/`mosh`-family argv's destination and remote command sit:
+/// the option scan shared by [`display_remote`] and [`remote_attach_target`].
+struct RemoteArgv<'a> {
+    /// The first surviving non-option token, as written.
+    dest: Option<&'a str>,
+    /// Index into `args` of the second: the remote command's first word
+    /// (mosh-client's port, for that exe).
+    cmd_start: Option<usize>,
+    /// An option points the connection somewhere the destination as written
+    /// does not say: the remote user (`-l`, `-o User`), the port (`-p`,
+    /// `-o Port`), the host (`-o HostName`), the config file (`-F`), or
+    /// mosh's whole ssh command (`--ssh`).
+    retargets: bool,
+}
+
+/// The `-o` keys that move the connection off the destination as written.
+const RETARGET_KEYS: &[&str] = &["user", "port", "hostname"];
+
+/// ssh's argv doesn't fit `ToolRule`'s columns: `first_non_option` would
+/// surface `2222` from `ssh -p 2222 prod-db`, since ssh's value-taking short
+/// options aren't modelled by that generic scan. Options keep being parsed
+/// AFTER the destination (OpenSSH re-enters getopt past the host; mosh's
+/// Getopt::Long accepts options anywhere), so `ssh prod-db -p 2222` is still
+/// a session: only the first post-destination non-option token starts the
+/// remote command, and `--` ends option parsing outright (everything after it
+/// is positional).
+fn scan_remote<'a>(exe: &str, args: &'a [String]) -> RemoteArgv<'a> {
     let value_opts = if exe == "autossh" { AUTOSSH_VALUE_OPTS } else { SSH_VALUE_OPTS };
-    let mut dest: Option<String> = None;
+    let mut scan = RemoteArgv { dest: None, cmd_start: None, retargets: false };
     let mut positional_only = false;
     let mut i = 0;
     while i < args.len() {
@@ -515,6 +524,7 @@ fn display_remote(exe: &str, args: &[String]) -> (String, bool) {
                 continue;
             }
             if arg.starts_with("--") {
+                scan.retargets |= split_inline(arg).0 == "--ssh";
                 i += if REMOTE_VALUE_LONG_OPTS.contains(&arg) { 2 } else { 1 };
                 continue;
             }
@@ -525,26 +535,182 @@ fn display_remote(exe: &str, args: &[String]) -> (String, bool) {
                 // that letter is last (`-p`, `-4p`), the NEXT token is. Letters
                 // before it (`-4`, `-C`) are plain flags.
                 let rest = &arg[1..];
-                let takes_next = rest
-                    .char_indices()
-                    .find(|(_, c)| value_opts.contains(c))
-                    .is_some_and(|(idx, c)| idx + c.len_utf8() == rest.len());
+                let value_opt = rest.char_indices().find(|(_, c)| value_opts.contains(c));
+                let takes_next = value_opt.is_some_and(|(idx, c)| idx + c.len_utf8() == rest.len());
+                if let Some((idx, c)) = value_opt {
+                    let value = if takes_next {
+                        args.get(i + 1).map_or("", String::as_str)
+                    } else {
+                        &rest[idx + c.len_utf8()..]
+                    };
+                    // ssh_config splits a key from its value on `=` or any whitespace.
+                    let key = value.trim_start().split(|c: char| c == '=' || c.is_ascii_whitespace()).next();
+                    let key_retargets = key.is_some_and(|k| RETARGET_KEYS.iter().any(|r| k.eq_ignore_ascii_case(r)));
+                    scan.retargets |= matches!(c, 'l' | 'p' | 'F') || (c == 'o' && key_retargets);
+                }
                 i += if takes_next { 2 } else { 1 };
                 continue;
             }
         }
-        match dest {
-            // First surviving non-option token: the destination.
-            None => {
-                dest = Some(remote_destination(arg));
-                i += 1;
-            }
-            // Second: the remote command starts here (or mosh-client's port).
-            Some(d) => return (raw_display(&[exe, &d]), trailing_is_cmd),
+        if scan.dest.is_none() {
+            scan.dest = Some(arg);
+            i += 1;
+        } else {
+            scan.cmd_start = Some(i);
+            break;
         }
     }
-    match dest {
-        Some(d) => (raw_display(&[exe, &d]), false),
+    scan
+}
+
+/// A remote Zellij session that an `ssh`/`mosh` argv attaches to
+/// ([`remote_attach_target`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct RemoteAttach {
+    /// The destination exactly as written (`box`, `me@box`, `10.0.0.5`).
+    pub dest: String,
+    /// The remote session's name.
+    pub session: String,
+}
+
+/// The launchers whose argv can carry a remote `zellij attach`. `mosh-client`
+/// takes no command and `et` passes one through `-c`: out of scope.
+const ATTACH_LAUNCHERS: &[&str] = &["ssh", "autossh", "mosh"];
+
+/// zellij 0.45's global options that take a value, and its global flags.
+const ZELLIJ_VALUE_OPTS: &[&str] = &[
+    "-s", "--session", "-l", "--layout", "-n", "--new-session-with-layout", "-c", "--config", "--config-dir",
+    "--data-dir", "--max-panes", "--layout-string", "--server",
+];
+const ZELLIJ_FLAGS: &[&str] = &["-d", "--debug"];
+/// `zellij attach`'s options that take a value, and its flags. `--index`
+/// is not among them: [`attach_session`] refuses it outright.
+const ATTACH_VALUE_OPTS: &[&str] = &["-t", "--token", "--ca-cert"];
+const ATTACH_FLAGS: &[&str] = &[
+    "-c", "--create", "-b", "--create-background", "-f", "--force-run-commands", "-r", "--remember", "--forget",
+    "--insecure", "--close-on-exit", "--start-suspended",
+];
+
+/// The remote Zellij session an `ssh`/`autossh`/`mosh` argv attaches to,
+/// when its remote command is a `zellij` invocation that names one:
+/// `ssh -t box zellij attach work`, `ssh box zellij --layout x a -c work`,
+/// `ssh box zellij -s work`. ssh joins the words after the destination into
+/// one command line and the remote shell splits it again, so they are
+/// re-split on whitespace here. Anything outside this grammar is `None`, and
+/// the caller opens a fresh attach rather than guess a pane: an unknown
+/// option, an option that retargets the connection ([`RemoteArgv`]), a quote
+/// in the remote command (the shell would group words), a name or host the
+/// shell would touch, or a wrapper (`sudo -A ssh` logs in as another user —
+/// the argv is read as Zellij reports it, never peeled).
+pub fn remote_attach_target(argv: &[String]) -> Option<RemoteAttach> {
+    let (launcher, args) = argv.split_first()?;
+    let exe = program_name(launcher);
+    if !ATTACH_LAUNCHERS.contains(&exe) {
+        return None;
+    }
+    let scan = scan_remote(exe, args);
+    let (dest, start) = (scan.dest?, scan.cmd_start?);
+    let line = args[start..].join(" ");
+    if scan.retargets || line.contains(['\'', '"']) {
+        return None;
+    }
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let (zellij, rest) = words.split_first()?;
+    if basename(zellij) != "zellij" {
+        return None;
+    }
+    let session = zellij_session(rest)?;
+    let inert = crate::presence::shell_inert;
+    (inert(session, "") && inert(dest, "@:"))
+        .then(|| RemoteAttach { dest: dest.to_string(), session: session.to_string() })
+}
+
+/// Split `--opt=value` into the option and its inline value.
+fn split_inline(word: &str) -> (&str, Option<&str>) {
+    word.split_once('=').map_or((word, None), |(opt, value)| (opt, Some(value)))
+}
+
+/// The session a `zellij` invocation's words (after `zellij`) name: `attach`'s
+/// (or `a`'s) session argument, or `-s NAME` with no subcommand (or with
+/// `options`).
+fn zellij_session<'a>(words: &[&'a str]) -> Option<&'a str> {
+    let mut named = None;
+    let mut rest = words;
+    while let Some((&word, tail)) = rest.split_first() {
+        if !word.starts_with('-') {
+            break;
+        }
+        rest = tail;
+        let (opt, inline) = split_inline(word);
+        if inline.is_none() && ZELLIJ_FLAGS.contains(&opt) {
+            continue;
+        }
+        if !ZELLIJ_VALUE_OPTS.contains(&opt) {
+            return None;
+        }
+        let value = match inline {
+            Some(value) => value,
+            None => {
+                let (&value, tail) = rest.split_first()?;
+                rest = tail;
+                value
+            }
+        };
+        if matches!(opt, "-s" | "--session") {
+            named = Some(value);
+        }
+    }
+    match rest.split_first() {
+        None | Some((&"options", _)) => named,
+        Some((&("attach" | "a"), args)) => attach_session(args),
+        Some(_) => None,
+    }
+}
+
+/// `zellij attach`'s session argument: its first positional word, before
+/// `options` or `--` (the initial command).
+fn attach_session<'a>(args: &[&'a str]) -> Option<&'a str> {
+    // `--index` wins over a name wherever it sits.
+    if args.iter().any(|word| split_inline(word).0 == "--index") {
+        return None;
+    }
+    let mut rest = args;
+    while let Some((&word, tail)) = rest.split_first() {
+        rest = tail;
+        if word == "--" || word == "options" {
+            return None;
+        }
+        if !word.starts_with('-') {
+            return Some(word);
+        }
+        let (opt, inline) = split_inline(word);
+        if inline.is_none() && ATTACH_FLAGS.contains(&opt) {
+            continue;
+        }
+        if !ATTACH_VALUE_OPTS.contains(&opt) {
+            return None;
+        }
+        if inline.is_none() {
+            rest = rest.split_first()?.1;
+        }
+    }
+    None
+}
+
+/// Compact an `ssh`/`mosh`-family invocation into `"<exe> <destination>"` and
+/// report whether a remote command follows the destination —
+/// `ssh box cargo build` is bounded work (a `Job`, still a Command), while a
+/// bare `ssh box` is a live session (the `Remote` class). The argv grammar is
+/// [`scan_remote`]'s.
+fn display_remote(exe: &str, args: &[String]) -> (String, bool) {
+    // `mosh-client <ip> <port>` is the only two-positional-arg shape any
+    // DEFAULT_REMOTE exe takes: its second token is the port (the AES key rides
+    // an env var, never argv), never a remote command — so it never earns the
+    // Job treatment the way `ssh box cargo build`'s trailing words do.
+    let trailing_is_cmd = exe != "mosh-client";
+    let scan = scan_remote(exe, args);
+    match scan.dest {
+        Some(d) => (raw_display(&[exe, &remote_destination(d)]), trailing_is_cmd && scan.cmd_start.is_some()),
         None => (exe.to_string(), false),
     }
 }
@@ -590,8 +756,12 @@ fn classify(command: &[String]) -> (String, Kind) {
         // command is the Remote class (an interactive login, or a `-N -L`
         // tunnel). A raw display that collapsed to the bare exe found no
         // destination at all (`ssh` bare, `ssh -V`) — an ordinary command,
-        // not a session.
-        let kind = if raw == exe || has_remote_cmd { Kind::Command } else { Kind::Remote };
+        // not a session. A remote command that attaches to a Zellij session
+        // (`ssh -t box zellij attach work`) is a live session too.
+        // ponytail: an attach the argv cannot vouch for (`ssh -p 2222 box zellij a w`)
+        // still spins as a Job; a looser attach check would fix it if anyone hits it.
+        let bounded = has_remote_cmd && remote_attach_target(command).is_none();
+        let kind = if raw == exe || bounded { Kind::Command } else { Kind::Remote };
         return (sanitize(&raw, MAX_MSG_CHARS), kind);
     }
 

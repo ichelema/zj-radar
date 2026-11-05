@@ -1,7 +1,7 @@
 //! Session radar state: live tabs/panes plus source-specific observations.
 //! No zellij-tile dependency.
 
-use crate::command::{CommandStore, EpochSecs, Tick};
+use crate::command::{self, CommandStore, EpochSecs, RemoteAttach, Tick};
 use crate::config;
 use crate::ledger::{Ledger, LedgerEntry, LedgerOutcome};
 use crate::observation::{ObservationOrigin, TrackedObservation};
@@ -99,6 +99,7 @@ pub(crate) struct RawPane {
     pub default_fg: Option<String>,
     pub exited: bool,
     pub exit_status: Option<i32>,
+    pub terminal_command: Option<String>,
 }
 
 impl PaneUpdate {
@@ -137,11 +138,18 @@ impl PaneUpdate {
             }
             let mut title = p.title;
             payload::sanitize_in_place(&mut title, payload::MAX_TAB_NAME_CHARS);
+            // Zellij joins the command and its arguments with spaces, unquoted:
+            // re-split, as ssh re-splits a remote command anyway.
+            let remote = p.terminal_command.as_deref().and_then(|line| {
+                command::remote_attach_target(&line.split_whitespace().map(str::to_string).collect::<Vec<_>>())
+            });
             tab_panes.entry(p.tab_pos).or_default().push(TerminalPane {
                 id: p.id,
                 title,
                 focused_in_tab: p.is_focused,
                 floating: p.is_floating,
+                remote,
+                exited: p.exited,
             });
             live.insert(p.id);
             if p.exited {
@@ -277,6 +285,17 @@ pub(crate) struct RadarState {
     /// entries drop on first absence, since a cwd is cheap to re-resolve if
     /// the pane flashes back.
     absent_once: HashMap<u32, Option<(TabId, String)>>,
+    /// Pane → the remote Zellij session its foreground command attaches to
+    /// (`ssh -t box zellij attach work` typed in a shell), from
+    /// `CommandChanged`. Persisted, so a rail loaded after the command started
+    /// still knows it; nothing `rows()` reads.
+    remote_attach: HashMap<u32, RemoteAttach>,
+    /// Mirrored remote session → the observation a local pane attached to it
+    /// shows in place of its ssh line ([`set_guests`](Self::set_guests)).
+    /// Command-origin on purpose: it stays out of this session's own presence
+    /// counts, carries no `✓` acknowledge, and never notifies (the notifier
+    /// reads the stores only). Read by `rows()`.
+    guests: HashMap<RemoteAttach, TrackedObservation>,
     /// Monotonic mutation counter over everything `rows()` reads — bumped by
     /// [`touch`](Self::touch) at every entry point that changed row-visible
     /// state. Two consumers: the [`rows`](Self::rows) memo below, and the
@@ -330,7 +349,7 @@ impl RadarState {
     }
 
     pub(crate) fn load_snapshot(&mut self, raw: &str) -> Option<u64> {
-        let (observations, tick, ledger) = snapshot::load(raw)?;
+        let (observations, tick, ledger, remote_attach) = snapshot::load(raw)?;
         // Touch only after the fallible parse: a corrupt snapshot changes
         // nothing rows-visible and must not bump the generation.
         self.touch();
@@ -358,6 +377,7 @@ impl RadarState {
             }
         }
         self.ledger.replace(ledger);
+        self.remote_attach = remote_attach;
         Some(tick)
     }
 
@@ -365,7 +385,7 @@ impl RadarState {
         // Both stores' observations carry their own `origin`, so the snapshot
         // module keys the merge on it — no need to tag the two iterators here.
         let current = self.status.observations().chain(self.command.observations());
-        snapshot::to_json(current, self.live_panes.as_ref(), existing, tick, self.ledger.to_vec())
+        snapshot::to_json(current, self.live_panes.as_ref(), existing, tick, self.ledger.to_vec(), &self.remote_attach)
     }
 
     /// Target tab position for an `attention-next`/`attention-prev` command, or
@@ -543,6 +563,7 @@ impl RadarState {
             if was_remote_running {
                 self.arm_flash(pane_id, tick);
             }
+            displaced_any |= self.remote_attach.remove(&pane_id).is_some();
             // A dead pane root is definitive producer death for the pushed
             // status too — the agent-rooted pane (`zellij run -- claude`)
             // never returns to a shell prompt, so this flag is its only
@@ -600,6 +621,9 @@ impl RadarState {
         self.ledger_receded(dropped_command, &prune_index, &status_tracked);
         self.pane_cwd.retain(|id, _| effective_live.contains(id));
         self.cwd_bootstrap_attempted.retain(|id| effective_live.contains(id));
+        let attached = self.remote_attach.len();
+        self.remote_attach.retain(|id, _| effective_live.contains(id));
+        let pruned_any = pruned_any || self.remote_attach.len() != attached;
         // Track this update's fresh focus for notification suppression. It no
         // longer drives rail state (no focus recede) — see `note_focus`. `settle`
         // still gates the notifier: `panes_changed` carries trustworthy focus, so
@@ -714,7 +738,19 @@ impl RadarState {
             }
             false
         };
-        if cleared {
+        // Every argv decides the entry anew, whatever the foreground flag: a
+        // pane created with `ssh … zellij attach x` reports it as a childless
+        // root (`false`), and a return to the shell drops it.
+        let target = command::remote_attach_target(command);
+        let attach_changed = self.remote_attach.get(&pane_id) != target.as_ref();
+        if attach_changed {
+            match target {
+                Some(target) => self.remote_attach.insert(pane_id, target),
+                None => self.remote_attach.remove(&pane_id),
+            };
+        }
+        // An attach edge can swap the pane's row for a remote session's view.
+        if cleared || attach_changed {
             self.touch();
         }
         RadarChange {
@@ -722,13 +758,18 @@ impl RadarState {
             // handler only ever changes something rows-visible on the
             // prompt-return clear (a fresh foreground command mutates the
             // *pending* debounce maps; the row appears when the TIMER promotes
-            // it, and that tick renders). Repaint only on the clear.
-            render: cleared,
+            // it, and that tick renders). Repaint only on the clear, or on an
+            // attach edge (the pane may now show a remote session's view).
+            render: cleared || attach_changed,
             settle: false,
             // Persist only when we actually cleared, so a newly-opened tab
-            // rehydrates the idle from the snapshot rather than the stale status.
-            snapshot: SnapshotWrite::now_if(cleared),
-            snapshot_pane: Some(pane_id),
+            // rehydrates the idle from the snapshot rather than the stale status,
+            // or when the pane's remote attach changed.
+            snapshot: SnapshotWrite::now_if(cleared || attach_changed),
+            // An attach edge is written by every instance: the pane's owner
+            // can be unnameable while the rails' topologies disagree, and a
+            // lost drop would leave the file pointing at a shell.
+            snapshot_pane: (!attach_changed).then_some(pane_id),
             ..RadarChange::default()
         }
     }
@@ -841,7 +882,9 @@ impl RadarState {
     /// meant to (animation vs. a scheduled one-shot are different reasons to
     /// tick, and conflating them would blur what each predicate promises).
     pub(crate) fn needs_fast_ticks(&self) -> bool {
-        self.status.needs_ticks() || self.command.needs_ticks()
+        self.status.needs_ticks()
+            || self.command.needs_ticks()
+            || self.shown_guests().any(TrackedObservation::animating)
     }
 
     /// Some observation spins at full speed right now: animating
@@ -854,7 +897,16 @@ impl RadarState {
         let spinning = |o: &TrackedObservation| {
             o.animating() && now_tick.saturating_sub(o.last_change_tick) <= crate::render::EASE_AFTER_TICKS
         };
-        self.status.observations().any(|(_, o)| spinning(o)) || self.command.observations().any(|(_, o)| spinning(o))
+        self.status.observations().any(|(_, o)| spinning(o))
+            || self.command.observations().any(|(_, o)| spinning(o))
+            || self.shown_guests().any(spinning)
+    }
+
+    /// The remote sessions' views a live attached pane shows right now
+    /// (`guests` through `attach_of`): the ones whose spinners the cadence
+    /// must keep turning. A view no pane shows animates nothing.
+    fn shown_guests(&self) -> impl Iterator<Item = &TrackedObservation> {
+        self.tab_panes.values().flatten().filter_map(|p| self.guests.get(self.attach_of(p)?))
     }
 
     /// Apply the user's `interactive_commands` extras to the command store
@@ -1062,6 +1114,73 @@ impl RadarState {
     /// for an unknown position, same as every other `tab_panes` lookup here.
     pub(crate) fn pane_ids_for_tab(&self, position: usize) -> Vec<u32> {
         self.tab_panes.get(&position).map(|panes| panes.iter().map(|p| p.id).collect()).unwrap_or_default()
+    }
+
+    /// The local pane already showing remote session `session` on `host`,
+    /// whatever its tab is called: the leftmost live pane whose running
+    /// command attaches to exactly that session on exactly that destination
+    /// as written ([`command::remote_attach_target`]) — its own command
+    /// (`TerminalPane::remote`) or its shell's foreground one
+    /// (`remote_attach`). An exited pane never counts, whatever argv a late
+    /// `CommandChanged` left for it. `None` sends the caller to a fresh attach.
+    pub(crate) fn remote_attach_pane(&self, session: &str, host: &str) -> Option<u32> {
+        let want = RemoteAttach { dest: host.to_string(), session: session.to_string() };
+        let mut tabs: Vec<_> = self.tab_panes.iter().collect();
+        tabs.sort_unstable_by_key(|(pos, _)| **pos);
+        tabs.into_iter().flat_map(|(_, panes)| panes).find(|p| self.attach_of(p) == Some(&want)).map(|p| p.id)
+    }
+
+    /// The remote session a live pane's command attaches to: its own command
+    /// (`TerminalPane::remote`), else its shell's foreground one
+    /// (`remote_attach`). An exited pane attaches to nothing, whatever argv a
+    /// late `CommandChanged` left for it.
+    fn attach_of<'a>(&'a self, pane: &'a TerminalPane) -> Option<&'a RemoteAttach> {
+        (!pane.exited).then(|| pane.remote.as_ref().or_else(|| self.remote_attach.get(&pane.id))).flatten()
+    }
+
+    /// Whether pane `pane_id` shows a mirrored remote session's view
+    /// (`guests`) in place of its own observation.
+    pub(crate) fn shows_guest(&self, pane_id: u32) -> bool {
+        let pane = self.tab_panes.values().flatten().find(|p| p.id == pane_id);
+        pane.and_then(|p| self.attach_of(p)).is_some_and(|target| self.guests.contains_key(target))
+    }
+
+    /// Replace the remote sessions' views (`Sessions::guest_views`) that
+    /// attached panes show. A view whose status, kind and label are unchanged
+    /// keeps its `last_change_tick`, so its spinner phase does not restart.
+    /// Reports — and `touch`es on — a change only.
+    pub(crate) fn set_guests(&mut self, views: Vec<(RemoteAttach, &crate::presence::PresencePane)>, tick: u64) -> bool {
+        let guests: HashMap<RemoteAttach, TrackedObservation> = views
+            .into_iter()
+            .map(|(target, pane)| {
+                let (status, kind) = (Status::from_wire(&pane.status), crate::kind::Kind::from_source(&pane.kind));
+                let kept =
+                    self.guests.get(&target).filter(|o| o.status == status && o.kind == kind && o.msg == pane.label);
+                let observation = TrackedObservation {
+                    origin: ObservationOrigin::Command,
+                    status,
+                    repo: String::new(),
+                    branch: String::new(),
+                    msg: pane.label.clone(),
+                    task: String::new(),
+                    kind,
+                    last_change_tick: kept.map_or(tick, |o| o.last_change_tick),
+                    ever_active: true,
+                    exit_code: None,
+                    completed_epoch_s: None,
+                    pending_epoch_s: None,
+                    acknowledged: false,
+                    tasks: Default::default(),
+                };
+                (target, observation)
+            })
+            .collect();
+        let changed = guests != self.guests;
+        if changed {
+            self.guests = guests;
+            self.touch();
+        }
+        changed
     }
 
     /// The STATUS-PIPE observation for `pane_id`, or `None` if the status
@@ -1301,7 +1420,13 @@ impl RadarState {
     /// second lookup feeds the muted Interactive label from the command store's
     /// quiet pendings; `roll_up` owns the precedence between the two.
     fn tab_display(&self, panes: &[TerminalPane]) -> TabDisplay {
-        rollup::roll_up(panes, |id| self.resolve(id), |id| self.command.quiet_identity(id))
+        // A pane attached to a mirrored remote session shows that session's
+        // most urgent pane instead of its own ssh line (`guests`).
+        let guest = |id: u32| {
+            let pane = panes.iter().find(|p| p.id == id)?;
+            self.guests.get(self.attach_of(pane)?)
+        };
+        rollup::roll_up(panes, |id| guest(id).or_else(|| self.resolve(id)), |id| self.command.quiet_identity(id))
     }
 
     /// Roll a tab up by position, treating an absent pane list as no panes.

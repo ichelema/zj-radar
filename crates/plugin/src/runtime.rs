@@ -663,8 +663,10 @@ fn presence_counts(rows: &[TabRow]) -> (usize, usize, Option<usize>) {
 /// Interactive panes are noise), status-origin ahead of commands so agents
 /// are never truncated behind a tab full of builds, capped per tab. Shared by
 /// `own_presence` and its fingerprint so the two cannot drift.
-fn presence_panes(row: &TabRow) -> impl Iterator<Item = &crate::rollup::PaneDisplay> {
-    let tracked = || row.display.panes.iter().filter(|p| p.status().is_some());
+/// A pane showing a mirrored remote session's view is that session's to
+/// publish, not this one's (`RadarState::shows_guest`).
+fn presence_panes<'r>(row: &'r TabRow, radar: &'r RadarState) -> impl Iterator<Item = &'r crate::rollup::PaneDisplay> {
+    let tracked = || row.display.panes.iter().filter(|p| p.status().is_some() && !radar.shows_guest(p.pane_id()));
     tracked()
         .filter(|p| p.is_status_origin())
         .chain(tracked().filter(|p| !p.is_status_origin()))
@@ -682,6 +684,27 @@ fn presence_label(pane: &crate::rollup::PaneDisplay) -> &str {
         pane.task()
     }
 }
+
+/// How a peer click or cycle commit reaches the peer ([`PluginRuntime::peer_switch`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PeerSwitch {
+    /// A local peer: `switch_session`.
+    Local,
+    /// A local pane already shows the remote peer ([`RadarState::remote_attach_pane`]): focus it.
+    ShowPane(u32),
+    /// A mirrored remote peer: run this argv ([`REMOTE_ATTACH_SCRIPT`]).
+    Attach(Vec<String>),
+    /// A remote label no longer in the roster: do nothing.
+    Gone,
+}
+
+/// `$1` own session name (may be empty), `$2` tab label, `$3` ssh host,
+/// `$4` remote session name. See `PluginRuntime::peer_switch`.
+const REMOTE_ATTACH_SCRIPT: &str = "\
+own=$1; label=$2; host=$3; name=$4; \
+z() { if [ -n \"$own\" ]; then zellij --session \"$own\" \"$@\"; else zellij \"$@\"; fi; }; \
+if z action query-tab-names 2>/dev/null | grep -Fxq -- \"$label\"; then z action go-to-tab-name -- \"$label\"; \
+else z action new-tab --name \"$label\" -- ssh -t -- \"$host\" zellij attach \"$name\"; fi";
 
 impl PluginRuntime {
     pub(crate) fn load(
@@ -1092,7 +1115,8 @@ impl PluginRuntime {
     /// deterministic target tab and emit `SwitchTab`; `SessionNext/Prev`
     /// advance the cross-session cycle selection (`Sessions::cycle`) and
     /// render the highlight move — the actual switch is a *later* idle-commit
-    /// (see `timer`), not an immediate effect here. Inert until permission is
+    /// (see `timer`), not an immediate effect here; `SessionRefresh` reads the
+    /// peers' presence files now. Inert until permission is
     /// granted, mirroring `mouse_click`: session switching is
     /// `ChangeApplicationState` territory, same as `SwitchTab`.
     ///
@@ -1113,10 +1137,8 @@ impl PluginRuntime {
         if !self.permission.granted() || self.hidden {
             return Outcome::none();
         }
-        let dir = match verb {
-            Verb::AttentionNext | Verb::SessionNext => Direction::Next,
-            Verb::AttentionPrev | Verb::SessionPrev => Direction::Prev,
-        };
+        let dir =
+            if matches!(verb, Verb::AttentionNext | Verb::SessionNext) { Direction::Next } else { Direction::Prev };
         match verb {
             Verb::AttentionNext | Verb::AttentionPrev => match self.radar.next_attention_tab(dir) {
                 Some(position) => Outcome::with_effects(false, vec![Effect::SwitchTab { position }]),
@@ -1132,6 +1154,7 @@ impl PluginRuntime {
                 self.arm_timer_if_needed(self.last_now_epoch_s, &mut effects);
                 Outcome::with_effects(render, effects)
             }
+            Verb::SessionRefresh => Outcome::with_effects(false, self.read_presences_now()),
         }
     }
 
@@ -1242,7 +1265,18 @@ impl PluginRuntime {
         // background tab counts as visible) deliberately does not claim here:
         // Zellij pairs it with a `TabUpdate`, whose claim covers it.
         let change = RadarChange { render: true, force_render: true, ..RadarChange::default() };
-        self.project(self.presence_claim(true), change, self.last_now_epoch_s)
+        // A hidden rail skips `session-refresh`, so a reveal reads the peers
+        // itself rather than show them as of its last scan.
+        let mut fx = self.presence_claim(true);
+        fx.extend(self.read_presences_now());
+        self.project(fx, change, self.last_now_epoch_s)
+    }
+
+    /// Read the peers' presence files now (`Effect::ReadPresences`), and
+    /// restart the decimated scan's interval from here.
+    fn read_presences_now(&mut self) -> Vec<Effect> {
+        self.last_presence_scan = Some(self.tick);
+        vec![Effect::ReadPresences]
     }
 
     /// A fresh read of every peer session's presence file, each paired with
@@ -1270,10 +1304,45 @@ impl PluginRuntime {
         self.project(vec![], RadarChange::default(), self.last_now_epoch_s)
     }
 
+    /// What `Effect::SwitchSession { name }` does, decided against the
+    /// current roster. A mirrored remote peer (its presence carries a
+    /// `host`) that a local pane's running command attaches to is focused
+    /// there, whatever its tab is called ([`RadarState::remote_attach_pane`]).
+    /// Otherwise it is
+    /// brought up by a `sh -c` script under the `RunCommands`
+    /// grant this plugin already holds (no new permission, which would void
+    /// every existing grant): if a tab named after the peer already exists
+    /// it is focused (`query-tab-names`, since `go-to-tab-name` exits 0 on
+    /// a miss), else a new tab runs `ssh -t -- <host> zellij attach <name>`.
+    /// A tab, not a split: the remote Zellij is a nested guest (0.45's
+    /// `nested_session_handling`), and coming back is then a tab switch, or
+    /// a click on this rail. Every value rides a positional parameter, never
+    /// the script text, `--` precedes the host, and `Presence::parse` admits
+    /// a hosted peer only with a shell-inert host and name — ssh hands the
+    /// words after the host to the remote shell as one line.
+    pub(crate) fn peer_switch(&self, label: &str) -> PeerSwitch {
+        match self.sessions.remote_target(label) {
+            Some((host, name)) => match self.radar.remote_attach_pane(&name, &host) {
+                Some(pane_id) => PeerSwitch::ShowPane(pane_id),
+                None => PeerSwitch::Attach(
+                    ["sh", "-c", REMOTE_ATTACH_SCRIPT, "zj-radar-attach", &self.own_session_name, label, &host, &name]
+                        .map(str::to_string)
+                        .to_vec(),
+                ),
+            },
+            // Zellij refuses `/` in a session name, so only a `host/name`
+            // label carries one: its peer left the roster after the render,
+            // and `switch_session` would create an empty local session.
+            None if label.contains('/') => PeerSwitch::Gone,
+            None => PeerSwitch::Local,
+        }
+    }
+
     pub(crate) fn presences_changed(&mut self, raw: Vec<(String, u64)>) -> Outcome {
         self.sessions.set_show_trees(self.config.session_tree);
         let update = self.sessions.update_presences(raw);
-        let change = RadarChange { render: update.changed, ..RadarChange::default() };
+        let guests_changed = self.radar.set_guests(self.sessions.guest_views(), self.tick);
+        let change = RadarChange { render: update.changed || guests_changed, ..RadarChange::default() };
         let mut out = self.project(vec![], change, self.last_now_epoch_s);
         for name in update.dead {
             out.effects.push(Effect::DismissPresence { name });
@@ -1308,7 +1377,7 @@ impl PluginRuntime {
                 .map(|row| PresenceTab {
                     position: row.tab_position(),
                     name: crate::payload::sanitize(&row.name, MAX_LABEL_CHARS),
-                    panes: presence_panes(row)
+                    panes: presence_panes(row, &self.radar)
                         .map(|pane| {
                             let status_origin = pane.is_status_origin();
                             PresencePane {
@@ -1322,6 +1391,7 @@ impl PluginRuntime {
                         .collect(),
                 })
                 .collect(),
+            host: None,
         }
     }
 
@@ -1348,7 +1418,7 @@ impl PluginRuntime {
         for (i, r) in rows.iter().enumerate() {
             if i < MAX_TABS {
                 (r.tab_position(), &r.name).hash(&mut h);
-                for pane in presence_panes(r) {
+                for pane in presence_panes(r, &self.radar) {
                     (pane.pane_id(), pane.is_status_origin(), pane.kind().as_source(), pane.render_status().as_wire())
                         .hash(&mut h);
                     presence_label(pane).hash(&mut h);
@@ -1366,6 +1436,7 @@ impl PluginRuntime {
             attention_tab_position,
             updated_epoch_s: self.last_now_epoch_s,
             tabs: Vec::new(),
+            host: None,
         };
         (counts, std::hash::Hasher::finish(&h))
     }
