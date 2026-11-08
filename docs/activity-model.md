@@ -53,8 +53,7 @@ behind the four readers.
 - **`Remote`** — a live connection to another machine. Kind: `Remote` (`ssh`,
   `mosh`, and their `DEFAULT_REMOTE` siblings — §4). Steady like `Service`
   (nothing is progressing toward a completion the user is waiting on), but
-  its ending is phrased as a disconnect and carries its own notify toggle
-  (§3, §4) rather than a routine exit.
+  its ending is phrased as a disconnect rather than a routine exit.
 - **`Companion`** — interactive; it waits on the user. Editors, pagers,
   monitors, git TUIs, file managers, REPLs. Reachable only via the
   interactive classification (§4); it is a class, not a `Kind` — `nvim` and
@@ -77,8 +76,8 @@ signal (§4 layer 4) remains future work.
 | | `Job` | `Service` | `Remote` | `Companion` |
 |---|---|---|---|---|
 | **Running** | `⠋` spinner + activity string; `· 4m` run tag once ≥ 1 minute (whole minutes, frozen at `1h+`; the true start survives re-promotions) | steady non-animated `▸` mark + name, **no spinner, no fast cadence** | steady `▸` + identity, same as `Service`; a right-aligned `⇄` also marks the tab line while connected | *never enters Running* — suppressed at intake (§5); renders the muted identity label (`○ $ nvim README.md`) |
-| **Done** | `●` + ledger hand-off, TTL recede to Idle, notify | exit of a service — `●`/`✗` per exit code, notify: a dead dev server is news | `●` phrased "disconnected", notify (`notify_remote`, independent of `notify_done`); tab flashes; identity label stays so the user sees *which* connection dropped | labeled completion (`● $ nvim`) via preserved identity for held/run panes; recede as Job |
-| **Error** | `✗`, persists until re-run, notify | same | `✗` phrased "connection lost", notify (`notify_remote`) | same |
+| **Done** | `●` + ledger hand-off, TTL recede to Idle, notify | exit of a service — `●`/`✗` per exit code, notify: a dead dev server is news | `●` phrased "disconnected", notify; tab flashes; identity label stays so the user sees *which* connection dropped | labeled completion (`● $ nvim`) via preserved identity for held/run panes; recede as Job |
+| **Error** | `✗`, persists until re-run, notify | same | `✗` phrased "connection lost", notify | same |
 | **Pending** | agent-origin only: `◆` waiting-for-you + wait-age tag | n/a | n/a | n/a |
 | **Idle** | muted row if `ever_active` | muted row | muted row, `⇄` marker cleared (the marker tracks *connected*, not *was remote*) | muted identity label while the program is foreground (it also replaces a stale finished-command echo); nothing once it exits |
 
@@ -111,8 +110,8 @@ Cadence rule, restated per class: only *animating* work
 `Remote`), so agent rows animate too) plus **scheduled
 one-shots** keep the 1 Hz timer armed — the one-shots being promotable
 pendings awaiting debounce, tentative-Dones awaiting confirm
-(`pending_done`), stale-Running grace clocks (`suspect_running`), unsettled
-notifications, flashes, and Done-awaiting-recede. The one-shots must count
+(`pending_done`), stale-Running grace clocks (`suspect_running`),
+flashes, and Done-awaiting-recede. The one-shots must count
 explicitly *because* the steady exclusion exists: pre-exclusion, "some row
 is Running" was an implicit tick source for all of them, and a Ctrl-C'd dev
 server still needs its Done confirm (and a killed `server`-source producer
@@ -285,7 +284,7 @@ Shipped: the quiet-pending mechanism, the built-in interactive set and
 `interactive_commands` key with its level-triggered sweep, the Companion muted
 label, the Service steady `▸` and cadence exclusion, the long-Job run tag, the
 job-over-steady tie-break, and the Remote class (steady mark, tab `⇄` marker,
-disconnect notification with its own `notify_remote` toggle, `remote_commands`
+disconnect phrasing, `remote_commands`
 extras). Guard tests pin the seams: display first token equals exe basename,
 the four name lists pairwise disjoint, and rail-reference scenarios AD/AE/AF/AG.
 

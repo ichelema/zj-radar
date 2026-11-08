@@ -87,7 +87,6 @@ manual setup, and the full removal list are in
 - Background work an agent started (a backgrounded test run, a subagent, a
   dev server) gets its own lines under the agent's row. Claude Code only for
   now, and it needs the `zj-radar` CLI on `PATH`.
-- Desktop notifications when an agent in another tab or pane finishes or needs you.
 - Running several Zellij sessions? Each rail lists the others with live counts
   and click-to-switch (`session_tree true` expands each into its tabs and agents).
 
@@ -117,12 +116,6 @@ plugins {
     radar location="file:~/.config/zellij/plugins/zj_radar.wasm" {
         density "cards"         // cards · comfortable · compact
         naming "managed"        // off · managed · force
-        notify true             // desktop notifications (macOS + Linux)
-        notify_done true        // per-status toggles (done · error · pending)
-        notify_error true
-        notify_pending true
-        notify_remote true         // a remote session (ssh, mosh) disconnecting
-        notify_when_focused false  // suppress when the pane is focused
         interactive_commands ""    // extra editors/pagers/TUIs to keep quiet
         remote_commands ""         // extra remote-session launchers
         spinner_fps 4              // working-spinner frames/s (1 = once a second)
@@ -157,7 +150,7 @@ The full option table, runtime pipes, and keybinds are in
 | Doc | What's in it |
 |-----|--------------|
 | [`docs/install.md`](https://github.com/marktoda/zj-radar/blob/main/docs/install.md) | Install paths (CLI, source, Nix, manual), layouts, permissions, `--check`, full removal. |
-| [`docs/using.md`](https://github.com/marktoda/zj-radar/blob/main/docs/using.md) | Reading the rail: glyphs, tree rows, tags, footer, mouse gestures, cross-session badge, notifications. |
+| [`docs/using.md`](https://github.com/marktoda/zj-radar/blob/main/docs/using.md) | Reading the rail: glyphs, tree rows, tags, footer, mouse gestures, cross-session badge. |
 | [`docs/configuration.md`](https://github.com/marktoda/zj-radar/blob/main/docs/configuration.md) | Option table, the `config.v1` and `cmd.v1` pipes, keybinds. |
 | [`docs/producers.md`](https://github.com/marktoda/zj-radar/blob/main/docs/producers.md) | Claude Code, Codex, Opencode, pi, omp, `notify generic`, and the wire format for your own producer. |
 | [`docs/troubleshooting.md`](https://github.com/marktoda/zj-radar/blob/main/docs/troubleshooting.md) | Symptom → fix: blank rail, no status, stuck rows, layout quirks, terminal rendering. |

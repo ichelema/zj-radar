@@ -54,7 +54,6 @@ use crate::sessions::{BadgeEntry, CommitTarget, Sessions};
 use crate::status::Status;
 use crate::tab_namer::TabRename;
 use crate::theme;
-use std::collections::BTreeMap;
 
 /// How urgently the one-shot timer should re-fire. `Fast` is the 1 Hz tick
 /// that drives animation and debounce/TTL bookkeeping; `Slow` backs off to a
@@ -205,35 +204,6 @@ pub(crate) enum Effect {
     /// prompt — `reclaim_if_stale` (and with it the deferring rails' patience
     /// escalation) only ever fires once the prompt-owner is actually gone.
     HeartbeatPermissionLock,
-    /// Show a desktop notification. `key` is the event's cross-instance
-    /// identity (`notify_rules::claim_key`): every per-tab instance computes
-    /// the same edge and emits this same effect, and the host layer uses the
-    /// key to elect exactly one dispatcher (`SessionFiles::claim_notification`)
-    /// so N visited tabs don't produce N identical toasts.
-    ///
-    /// `unless_focused` is the pane to stay quiet about if it turns out to be
-    /// the session's shared focus (`SessionFiles::shared_focus`, published by
-    /// `PublishFocus`); `None` when `notify_when_focused` is on. The runtime
-    /// already suppressed on its own `last_focused`, but a hidden rail's is
-    /// frozen at whenever its tab was last active (manifests reach the active
-    /// tab's plugins only), so without this re-check it would dispatch a toast
-    /// for the pane the user is looking at — the visible rail's suppression
-    /// loses the claim race to it.
-    Notify {
-        key: String,
-        title: String,
-        body: String,
-        unless_focused: Option<u32>,
-    },
-    /// Record this rail's focused terminal pane as the session's shared focus
-    /// (`SessionFiles::publish_focus`; `None` = no terminal focused yet).
-    /// Emitted on every `PaneUpdate`, which Zellij delivers to the active
-    /// tab's plugins only, so the file always holds the most recently active
-    /// view's focus — what every rail's `Notify` dispatch re-checks against.
-    /// The write happens only when the content changed.
-    PublishFocus {
-        pane_id: Option<u32>,
-    },
     /// Publish this session's own [`Presence`] for peer rails to read —
     /// lib.rs does `files.persist_presence(unless_fresher_than, || runtime.presence_json())`.
     /// Decided in one place, `project`: a presence *content* edge (a count
@@ -470,7 +440,6 @@ pub(crate) struct PluginRuntime {
     /// so a switch to an 8-bit theme drops back to the fallback.
     palette_theme: Option<theme::DerivedColors>,
     last_rendered: RenderedRail,
-    notify_prev: BTreeMap<u32, crate::status::Status>,
     /// Cross-session peer state + the Alt+[/] cycle selection machine.
     sessions: Sessions,
     /// This session's own name, learned from `learn_session_name`
@@ -721,9 +690,6 @@ impl PluginRuntime {
         // Same level-triggered treatment for the remote set: a rehydrated
         // remote_commands extra re-kinds an already-promoted row immediately.
         self.radar.set_remote_commands(&self.config.remote_commands);
-        // Seed the notification baseline from the restored snapshot so that
-        // pre-existing completions never fire a spurious Notify effect.
-        self.notify_prev = crate::notify_rules::status_map(&self.radar.notify_views());
         // No presence-writer claim here: the name is never known yet at load
         // (it rides the first `ModeUpdate`), and a nameless holder would
         // withhold every write — `learn_session_name` claims instead.
@@ -812,9 +778,6 @@ impl PluginRuntime {
         let mut effects = self.presence_claim(false); // the active view (see the effect)
         self.sync_selectable(&mut effects);
         let change = self.radar.panes_changed(update, self.tick, now, self.config.naming);
-        // After the radar noted this manifest's focus, ahead of any `Notify`
-        // the projection emits for it.
-        effects.push(Effect::PublishFocus { pane_id: self.radar.last_focused() });
         self.project(effects, change, now)
     }
 
@@ -939,7 +902,6 @@ impl PluginRuntime {
         let flush = std::mem::take(&mut self.snapshot_dirty);
         let change = RadarChange {
             render,
-            settle: true,
             snapshot: SnapshotWrite::now_if(store_changed || flush),
             // Tick-driven frames (spinner, ages) redraw identical rows —
             // exempt from the rows-diff render gate by definition.
@@ -950,7 +912,7 @@ impl PluginRuntime {
     }
 
     /// A frame-only fire: nothing changed but the spinner's frame, so skip
-    /// every per-tick duty (store timers, presence scans, settle, persists)
+    /// every per-tick duty (store timers, presence scans, persists)
     /// and just re-arm and repaint. The repaint bypasses `project`'s rows-diff
     /// gate by construction — the rows are identical, the frame is not — and
     /// honors the visibility gate (a rail that went hidden mid-frame paints
@@ -1080,9 +1042,7 @@ impl PluginRuntime {
     /// treats an empty `task` on a non-Idle status as "leave the sticky label
     /// alone", so the turn's task stays put rather than this dismiss quietly
     /// erasing it. Rides with `ack: true`: this Done means "the user has seen
-    /// it", so the notifier must stay silent in EVERY instance the echo
-    /// reaches — a gesture that means "stop flagging this" must not flag it
-    /// one more time (`notify_rules::diff` skips acknowledged observations).
+    /// it" (the wire flag is kept for producers and peers).
     fn acknowledge_pending_payload(&self, pane_id: u32) -> Option<String> {
         let obs = self.radar.status_observation(pane_id)?;
         if obs.status != Status::Pending {
@@ -1730,67 +1690,20 @@ impl PluginRuntime {
 
     /// Whether the one-shot timer should (re-)arm for *domain* reasons — the
     /// "tick only while there's something to do" rule that keeps an idle rail from
-    /// waking every second. Four triggers:
+    /// waking every second. Three triggers:
     ///
     /// - **animating work** — a `Running` agent/command whose glyph spins each
     ///   tick (`RadarState::needs_fast_ticks`);
-    /// - **an un-carried completion edge** — a `status_pipe` payload defers its
-    ///   recede + notification to the timer (it can't trust its own focus, see
-    ///   `RadarState::status_pipe`), so we must keep ticking until the settle has
-    ///   run. [`has_unsettled_notifications`] goes false the moment that settle
-    ///   advances the baseline, so a *backgrounded* `Done`/`Error`/`Pending` stops
-    ///   pinning the timer awake once notified — a later focus change or broadcast
-    ///   re-arms it. (The pre-settle baseline read costs at most one extra tick.)
     /// - **a command `Done` awaiting its TTL recede** (`RadarState::has_done_awaiting_recede`)
-    ///   — the row itself is static (it doesn't animate and its notify already
-    ///   fired), but the ledger handoff at `DONE_TTL_TICKS` still needs a tick to
-    ///   land on schedule, so it keeps this armed even though `needs_fast_ticks`
-    ///   stays narrow (see that method's doc for the arming split).
+    ///   — the row itself is static (it doesn't animate), but the ledger handoff
+    ///   at `DONE_TTL_TICKS` still needs a tick to land on schedule, so it keeps
+    ///   this armed even though `needs_fast_ticks` stays narrow (see that
+    ///   method's doc for the arming split).
     /// - **an active ping flash** (`RadarState::has_active_flash`) — the
     ///   flip-to-pending glance-catcher is a two-tick visual, not a card fact,
     ///   so nothing else here would otherwise keep the timer awake for it.
-    ///
-    /// [`has_unsettled_notifications`]: Self::has_unsettled_notifications
     fn timer_should_continue(&self) -> bool {
-        self.radar.needs_fast_ticks()
-            || self.has_unsettled_notifications()
-            || self.radar.has_done_awaiting_recede()
-            || self.radar.has_active_flash(self.tick)
-    }
-
-    /// True while the notification baseline lags the live per-pane statuses — i.e.
-    /// an attention edge has landed that a settle tick hasn't carried yet. Reads
-    /// the exact baseline [`notify_effects`](Self::notify_effects) advances, so it
-    /// goes quiet precisely when the deferred recede + notify are done.
-    fn has_unsettled_notifications(&self) -> bool {
-        crate::notify_rules::status_map(&self.radar.notify_views()) != self.notify_prev
-    }
-
-    /// Diff observable pane statuses against `notify_prev` and emit `Effect::Notify`
-    /// for each attention-status transition.
-    ///
-    /// Intentionally runs even before permission reaches
-    /// `PermissionState::Resolved { granted: true }`. Without the
-    /// `RunCommands` grant, `run_command` is a silent host no-op, so notifications
-    /// are harmlessly dropped. More importantly, gating this on the grant
-    /// would skip advancing `notify_prev` during the ungranted window, which risks a
-    /// burst of stale notifications the moment the grant arrives. The ungranted window
-    /// is startup-only and brief, so the no-op cost is negligible.
-    fn notify_effects(&mut self) -> Vec<Effect> {
-        let views = self.radar.notify_views();
-        let focused = self.radar.last_focused();
-        let notes = crate::notify_rules::diff(&self.notify_prev, &views, focused, &self.config);
-        self.notify_prev = crate::notify_rules::status_map(&views);
-        let suppress_focused = !self.config.notify_when_focused;
-        notes
-            .into_iter()
-            .map(|n| Effect::Notify {
-                key: crate::notify_rules::claim_key(&n),
-                unless_focused: suppress_focused.then_some(n.pane_id),
-                title: n.title,
-                body: n.body,
-            })
-            .collect()
+        self.radar.needs_fast_ticks() || self.radar.has_done_awaiting_recede() || self.radar.has_active_flash(self.tick)
     }
 
     fn effects_from_renames(&self, renames: Vec<TabRename>) -> Vec<Effect> {
@@ -1800,10 +1713,9 @@ impl PluginRuntime {
     /// The sole projection from a domain [`RadarChange`] to host [`Effect`]s.
     /// `fx` is a caller-supplied seed so the `timer` handler's permission
     /// effects come first, without a post-hoc splice. Canonical order: renames
-    /// → snapshot → presence → cwd → `SetTimeout` → notify (pinned by
-    /// `project_emits_effects_in_canonical_order`). `settle` is the per-handler stamp
-    /// described in `## Settle` (`CONTEXT.md`): this is the sole caller of
-    /// `notify_effects`, and the only *domain-change* path that arms the timer
+    /// → snapshot → presence → cwd → `SetTimeout` (pinned by
+    /// `project_emits_effects_in_canonical_order`). This is the only
+    /// *domain-change* path that arms the timer
     /// (the permission flow arms it separately in `begin_permission_flow`).
     /// `TimerChain::arm` self-guards on the armed cadence and on whether
     /// there's anything to arm for, so calling it unconditionally here is a
@@ -1936,9 +1848,6 @@ impl PluginRuntime {
         }
         fx.extend(self.radar.take_repo_lookups().into_iter().map(|cwd| Effect::ResolveRepo { cwd }));
         self.arm_timer_if_needed(now_epoch_s, &mut fx);
-        if c.settle {
-            fx.extend(self.notify_effects());
-        }
         Outcome::with_effects(render, fx)
     }
 }

@@ -25,6 +25,5 @@ The `zj_radar.status.v1` pipe has a local-session trust boundary: any process
 inside the Zellij session (or another plugin, via `MessagePlugin`) can forge
 payloads. The plugin treats them as untrusted display data — payloads over
 64 KB are dropped whole, every text field is sanitized and truncated at parse
-time, and notification commands receive the text as argv, never spliced into a
-shell. What that cannot prevent: a local writer can always paint misleading
+time. What that cannot prevent: a local writer can always paint misleading
 status. That is inherent to the boundary, not a vulnerability.

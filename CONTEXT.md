@@ -47,13 +47,11 @@ current view of tabs, live panes, observations, and snapshot serialization. It
 composes `StatusStore` (pushed status) and `CommandStore` (observed commands),
 both thin wrappers over one `ObservationStore` in `crates/core`, plus
 `TabNamer`. The "status wins over command" precedence between the stores lives
-in exactly one place, `RadarState::resolve`, which both `tab_display` and
-`notify_views` read through.
+in exactly one place, `RadarState::resolve`, which `tab_display` reads through.
 
 Focus never drives rail state. A finished pane's status clears only through
 shared inputs (a new broadcast, the return-to-shell exit-clear, a prune), so
-every tab's instance converges. `note_focus` records the focused pane only so
-the notifier can stay quiet about it. Focus may shape paint, never state:
+every tab's instance converges. Focus may shape paint, never state:
 in Cards density the active tab's focused pane line takes the bright
 `surface_active` band (`TabDisplay::focused_pane`, from the same
 `PaneUpdate` every instance sees). Pruning has a one-manifest grace
@@ -65,7 +63,7 @@ The external seam between producers and the plugin: the `zj_radar.status.v1`
 payload `{v, source, pane, status, repo, branch, msg, task, ack, tasks}`,
 parsed and sanitized in `crates/core/src/payload.rs`. Ordering is
 latest-wins. Unknown fields are ignored. `task` is a sticky label; `ack`
-means "the user already saw this" and silences the notifier; `tasks` carries
+means "the user already saw this"; `tasks` carries
 *background tasks* (below). The plugin is a caller too: the `✓`
 gesture broadcasts a synthetic `done` with `ack: true` (`Effect::BroadcastStatus`)
 instead of mutating local state. Every sender goes through the bounded argv in
@@ -121,14 +119,6 @@ vocabulary (`TabDisplay`, `PaneDisplay`, `PrimaryDetail`, `ProgressCounts`,
 `ExitOutcome`) and never learns there are two stores; `resolve` and `quiet`
 are closures `RadarState` hands it. Tab status is never derived from tab
 names.
-
-## Settle
-
-Whether notifications fire now or wait for the timer. Only events whose focus
-is trustworthy settle: `panes_changed` (carries fresh focus) and the `timer`
-tick. A `status_pipe` payload may arrive before the focus update that reflects
-the user leaving, so it arms the timer instead. `RadarChange::settle` is the
-flag; `project` fires `notify_effects` on it.
 
 ## Cadence
 

@@ -21,11 +21,6 @@ layout {
             pane size=32 borderless=true {
                 plugin location="radar" {
                     // Desktop notifications (macOS + Linux). Master switch + per-status toggles.
-                    // notify true
-                    // notify_done true
-                    // notify_error true
-                    // notify_pending true
-                    // notify_when_focused false
                 }
             }
             children
@@ -44,11 +39,6 @@ layout {
             pane size=32 borderless=true {
                 plugin location="radar" {
                     // Desktop notifications (macOS + Linux). Master switch + per-status toggles.
-                    // notify true
-                    // notify_done true
-                    // notify_error true
-                    // notify_pending true
-                    // notify_when_focused false
                 }
             }
             pane focus=true

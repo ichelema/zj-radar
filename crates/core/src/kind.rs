@@ -124,9 +124,8 @@ impl Kind {
     }
 
     /// Whether this kind is a live connection to another machine — the `Remote`
-    /// class in docs/activity-model.md §3. Its consumers are the tab marker, the
-    /// disconnect phrasing in `notify_rules`, and the intake kind override for
-    /// `remote_commands` extras.
+    /// class in docs/activity-model.md §3. Its consumers are the tab marker and
+    /// the intake kind override for `remote_commands` extras.
     pub fn is_remote(self) -> bool {
         match self {
             Kind::Remote => true,

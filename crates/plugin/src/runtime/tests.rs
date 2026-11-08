@@ -492,8 +492,8 @@ fn status_pipe_mutates_store_arms_timer_and_persists_snapshot() {
 
     assert!(outcome.render);
     assert!(runtime.radar.status_store().needs_ticks());
-    // Canonical `project` order is renames → snapshot → cwd → SetTimeout →
-    // notify, so PersistSnapshot now precedes SetTimeout. Assert membership,
+    // Canonical `project` order is renames → snapshot → cwd → SetTimeout,
+    // so PersistSnapshot precedes SetTimeout. Assert membership,
     // not position — the order contract has its own dedicated test.
     assert_eq!(outcome.effects.len(), 2);
     assert!(outcome.effects.contains(&Effect::SetTimeout(Cadence::Fast)));
@@ -526,7 +526,6 @@ fn panes_changed_prunes_focuses_and_persists_snapshot() {
         native: HashMap::new(),
     });
     assert!(first.render);
-    assert_eq!(runtime.radar.last_focused(), Some(10));
     // Panes 11/12 are absent for the first time — the break-pane grace keeps
     // their observations for one manifest; the second absence prunes.
     let outcome = runtime.panes_changed(PaneUpdate {
@@ -658,8 +657,7 @@ fn sidebar_instance_never_renames_a_foreign_tab() {
         native: HashMap::new(),
     });
     // The cwd bootstrap is deliberately NOT ownership-scoped (the cwd also
-    // stamps observed commands' repo, which the notification claim key hashes
-    // — every instance must agree on it); only renames are.
+    // stamps observed commands' repo); only renames are.
     assert!(topology
         .effects
         .iter()
@@ -1592,57 +1590,6 @@ fn double_delivery_of_the_acknowledge_broadcast_is_idempotent() {
 }
 
 #[test]
-fn acknowledge_echo_never_fires_a_done_notification() {
-    // Right-click means "I've seen this, stop flagging it" — so the synthetic
-    // Done it broadcasts must never itself pop a notification. The echo rides
-    // the same intake as every real broadcast (by design), and a background
-    // Pending → Done edge WOULD normally notify (`needs_attention` includes
-    // Done, `notify_done` defaults true) — the ack has to be exempt.
-    let mut rt = runtime_with_pending_panes();
-    // First settle advances the notify baseline past the seeded Pendings
-    // (firing THEIR notifications — the flagging the user is responding to).
-    let _ = rt.timer_fast(PermissionProbe::default());
-
-    let out = rt.mouse_right_click(3, 0); // pane 10, Pending, background
-    let Effect::BroadcastStatus { payload } = &out.effects[0] else {
-        panic!("expected BroadcastStatus, got {:?}", out.effects);
-    };
-    let payload = payload.clone();
-    rt.status_pipe(&payload); // the echo lands: Pending → Done
-    assert_eq!(rt.radar.status(10).unwrap().status, Status::Done, "setup: the echo must converge");
-
-    // No later settle may notify for the acknowledged pane — not the first
-    // (which carries the deferred edge) nor any that follow.
-    for _ in 0..4 {
-        let t = rt.timer_fast(PermissionProbe::default());
-        assert!(
-            !t.effects.iter().any(|e| matches!(e, Effect::Notify { .. })),
-            "an acknowledge must never notify; effects = {:?}",
-            t.effects
-        );
-    }
-}
-
-#[test]
-fn a_real_pending_to_done_broadcast_still_notifies() {
-    // The companion bound to the test above: the ack exemption must be carried
-    // by the PAYLOAD, not inferred from the Pending → Done edge shape — that
-    // edge happens for real (answer a question, tab away, a short no-tool turn
-    // ends in Done) and that completion notification is wanted.
-    let mut rt = runtime_with_pending_panes();
-    let _ = rt.timer_fast(PermissionProbe::default()); // baseline: Pending
-
-    rt.status_pipe(&payload_json(10, "done")); // a genuine producer Done
-    let tick = rt.timer_fast(PermissionProbe::default());
-    assert_eq!(
-        tick.effects.iter().filter(|e| matches!(e, Effect::Notify { .. })).count(),
-        1,
-        "a real background Pending → Done must still notify; effects = {:?}",
-        tick.effects
-    );
-}
-
-#[test]
 fn own_badge_row_updates_live_as_running_and_attention_move() {
     // `Sessions::set_own` was once dead code: nothing called it, so the own
     // row of the cross-session badge never reflected the running/
@@ -1669,8 +1616,6 @@ fn own_badge_row_updates_live_as_running_and_attention_move() {
     );
 }
 
-// ── Effect::Notify integration ─────────────────────────────────────────────
-
 /// Helper: two tabs; pane 5 focused in active tab 0, pane 7 in background
 /// tab 1. Both panes have a Running command promoted via a prior timer tick.
 fn two_tab_runtime_with_running_commands() -> PluginRuntime {
@@ -1684,10 +1629,6 @@ fn two_tab_runtime_with_running_commands() -> PluginRuntime {
     rt.command_changed(7, &["cargo".into(), "test".into()], true);
     // Promote pending → Running via a timer tick.
     rt.timer_fast(PermissionProbe::default());
-    // The timer tick above also advances notify_prev to a Running baseline via
-    // notify_effects, so subsequent tests start from Running rather than the
-    // Idle default. In production the same happens on every timer fire; here
-    // it means test assertions only see the transition edge under test.
     rt
 }
 
@@ -1792,7 +1733,7 @@ fn render_gate_vetoes_repaints_whose_drawn_content_is_unchanged() {
 }
 
 #[test]
-fn noop_broadcast_skips_presence_and_notify_work() {
+fn noop_broadcast_skips_presence_work() {
     // An identical re-broadcast advances nothing: no presence re-derive (its
     // effect would show as PersistPresence on a content edge), no snapshot,
     // no render. The pane's own counts can't have moved — the radar
@@ -1822,13 +1763,11 @@ fn noop_broadcast_skips_presence_and_notify_work() {
 #[test]
 fn project_emits_effects_in_canonical_order() {
     // Sole home of the order contract: renames → snapshot → presence → cwd →
-    // SetTimeout → notify. Seed a background Done so `settle` actually
-    // produces a Notify, and a just-learned session name so the presence
+    // SetTimeout. Seed a just-learned session name so the presence
     // compare sees its first content edge (the helper leaves the name empty,
-    // which withholds `PersistPresence` entirely) — exercising all six
+    // which withholds `PersistPresence` entirely) — exercising all five
     // effect kinds in one change.
     let mut rt = two_tab_runtime_with_running_commands();
-    rt.radar.command_mut().on_exit(7, Some(0), Tick(rt.tick), EpochSecs(0));
     rt.own_session_name = "main".into();
     // `TimerChain::arm` self-guards on the armed cadence; the setup helper's
     // timer tick already armed it, so force the disarmed state to let
@@ -1840,7 +1779,6 @@ fn project_emits_effects_in_canonical_order() {
         snapshot: SnapshotWrite::Now,
         renames: vec![TabRename { id: TabId::new(1), name: "renamed".into() }],
         cwd_bootstrap: vec![7],
-        settle: true,
         ..RadarChange::default()
     };
     let outcome = rt.project(vec![], change, 0);
@@ -1851,7 +1789,6 @@ fn project_emits_effects_in_canonical_order() {
         Effect::PersistPresence { .. } => 2,
         Effect::ResolveCwd { .. } => 3,
         Effect::SetTimeout(_) => 4,
-        Effect::Notify { .. } => 5,
         other => panic!("unexpected effect in canonical-order test: {other:?}"),
     };
     let kinds: Vec<i32> = outcome.effects.iter().map(kind).collect();
@@ -1859,12 +1796,12 @@ fn project_emits_effects_in_canonical_order() {
     sorted.sort_unstable();
     assert_eq!(
         kinds, sorted,
-        "effects must appear in canonical order (renames < snapshot < presence < cwd < timer < notify); got {:?}",
+        "effects must appear in canonical order (renames < snapshot < presence < cwd < timer); got {:?}",
         outcome.effects
     );
-    // All six kinds must actually be present, otherwise the ordering
+    // All five kinds must actually be present, otherwise the ordering
     // assertion above is vacuous.
-    for expected in 0..=5 {
+    for expected in 0..=4 {
         assert!(kinds.contains(&expected), "expected effect kind {expected} to be present; got {:?}", outcome.effects);
     }
 }
@@ -1888,211 +1825,34 @@ fn cwd_changed_never_bootstraps_cwd() {
 }
 
 #[test]
-fn backgrounded_done_emits_notify_effect() {
-    let mut rt = two_tab_runtime_with_running_commands();
-    // Pane 7 is in the background tab. Pane 5 stays focused in the active tab.
-    let out = rt.panes_changed(PaneUpdate {
-        tab_panes: HashMap::from([
-            (0, vec![TerminalPane { id: 5, focused_in_tab: true, ..Default::default() }]),
-            (1, vec![pane(7)]),
-        ]),
-        live: HashSet::from([5, 7]),
-        theme: None,
-        exits: vec![(7, Some(0))], // pane 7 exits 0 → Done in background
-        native: HashMap::new(),
-    });
-    assert!(
-        out.effects.iter().any(|e| matches!(e, Effect::Notify { .. })),
-        "a background Done should emit Effect::Notify; effects = {:?}",
-        out.effects
-    );
-}
-
-#[test]
-fn focused_done_emits_no_notify_effect() {
-    let mut rt = two_tab_runtime_with_running_commands();
-    // Pane 5 is focused and exits 0. panes_changed records last_focused=Some(5)
-    // via note_focus; the notifier then suppresses a Notify for the focused
-    // pane. The Done stays lit on the rail (focus no longer recedes it), but
-    // no notification must be emitted for the pane the user is watching.
-    let out = rt.panes_changed(PaneUpdate {
-        tab_panes: HashMap::from([
-            (0, vec![TerminalPane { id: 5, focused_in_tab: true, ..Default::default() }]),
-            (1, vec![pane(7)]),
-        ]),
-        live: HashSet::from([5, 7]),
-        theme: None,
-        exits: vec![(5, Some(0))], // pane 5 exits 0 while focused
-        native: HashMap::new(),
-    });
-    assert!(
-        !out.effects.iter().any(|e| matches!(e, Effect::Notify { .. })),
-        "a focused Done must not emit Effect::Notify (the user is watching it); effects = {:?}",
-        out.effects
-    );
-}
-
-/// The lib.rs glue for the two focus-related effects, against real files:
-/// `PublishFocus` writes the shared focus, and `Notify` re-checks it before
-/// the claim election. Returns the keys this instance dispatched.
-fn apply_notify_effects(files: &crate::session_files::SessionFiles, out: Outcome) -> Vec<String> {
-    let mut dispatched = Vec::new();
-    for effect in out.effects {
-        match effect {
-            Effect::PublishFocus { pane_id } => files.publish_focus(pane_id),
-            Effect::Notify { key, unless_focused, .. } => {
-                let focused = unless_focused.is_some_and(|id| files.shared_focus() == Some(id));
-                if !focused && files.claim_notification(&key) {
-                    dispatched.push(key);
-                }
-            }
-            _ => {}
-        }
-    }
-    dispatched
-}
-
-/// Two rails in one session (#97): tab 1's rail was active with pane 9
-/// focused, then the user went to tab 0 and focused `focus_in_tab_0`. Pane 5
-/// in tab 0 finishes; each rail's settle tick runs, the hidden one first.
-/// Returns what each dispatched.
-fn done_with_a_hidden_sibling(focus_in_tab_0: u32) -> (Vec<String>, Vec<String>) {
-    let dir = tempfile::tempdir().unwrap();
-    let hidden_files = crate::session_files::SessionFiles::open_for_test(dir.path(), 1, 100);
-    let active_files = crate::session_files::SessionFiles::open_for_test(dir.path(), 2, 100);
-    let focused = |id| TerminalPane { id, focused_in_tab: true, ..Default::default() };
-    let panes = |f0: u32| {
-        let tab0 = [5, 6].map(|id| if id == f0 { focused(id) } else { pane(id) }).to_vec();
-        manifest(HashMap::from([(0, tab0), (1, vec![focused(9)])]))
-    };
-
-    let mut hidden = runtime_with_granted_permission();
-    hidden.own_plugin_tab_changed(Some(1));
-    hidden.tabs_changed(vec![tab(0, "a", false), tab(1, "b", true)]);
-    apply_notify_effects(&hidden_files, hidden.panes_changed(panes(5)));
-    hidden.visibility_changed(false);
-
-    let mut active = runtime_with_granted_permission();
-    active.own_plugin_tab_changed(Some(0));
-    active.tabs_changed(vec![tab(0, "a", true), tab(1, "b", false)]);
-    apply_notify_effects(&active_files, active.panes_changed(panes(focus_in_tab_0)));
-    assert_eq!(active.radar.last_focused(), Some(focus_in_tab_0), "setup");
-    assert_eq!(hidden.radar.last_focused(), Some(9), "setup: the hidden rail's focus is frozen");
-
-    for rt in [&mut hidden, &mut active] {
-        rt.status_pipe(&payload_json(5, "running"));
-        rt.timer_fast(PermissionProbe::default());
-        rt.status_pipe(&payload_json(5, "done"));
-    }
-    let from_hidden = apply_notify_effects(&hidden_files, hidden.timer_fast(PermissionProbe::default()));
-    let from_active = apply_notify_effects(&active_files, active.timer_fast(PermissionProbe::default()));
-    (from_hidden, from_active)
-}
-
-#[test]
-fn a_hidden_rail_does_not_notify_for_the_pane_the_active_rail_sees_focused() {
-    let (from_hidden, from_active) = done_with_a_hidden_sibling(5);
-    assert!(from_hidden.is_empty(), "the hidden rail's stale focus must not ding pane 5; got {from_hidden:?}");
-    assert!(from_active.is_empty(), "the active rail suppresses its focused pane; got {from_active:?}");
-}
-
-#[test]
-fn a_hidden_rail_still_notifies_for_a_pane_nobody_is_looking_at() {
-    // Control: the same edge with pane 6 focused fires exactly once.
-    let (from_hidden, from_active) = done_with_a_hidden_sibling(6);
-    assert_eq!(from_hidden.len() + from_active.len(), 1, "one toast; got {from_hidden:?} / {from_active:?}");
-}
-
-#[test]
-fn notify_when_focused_leaves_the_shared_focus_out_of_it() {
-    let mut rt = runtime_with_config(config::Config { notify_when_focused: true, ..config() });
-    rt.tabs_changed(vec![tab(0, "a", true)]);
-    rt.radar.set_tab_panes_for_position(0, vec![pane(7)]);
-    rt.status_pipe(&payload_json(7, "done"));
-    let out = rt.timer_fast(PermissionProbe::default());
-    let notes: Vec<_> = out.effects.iter().filter(|e| matches!(e, Effect::Notify { .. })).collect();
-    assert!(
-        matches!(notes.as_slice(), [Effect::Notify { unless_focused: None, .. }]),
-        "always-notify carries no focus re-check; got {:?}",
-        out.effects
-    );
-}
-
-#[test]
-fn restored_snapshot_does_not_notify() {
-    // Build a snapshot containing an already-Done command pane.
-    let mut seeded = crate::radar_state::RadarState::default();
-    seeded.command_mut().on_exit(7, Some(0), Tick(1), EpochSecs(0));
-    // Confirm the observation is present as Done.
-    assert_eq!(seeded.command(7).unwrap().status, Status::Done);
-    let snapshot = seeded.snapshot_json(None, 2);
-
-    // Restore the snapshot via load; the seed must silence the pre-existing Done.
-    let mut rt = runtime_with_config(config());
-    rt.load(config(), Some(&snapshot), PermissionProbe::default());
-
-    // A subsequent timer tick must not emit any Notify for the pre-existing pane.
-    let out = rt.timer_fast(PermissionProbe::default());
-    assert!(
-        !out.effects.iter().any(|e| matches!(e, Effect::Notify { .. })),
-        "a pre-existing Done loaded from snapshot must not fire a notification; \
-         effects = {:?}",
-        out.effects
-    );
-}
-
-#[test]
-fn backgrounded_done_via_status_pipe_notifies_once_then_timer_quiesces() {
+fn backgrounded_done_via_status_pipe_lets_the_timer_quiesce() {
     // The headline of the timer-arming rule: a finished agent in a background
-    // tab must NOT keep the 1 Hz timer alive forever. The Done arrives on the
-    // non-settling status pipe, so the runtime arms the timer once to carry the
-    // deferred notify/recede — then quiesces.
+    // tab must NOT keep the 1 Hz timer alive forever.
     let mut rt = runtime_with_config(config());
     let raw = payload::to_wire(&StatusPayload { msg: "shipped".into(), ..payload_for(7, Status::Done) });
+    rt.status_pipe(&raw);
 
-    // The edge arms the timer but does not itself settle (focus could be stale).
-    let edge = rt.status_pipe(&raw);
-    assert!(edge.effects.contains(&Effect::SetTimeout(Cadence::Fast)), "status-pipe edge arms the timer");
-    assert!(
-        !edge.effects.iter().any(|e| matches!(e, Effect::Notify { .. })),
-        "the edge itself does not notify (settle is deferred to the timer)"
-    );
-
-    // The first tick carries the deferred completion notification exactly once.
-    let tick1 = rt.timer_fast(PermissionProbe::default());
-    assert_eq!(
-        tick1.effects.iter().filter(|e| matches!(e, Effect::Notify { .. })).count(),
-        1,
-        "the settle tick fires the done notification once; effects = {:?}",
-        tick1.effects,
-    );
-
-    // Then the timer quiesces within a bounded number of ticks — a backgrounded
-    // Done no longer pins it awake, and no further notifications fire.
+    // The timer quiesces within a bounded number of ticks — a backgrounded
+    // Done doesn't pin it awake.
     let mut extra = 0;
     while rt.timer_chain.armed().is_some() {
-        let t = rt.timer_fast(PermissionProbe::default());
-        assert!(
-            !t.effects.iter().any(|e| matches!(e, Effect::Notify { .. })),
-            "no repeat notification after the first settle",
-        );
+        rt.timer_fast(PermissionProbe::default());
         extra += 1;
         assert!(extra < 4, "timer must quiesce for a backgrounded Done, not tick forever");
     }
     assert!(!rt.timer_should_continue(), "quiesced: nothing left to tick for");
 
-    // The Done stays lit (it recedes only when focused, via a later PaneUpdate).
+    // The Done stays lit.
     assert_eq!(rt.radar.status_store().get(7).unwrap().status, Status::Done);
 }
 
 #[test]
 fn flash_keeps_fast_timer_until_cleared() {
-    // A flip-to-pending pipe edge arms a two-tick ping flash — even once the
-    // deferred notify settle has fired and nothing else is running, the
-    // timer must keep ticking Fast until the flash itself clears. Mirrors
-    // `backgrounded_done_via_status_pipe_notifies_once_then_timer_quiesces`,
-    // which quiesces right after its one settle tick; the flash pins the
-    // timer open for its own extra window on top of that.
+    // A flip-to-pending pipe edge arms a two-tick ping flash — even with
+    // nothing else running, the timer must keep ticking Fast until the flash
+    // itself clears. Mirrors
+    // `backgrounded_done_via_status_pipe_lets_the_timer_quiesce`, which
+    // quiesces right away; the flash pins the timer open for its own window.
     let mut rt = runtime_with_config(config());
     rt.tabs_changed(vec![tab(0, "work", true)]);
     rt.radar.set_tab_panes_for_position(0, vec![pane(7)]);
@@ -2101,8 +1861,8 @@ fn flash_keeps_fast_timer_until_cleared() {
     let edge = rt.status_pipe(&raw);
     assert!(edge.effects.contains(&Effect::SetTimeout(Cadence::Fast)), "the flip-to-pending edge arms the timer");
 
-    // Tick 1 carries the deferred notify settle; the flash (armed through
-    // tick 2) is still active, so the timer must not disarm yet.
+    // The flash (armed through tick 2) is still active at tick 1, so the
+    // timer must not disarm yet.
     rt.timer_fast(PermissionProbe::default());
     assert_eq!(rt.tick, 1);
     assert!(rt.timer_chain.armed().is_some(), "flash still active at tick 1 — timer must stay armed");
@@ -2213,13 +1973,8 @@ fn remote_running_never_arms_fast_cadence() {
     rt.timer_fast(PermissionProbe::default()); // promote (DEBOUNCE_TICKS=2)
     assert_eq!(rt.radar.command_store().get(7).unwrap().status, Status::Running);
     assert_eq!(rt.radar.command_store().get(7).unwrap().kind, crate::kind::Kind::Remote);
-    // The promoting tick itself still arms Fast: the notify baseline lags one
-    // tick behind cadence arming (`arm_timer_if_needed` runs before
-    // `notify_effects`), so `has_unsettled_notifications` is unavoidably true
-    // on the very tick a status first changes — true for a Job too, and
-    // orthogonal to the steady exclusion this test targets. One more tick
-    // lets that baseline catch up; only then does the row's own steadiness
-    // decide cadence.
+    // The promoting tick itself may still arm Fast; one more tick lets the
+    // row's own steadiness decide cadence.
     let settled = rt.timer_fast(PermissionProbe::default());
     assert!(
         !settled.effects.contains(&Effect::SetTimeout(Cadence::Fast)),

@@ -82,8 +82,7 @@ classification, `Kind`, the bounded pipe argv; shared by producer and plugin),
 │                                                                        │
 │  session_files.rs: SessionFiles                                        │
 │    per-session filesystem coordination across instances: snapshots,    │
-│    permission marker/lock, root fallback, pruning, presence files,     │
-│    notification claims, shared focus                                   │
+│    permission marker/lock, root fallback, pruning, presence files      │
 │                                                                        │
 │  radar_state.rs / rollup.rs / tab_namer.rs: state + tab model          │
 │    StatusStore + CommandStore (over core's ObservationStore),          │
@@ -93,8 +92,8 @@ classification, `Kind`, the bounded pipe argv; shared by producer and plugin),
 │    cross-session peer state and the presence record (§13)              │
 │                                                                        │
 │  control.rs / config.rs / theme.rs: cmd + config pipes, colors         │
-│  permission.rs / clock.rs / notify_rules.rs: grant state machine,      │
-│    timer-chain bookkeeping, notification edge rules                    │
+│  permission.rs / clock.rs: grant state machine, timer-chain            │
+│    bookkeeping                                                         │
 │                                                                        │
 │  render.rs: pure rail renderer                                         │
 │    render_rail(rows, ledger, opts) -> RenderedRail                     │
@@ -104,9 +103,8 @@ classification, `Kind`, the bounded pipe argv; shared by producer and plugin),
         │ Effects: SwitchTab, ShowPane, RenameTab, RequestPermission,
         │ SetTimeout(Fast|Slow), SetSelectable, PersistSnapshot,
         │ PersistPermissionMarker, HeartbeatPermissionLock, ResolveCwd,
-        │ Notify, PublishFocus, PersistPresence, ClaimPresenceWriter,
-        │ ReadPresences, DismissPresence, SwitchSession, BroadcastStatus,
-        │ CloseSelf
+        │ PersistPresence, ClaimPresenceWriter, ReadPresences,
+        │ DismissPresence, SwitchSession, BroadcastStatus, CloseSelf
         ▼
 ```
 
@@ -176,22 +174,6 @@ only via shared signals: a new broadcast, the return-to-shell exit-clear, or a
 prune. Every tab's instance receives those, so all tabs converge. The former
 `on_focus` wire field is dropped unread like any unknown key.
 
-Focus still gates one thing: the notifier stays quiet about the focused pane
-(unless `notify_when_focused`). Each rail notes focus from its own
-`PaneUpdate`s, which reach only the active tab's plugins, so a hidden rail's
-idea of focus is frozen at whenever its tab was last active. Left alone, a
-hidden rail would notify for the pane the user is looking at and win the
-notification claim over the active rail that suppressed it. So every
-`PaneUpdate` also publishes the rail's focused pane
-(`Effect::PublishFocus`) to `zj-radar.<pid>.focus` in the shared root,
-written only when it changes, and each `Effect::Notify` carries its pane
-(`unless_focused`). Before claiming, the glue reads that file and drops a
-notification for the shared focus. The last-active rail wrote it, so it is
-the focus every rail agrees on. After a detach it keeps the at-detach focus,
-which is what a single rail did before. With two clients, the most recent
-active view wins. Like the presence-writer token, the file is pid-scoped and
-aged by its session's presence file in the sweep.
-
 ## 5. The pipe contract
 
 Producers broadcast `zj_radar.status.v1` by name. Each sidebar instance filters
@@ -208,7 +190,7 @@ on the name and keeps its own copy of the state.
   "branch": "fix/x",
   "msg": "running tests…",
   "task": "fix the flaky auth test",  // optional sticky label
-  "ack": false,                       // optional: "user already saw this", notifier stays silent
+  "ack": false,                       // optional: "user already saw this"
   "tasks": {                          // optional background-task batch (upserts by id)
     "snapshot": true,                 //   true = the complete running set
     "items": [ { "id": "b1", "state": "running",   // running | completed | failed | killed | ended
@@ -227,7 +209,7 @@ to `idle`; strip ANSI, control, and bidi characters; fold newlines; truncate
 local state. It broadcasts a synthetic payload (the pane's Pending re-sent as
 `done` with `ack: true`) onto the same pipe (`Effect::BroadcastStatus`), so
 every instance, including the sender, converges through the normal
-`status_pipe` intake, and `ack` keeps every notifier silent.
+`status_pipe` intake.
 
 **Bounded sends.** `zellij pipe` is a backpressure channel: the client blocks
 until every loaded plugin instance consumes the message, and an instance
@@ -286,8 +268,7 @@ sidebars start empty until the next broadcast.
 
 **Permissions.** `ReadApplicationState`, `ReadCliPipes`,
 `ChangeApplicationState` (switch tab/pane/session, rename tabs, close the grant
-float), and `RunCommands` (desktop notifications via `osascript` /
-`notify-send`, and the ack re-broadcast). Without `RunCommands`, `run_command`
+float), and `RunCommands` (the repo lookup and the ack re-broadcast). Without `RunCommands`, `run_command`
 is a silent no-op.
 
 **Selectability.** One level rule, `PluginRuntime::desired_selectable`: the
@@ -465,9 +446,7 @@ speeds or not at all (`PluginRuntime::desired_cadence`):
 
 - **Fast (1 Hz)** while there is tick-windowed work: the permission flow still
   live; a spinning glyph (`TrackedObservation::animating`, Running and not a
-  service); an un-carried completion edge (a status-pipe notify deferred to
-  the timer because its own focus cannot be trusted, see *Settle* in
-  CONTEXT.md); a command `Done` awaiting its TTL recede; an active flash; a
+  service); a command `Done` awaiting its TTL recede; an active flash; a
   pending cross-session cycle selection awaiting its idle-commit; and the
   scheduled one-shots (promotable pendings awaiting debounce, tentative Dones
   awaiting confirm, stale-Running grace clocks).
@@ -491,7 +470,7 @@ speeds or not at all (`PluginRuntime::desired_cadence`):
 
 Service, remote, and interactive rows never pin Fast. A dev server, an ssh
 session, or an editor left open overnight costs zero ticks. A backgrounded `done`/`error`/`pending` row
-is terminal: once its one-shot settle has run it does not keep Fast alive.
+is terminal and does not keep Fast alive.
 
 ## 9. Render gate
 
@@ -585,7 +564,7 @@ onboarding instance never owns a tab. This stops a stale background instance
 from applying its private history to another tab after navigation, and keeps
 close/reorder events from redirecting ownership. The cwd bootstrap stays
 session-wide because the cwd also stamps `repo` on observed commands, which
-every instance must agree on for the notification claim key.
+every instance must agree on.
 
 ## 12. Ledger
 

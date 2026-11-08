@@ -840,8 +840,8 @@ pub fn plugin_wasm_path() -> std::path::PathBuf {
 /// requested permission is missing here, Zellij treats the grant as incomplete,
 /// re-prompts on load, and withholds `render()` until answered — so the plugin
 /// pane stays blank and `wait_until_ready` times out with an empty PTY. Keep this
-/// list in lockstep with `request_permission` in `src/lib.rs` (`RunCommands` was
-/// added by the notify feature and must stay listed here).
+/// list in lockstep with `request_permission` in `src/lib.rs` (`RunCommands` serves
+/// the repo lookup and must stay listed here).
 ///
 /// If the path is already present, the file is left unchanged.
 /// Returns the complete isolated environment for `ZellijSession::start`.

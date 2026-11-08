@@ -91,8 +91,8 @@ pub(crate) enum PaneDisplay {
         /// Waiting-on-you stamp (Pending only) — see `PrimaryDetail`.
         pending_epoch_s: Option<u64>,
         /// The right-click acknowledge exemption: the payload rode in with
-        /// `ack: true` (the user has already seen this status), so the
-        /// notifier skips it. Cleared by the pane's next real broadcast —
+        /// `ack: true` (the user has already seen this status). Cleared by
+        /// the pane's next real broadcast —
         /// see `StatusStore::apply`.
         acknowledged: bool,
         /// Background tasks the agent started (`core::task`), rendered as
@@ -107,7 +107,7 @@ pub(crate) enum PaneDisplay {
     /// the Companion class (`docs/activity-model.md`): it waits on the user,
     /// so it is pane *context*, not activity. Renders as a muted identity
     /// label (`└ ○ $ nvim README.md`), never a spinner, and contributes
-    /// nothing to counts, severity, or notifications. Built from the command
+    /// nothing to counts or severity. Built from the command
     /// store's quiet pending; shown only when no live observation outranks it
     /// (an active/attention observation keeps its `Tracked` row).
     Interactive {

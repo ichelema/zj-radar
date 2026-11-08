@@ -190,9 +190,9 @@ path. The sidebar requests four:
 - `ReadCliPipes`: receive `zj_radar.status.v1` broadcasts.
 - `ChangeApplicationState`: switch tabs and panes on click, switch sessions
   from the badge, apply managed tab names.
-- `RunCommands`: deliver desktop notifications (`osascript` / `notify-send`)
-  and re-broadcast the `✓` acknowledge gesture over `zellij pipe`. Nothing
-  else is ever run. Without it both are skipped and the rest works.
+- `RunCommands`: look up a pane's git remote for tab naming and re-broadcast
+  the `✓` acknowledge gesture over `zellij pipe`. Nothing else is ever run.
+  Without it both are skipped and the rest works.
 
 You normally never see the prompt. `setup zellij` asks for consent at install
 time and writes the grant into Zellij's `permissions.kdl` itself: merge-safe,

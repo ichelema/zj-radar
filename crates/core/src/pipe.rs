@@ -70,7 +70,7 @@ pub const MAX_STDIN_BYTES: u64 = 8 * 1024 * 1024;
 
 // $1 = deadline seconds, $2 = pipe name, $3 = payload — positional parameters,
 // never interpolated into the script (same no-escaping rule as the plugin's
-// `notify_command`), so an arbitrary payload cannot break out of the command.
+// `run_command` argv), so an arbitrary payload cannot break out of the command.
 //
 // Accepted residuals, shared with notify.sh's inline copy of this idiom (keep
 // the two in sync):

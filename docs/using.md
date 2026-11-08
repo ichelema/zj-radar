@@ -170,20 +170,3 @@ Pane detail needs sessions running this release's plugin: after upgrading,
 restart existing sessions or start new ones; older rails publish counts only. The
 `--needs-attention` and stale rules, exit codes, the JSON schema, and known
 limits are in [`producers.md`](producers.md#presence-file-and-state---json).
-
-## Notifications
-
-The rail sends a desktop notification when a pane changes to `done`, `error`,
-or `pending`. Defaults:
-
-- Only for panes you are not looking at. Set `notify_when_focused true` to
-  include the focused pane.
-- One notification per event, even though the rail runs one instance per tab.
-- Acknowledging a row with `✓` never notifies.
-- Delivery uses `osascript` on macOS and `notify-send` on Linux. Without either
-  on `PATH`, or without the `RunCommands` permission, notifications are
-  silently skipped and everything else works.
-
-Turn them off with `notify false`, or per status with `notify_done`,
-`notify_error`, and `notify_pending`. A remote session's disconnect has its
-own switch, `notify_remote`. See [`configuration.md`](configuration.md).

@@ -286,24 +286,7 @@ fn snapshot_load_scrubs_hostile_observation_strings() {
 }
 
 #[test]
-fn active_tab_focus_is_the_only_global_focus_transition() {
-    let mut radar = RadarState::default();
-    radar.tabs_changed(vec![tab(10, 0, "left", false), tab(20, 1, "right", true)]);
-    let update = PaneUpdate {
-        tab_panes: HashMap::from([(0, vec![focused_pane(1)]), (1, vec![focused_pane(2)])]),
-        live: HashSet::from([1, 2]),
-        theme: None,
-        exits: Vec::new(),
-        native: HashMap::new(),
-    };
-
-    radar.panes_changed(update, 7, 0, config::NamingMode::Off);
-
-    assert_eq!(radar.last_focused(), Some(2));
-}
-
-#[test]
-fn a_shown_floating_pane_holds_focus_for_the_highlight_and_the_notifier() {
+fn a_shown_floating_pane_holds_focus_for_the_highlight() {
     // Zellij reports focus per layer: tiled pane 1 AND floating pane 2 both
     // say focused. Which one the user is in depends on the tab's layer.
     let floating = TerminalPane { floating: true, ..focused_pane(2) };
@@ -312,7 +295,6 @@ fn a_shown_floating_pane_holds_focus_for_the_highlight_and_the_notifier() {
         radar.tabs_changed(vec![RadarTab { floating_visible: shown, ..tab(10, 0, "a", true) }]);
         radar.set_tab_panes_for_position(0, vec![focused_pane(1), floating.clone()]);
         assert_eq!(radar.rows(0)[0].display.focused_pane, Some(want), "floating shown={shown}");
-        assert_eq!(radar.focused_terminal_in_active_tab(), Some(want), "floating shown={shown}");
     }
 }
 
@@ -652,31 +634,6 @@ fn same_pane_status_observation_wins_over_command() {
     let row = radar.rows(3)[0].clone();
     let detail = row.display.detail.as_ref().expect("active pane sets detail");
     assert_eq!(detail.repo, "from-status", "status pipe wins over command for the same pane id");
-}
-
-#[test]
-fn notify_views_status_wins_over_command_for_same_pane() {
-    // Guards the status>command precedence in `notify_views`: when the same pane
-    // id appears in both the status store and the command store, the returned
-    // observation must be the STATUS one (mirrors the system-wide rule and the
-    // precedence tested for `rows()` in `same_pane_status_observation_wins_over_command`).
-    let mut radar = RadarState::default();
-
-    // A command observation on pane 5 (foreground command, promoted to Running).
-    radar.command_changed(5, &["cargo".into(), "build".into()], true, 1);
-    radar.timer(1 + DEBOUNCE_TICKS, 0);
-    assert_eq!(radar.command(5).unwrap().status, Status::Running);
-
-    // A status-pipe observation on the SAME pane 5, with a distinct repo so
-    // the two sources are distinguishable.
-    radar.status_mut().apply(payload_in_repo(5, Status::Done, "from-status"), 3, 0);
-
-    let views = radar.notify_views();
-    let obs = views.get(&5).expect("pane 5 must appear in notify_views");
-    assert_eq!(
-        obs.repo, "from-status",
-        "notify_views must return the status-store observation, not the command-store one"
-    );
 }
 
 // ── End-result outcome (full pipeline) ──
@@ -1174,25 +1131,6 @@ fn mutating_events_request_a_render() {
     let change = radar.command_changed(1, &["zsh".into()], true, 2);
     assert!(change.render, "clearing a stale pushed status must repaint");
     assert!(change.snapshot == SnapshotWrite::Now, "…and persist the clear");
-}
-
-// ── Focus no longer changes rail status ─────────────────────────────────────
-//
-// The focus-driven recede is gone. A pushed completion stays lit until a new
-// broadcast, the return-to-shell exit-clear, or a prune — never because the
-// pane gained focus. `note_focus` only tracks `last_focused` for the notifier.
-
-#[test]
-fn focus_does_not_change_rail_status() {
-    let mut radar = RadarState::default();
-    // A completed agent turn: a pushed Done.
-    let done = payload_in_repo(5, Status::Done, "repo");
-    radar.status_mut().apply(done, 1, 0);
-
-    // Focusing the pane must NOT clear the Done — focus no longer recedes status.
-    radar.note_focus(Some(5));
-
-    assert_eq!(radar.status(5).unwrap().status, Status::Done, "focus no longer clears a pushed Done");
 }
 
 // ── next_attention_tab integration tests ─────────────────────────────────
@@ -2029,7 +1967,6 @@ fn native_attention_wins_over_both_stores() {
     assert_eq!(display.panes[0].kind(), Kind::Claude);
     assert_eq!(display.panes[0].msg(), "Reading files");
     assert!(radar.needs_fast_ticks(), "a native Running row spins");
-    assert!(radar.notify_views().is_empty(), "Zellij notifies natively for a reported pane");
 }
 
 #[test]

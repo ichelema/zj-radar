@@ -282,7 +282,7 @@ Field rules:
   keeps the stored label; the plugin clears it on `idle` and on return to
   shell.
 - `ack` (optional, default `false`): "the user has already seen this". State
-  converges as usual but no desktop notification fires. The rail's `✓` gesture
+  converges as usual. The rail's `✓` gesture
   sets it; producers reporting real events should leave it out.
 - `tasks` (optional): background tasks the agent started (a backgrounded
   test run, a background subagent, a dev server), drawn as `┊` lines under

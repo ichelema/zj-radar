@@ -165,7 +165,7 @@ Each topic has one home; everything else links to it.
 |---|---|
 | Pitch, quick start, doc index | `README.md` |
 | Install, permissions, layouts, removal | `docs/install.md` |
-| Reading the rail, mouse, badge, notifications | `docs/using.md` |
+| Reading the rail, mouse, badge | `docs/using.md` |
 | Options and pipes | `docs/configuration.md` |
 | Producers and the wire format | `docs/producers.md` |
 | Symptom → fix | `docs/troubleshooting.md` |

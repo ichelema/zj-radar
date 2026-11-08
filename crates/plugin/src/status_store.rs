@@ -283,8 +283,7 @@ impl StatusStore {
     /// row this predicate is its only tick source — the ghost of a killed
     /// `source: server` producer must expire in ~15s, not ~15 Slow fires).
     /// A finished `Done`/`Error` or a waiting `Pending` is terminal for tick
-    /// purposes — its notification/recede is a one-shot the settle carries —
-    /// so it must NOT pin the timer awake.
+    /// purposes, so it must NOT pin the timer awake.
     pub fn needs_ticks(&self) -> bool {
         !self.suspect_running.is_empty() || self.store.any(TrackedObservation::animating)
     }

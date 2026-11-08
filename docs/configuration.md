@@ -40,15 +40,9 @@ the field as it was, so a typo never resets a setting.
 | `spinner_fps` | `1`–`10` | `4` | Frames per second of the working spinner on the visible rail. `1` steps once a second (the pre-0.9 pace). Each frame repaints the rail; hidden tabs and agents running past 10 minutes (whose spinner eases to a slow blink) never animate faster than once a second. |
 | `task_lines` | `lines` · `count` · `off` | `lines` | How an agent's background tasks show: a `┊` line per task, only a `+N` count on the agent's row, or nothing. See [`using.md`](using.md). |
 | `ledger` | `true` · `false` | `true` | Show the `─ earlier ─` list of recent completions. `false` shows only live panes; history is still recorded, so `true` brings it back. See [`using.md`](using.md). |
-| `notify` | `true` · `false` | `true` | Master switch for desktop notifications. |
-| `notify_done` | `true` · `false` | `true` | Notify on transition to `done`. |
-| `notify_error` | `true` · `false` | `true` | Notify on transition to `error`. |
-| `notify_pending` | `true` · `false` | `true` | Notify on transition to `pending`. |
-| `notify_remote` | `true` · `false` | `true` | Notify when a remote session (`ssh`, `mosh`, …) disconnects. Independent of `notify_done`/`notify_error`: a disconnect answers to this toggle alone, so silencing routine completions keeps disconnects, and `notify_remote false` silences only disconnects. |
-| `notify_when_focused` | `true` · `false` | `false` | Also notify for the focused pane. |
 | `session_tree` | `true` · `false` | `false` | Draw peer sessions' tab trees on this rail (off keeps one line per session). Display-only: every session publishes its tree regardless. See [`using.md`](using.md#cross-session-badge). |
 | `interactive_commands` | comma/space-separated exe names | *(empty)* | Extra programs to treat as interactive: never a spinning row, only a muted label. Extends the built-in set of editors, pagers, and TUIs. Applies live. See [`activity-model.md`](activity-model.md). |
-| `remote_commands` | comma/space-separated exe names | *(empty)* | Extra programs to treat as remote-session launchers (steady mark, tab `⇄` marker, disconnect notification). Matched by program name alone, arguments ignored. Extends the built-in set (`ssh`, `mosh`, `mosh-client`, `autossh`, `et`). Applies live. See [`activity-model.md`](activity-model.md). |
+| `remote_commands` | comma/space-separated exe names | *(empty)* | Extra programs to treat as remote-session launchers (steady mark, tab `⇄` marker). Matched by program name alone, arguments ignored. Extends the built-in set (`ssh`, `mosh`, `mosh-client`, `autossh`, `et`). Applies live. See [`activity-model.md`](activity-model.md). |
 
 Notes:
 
@@ -62,9 +56,6 @@ Notes:
 
 Three more keys (`role`, `grant_hint`, `defer_permission`) are set by
 `zj-radar run`'s generated layouts. Don't set them by hand.
-
-Notification behavior (transitions only, background panes by default, one per
-event across tabs) is described in [`using.md`](using.md#notifications).
 
 ## Runtime config
 

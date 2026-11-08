@@ -205,11 +205,6 @@ pub(crate) struct RadarChange {
     /// blocking `get_pane_cwd` host call in the wasm glue) to bootstrap a name
     /// for a freshly-opened tab that has not emitted a `CwdChanged` yet.
     pub cwd_bootstrap: Vec<u32>,
-    /// Whether this event's focus is trustworthy enough to fire notifications now
-    /// (the notifier suppresses the focused pane) — see `CONTEXT.md`'s `## Settle`
-    /// entry. `false` defers notification to the timer. (It no longer gates any
-    /// rail-state change; focus stopped driving state in the drop-focus refactor.)
-    pub settle: bool,
     /// Bypass the runtime's rows-diff render gate: this render request changes
     /// the *drawing* without necessarily changing the rows. Two setters — the
     /// timer (spinner frames and ages come from `now_tick`/`now_epoch_s` at
@@ -267,7 +262,6 @@ pub(crate) struct RadarState {
     /// Manifest position held until the corresponding tab facts arrive. A new
     /// plugin can receive `PaneUpdate` before its first `TabUpdate`.
     naming_tab_position: Option<usize>,
-    last_focused: Option<u32>,
     live_panes: Option<HashSet<u32>>,
     /// Pane ids we have already requested an initial `get_pane_cwd` read for.
     /// Tracks *attempts*, not successes, so a pane that has no cwd yet is never
@@ -489,7 +483,7 @@ impl RadarState {
         let live: HashSet<TabId> = self.tabs.iter().map(|t| t.id).collect();
         self.namer.retain_tabs(&live);
         self.file_unfiled();
-        RadarChange { render: true, settle: false, ..RadarChange::default() }
+        RadarChange { render: true, ..RadarChange::default() }
     }
 
     /// Record which tab contains this plugin pane. Ownership resolves once and
@@ -641,18 +635,12 @@ impl RadarState {
         self.ledger_receded(dropped_command, &prune_index, &status_tracked);
         self.pane_cwd.retain(|id, _| effective_live.contains(id));
         self.cwd_bootstrap_attempted.retain(|id| effective_live.contains(id));
-        // Track this update's fresh focus for notification suppression. It no
-        // longer drives rail state (no focus recede) — see `note_focus`. `settle`
-        // still gates the notifier: `panes_changed` carries trustworthy focus, so
-        // it fires notifications now rather than deferring to the timer.
-        self.note_focus(self.focused_terminal_in_active_tab());
 
         RadarChange {
             render: true,
             snapshot: SnapshotWrite::now_if(displaced_any || pruned_any),
             renames: self.rename_tabs(naming),
             cwd_bootstrap: self.cwd_bootstrap_targets(naming),
-            settle: true,
             ..RadarChange::default()
         }
     }
@@ -787,7 +775,7 @@ impl RadarState {
         // A cwd feeds *naming* only — nothing `rows()` reads. The rail repaint
         // (if any) arrives via the `RenameTab` effect's own `TabUpdate` echo,
         // so requesting one here just re-drew an identical rail.
-        RadarChange { render: false, renames: self.rename_tabs(naming), settle: false, ..RadarChange::default() }
+        RadarChange { render: false, renames: self.rename_tabs(naming), ..RadarChange::default() }
     }
 
     /// Unlike the other mutating entry points, this one takes no `now_epoch_s`:
@@ -843,7 +831,6 @@ impl RadarState {
             // *pending* debounce maps; the row appears when the TIMER promotes
             // it, and that tick renders). Repaint only on the clear.
             render: cleared,
-            settle: false,
             // Persist only when we actually cleared, so a newly-opened tab
             // rehydrates the idle from the snapshot rather than the stale status.
             snapshot: SnapshotWrite::now_if(cleared),
@@ -930,16 +917,15 @@ impl RadarState {
             && now_status == Some(Status::Running)
             && !tasks_changed
             && self.status.get(pane_id).is_some_and(TrackedObservation::animating);
-        // NOTE: we deliberately do NOT settle here. A pushed status is shown as-is;
-        // focus no longer recedes or clears it. A completion clears only via a new
-        // broadcast for the pane, the return-to-shell exit-clear
-        // (`command_changed` → `clear_on_prompt_return`), or a prune.
+        // A pushed status is shown as-is; focus never recedes or clears it. A
+        // completion clears only via a new broadcast for the pane, the
+        // return-to-shell exit-clear (`command_changed` → `clear_on_prompt_return`),
+        // or a prune.
         Some(RadarChange {
             render: !label_only,
             snapshot: if label_only { SnapshotWrite::Deferred } else { SnapshotWrite::Now },
             snapshot_pane: Some(pane_id),
             renames: if repo_changed { self.rename_tabs(naming) } else { Vec::new() },
-            settle: false,
             ..RadarChange::default()
         })
     }
@@ -1069,54 +1055,15 @@ impl RadarState {
         })
     }
 
-    /// Track the focused terminal pane, for the notifier's "don't ding the pane
-    /// you're looking at" suppression only. Focus **no longer drives any rail
-    /// state**: `done`/`error`/`pending` rows clear only via a new broadcast, the
-    /// return-to-shell exit-clear (`command_changed`), or prune — all *shared*
-    /// inputs: broadcasts and `CommandChanged` reach every tab's instance at
-    /// once, and the manifest-borne prune reaches a hidden rail with the
-    /// manifest its reveal brings. So the rail renders
-    /// identically on every tab regardless of which pane is focused (focus is
-    /// per-client and is NOT delivered to background instances — deriving rail
-    /// state from it was the source of the cross-tab desync).
-    ///
-    /// A `None` reading carries no focus information (the active tab's focused
-    /// pane is a plugin/float, or topology is mid-churn), so preserve the last
-    /// known focus rather than clobbering it.
-    pub(crate) fn note_focus(&mut self, focused: Option<u32>) {
-        if let Some(id) = focused {
-            self.last_focused = Some(id);
-        }
-    }
-
-    pub(crate) fn last_focused(&self) -> Option<u32> {
-        self.last_focused
-    }
-
     /// THE precedence between observation sources: Zellij's native attention
     /// (which already picked OSC 7501 over a shell command) wins over both
     /// stores, and a status-pipe observation wins over a command one for the
-    /// same pane id. This is the single definition of the rule — the one place that knows there is more than one store. Both
-    /// consumers (`tab_display`'s roll-up and `notify_views`) read through it, so
-    /// the precedence can never be encoded two different ways and silently drift.
+    /// same pane id. This is the single definition of the rule — the one place that knows there is more than one store.
+    /// The roll-up (`tab_display`) reads through it, so the precedence can never
+    /// be encoded two different ways and silently drift.
     fn resolve(&self, pane_id: u32) -> Option<&TrackedObservation> {
         // ponytail: an idle native pane falls back to the stores, so the pipe and observed commands keep working until they go
         self.native.get(&pane_id).or_else(|| self.status.get(pane_id)).or_else(|| self.command.get(pane_id))
-    }
-
-    /// Union of both stores' observations, keyed by pane id, for the notifier.
-    /// A pane CAN appear in both stores; `resolve` applies the system-wide
-    /// "status wins over command" precedence, so a shared id maps to the status
-    /// observation.
-    pub(crate) fn notify_views(&self) -> std::collections::BTreeMap<u32, &crate::observation::TrackedObservation> {
-        let ids: std::collections::BTreeSet<u32> =
-            self.command.observations().map(|(id, _)| id).chain(self.status.observations().map(|(id, _)| id)).collect();
-        // Zellij notifies natively (`attention.desktop_notifications`): a pane it
-        // shows attention for never notifies from here.
-        ids.into_iter()
-            .filter(|id| !self.native.contains_key(id))
-            .filter_map(|id| self.resolve(id).map(|o| (id, o)))
-            .collect()
     }
 
     /// Prepared ledger rows for rendering, newest first. Each row's tab
@@ -1179,7 +1126,7 @@ impl RadarState {
     /// still seated in one. Shared by `status_pipe`'s live not-Pending →
     /// Pending edge and a Running-remote → completion edge (`timer`,
     /// `panes_changed`'s exit handling) — both are "make the user aware"
-    /// edges that fire whether or not a desktop notification also does.
+    /// edges.
     fn arm_flash(&mut self, pane_id: u32, tick: u64) {
         if let Some(tab_id) = self.tab_of_pane(pane_id) {
             self.flash_until.insert(tab_id, tick + FLASH_TICKS);
@@ -1352,12 +1299,6 @@ impl RadarState {
         self.namer.applied_name(tab_id)
     }
 
-    fn focused_terminal_in_active_tab(&self) -> Option<u32> {
-        let active = self.tabs.iter().find(|tab| tab.active)?;
-        let panes = self.tab_panes.get(&active.position)?;
-        self.focused_pane_at(active.position, panes)
-    }
-
     /// Live terminal panes whose cwd we have neither learned (via `CwdChanged`)
     /// nor yet attempted to read. Focused panes come first — they name their tab
     /// — and the result is capped at `MAX_CWD_BOOTSTRAP_PER_UPDATE` so one update
@@ -1367,10 +1308,7 @@ impl RadarState {
     /// Bootstrap exists to name tabs, so it is a no-op (and pays for no
     /// blocking reads) when naming is `Off` — mirroring `rename_tabs`. Unlike
     /// renames it is NOT scoped to the owned tab: the cwd also stamps `repo`
-    /// on observed commands (`command_changed`), which titles their desktop
-    /// notification. (The cross-instance claim key deliberately leaves a
-    /// command's title out — `notify_rules::claim_key` — since a hidden rail
-    /// never sees this bootstrap and would otherwise split the election.)
+    /// on observed commands (`command_changed`).
     fn cwd_bootstrap_targets(&mut self, naming_mode: config::NamingMode) -> Vec<u32> {
         if naming_mode == config::NamingMode::Off {
             return Vec::new();

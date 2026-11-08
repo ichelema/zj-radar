@@ -69,9 +69,8 @@ pub struct TrackedObservation {
     #[serde(default)]
     pub pending_epoch_s: Option<u64>,
     /// The user has already seen this status (the payload rode in with
-    /// `ack: true` — the rail's right-click acknowledge). The notifier skips
-    /// acknowledged observations outright; everything else treats them like
-    /// any other status. Overwritten fresh on every intake, so the exemption
+    /// `ack: true` — the rail's right-click acknowledge). Everything treats
+    /// them like any other status. Overwritten fresh on every intake, so the exemption
     /// lasts exactly as long as the acknowledged status itself. Serde-defaulted
     /// so pre-ack snapshots still load.
     #[serde(default)]
@@ -261,8 +260,7 @@ mod tests {
 
     #[test]
     fn acknowledged_true_round_trips_through_the_snapshot() {
-        // The notifier's silence exemption must survive a rehydrate: an acked
-        // status reloaded from the snapshot must not re-notify.
+        // The ack flag must survive a rehydrate.
         let obs = TrackedObservation { acknowledged: true, ..sample() };
         let json = serde_json::to_string(&obs).unwrap();
         assert!(json.contains(r#""acknowledged":true"#), "ack persists: {json}");
