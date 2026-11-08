@@ -22,6 +22,13 @@ on:
 permissions:
   contents: read
 
+env:
+  # Zellij 0.46 (the attention API the rail reads) is not released yet and
+  # nixpkgs has no build of it, so the suite runs against Zellij built from
+  # the same rev the plugin's zellij-tile pin uses (crates/plugin/Cargo.toml).
+  # Drop the build steps and this var once 0.46 ships in nixpkgs.
+  ZELLIJ_REV: 43c8710b3a9845f60d5a567c7410fc1197fabb66
+
 # A force-push to a PR shouldn't stack serial PTY suites; never cancel the
 # scheduled/release runs.
 concurrency:
@@ -74,9 +81,19 @@ jobs:
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'Cargo.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
+      - uses: actions/cache@v4
+        id: zellij-cache
+        if: steps.scope.outputs.run == 'true'
+        with:
+          path: ~/zellij-git
+          key: zellij-git-${{ runner.os }}-${{ env.ZELLIJ_REV }}
+      - name: build zellij ${{ env.ZELLIJ_REV }}
+        if: steps.scope.outputs.run == 'true' && steps.zellij-cache.outputs.cache-hit != 'true'
+        run: cargo install --locked --git https://github.com/zellij-org/zellij --rev "$ZELLIJ_REV" zellij --root ~/zellij-git
       - name: live e2e (L5)
         if: steps.scope.outputs.run == 'true'
-        run: nix develop -c just test-e2e
+        # The git build goes ahead of the devshell's nixpkgs zellij on PATH.
+        run: nix develop -c env PATH="$HOME/zellij-git/bin:$PATH" sh -c 'zellij --version && just test-e2e'
       - name: file a failure issue (nightly visibility)
         if: failure() && github.event_name == 'schedule'
         uses: ./.github/actions/nightly-failure-issue

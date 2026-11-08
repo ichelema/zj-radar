@@ -464,6 +464,13 @@ Se un hook resta, Claude/Codex/pi mostrano un errore a ogni evento perché
 ## 9. Rischi e limiti
 
 - Zellij richiesto ≥ 0.46.0, oggi solo da git. Chi usa 0.44/0.45 perde il rail.
+- CI: `e2e.yml` compila Zellij al `ZELLIJ_REV` (stesso rev del pin, test
+  guardia in `lib.rs`), con cache. `scripts/funnel.sh` resta su v0.44.3 perché
+  prova le release già pubblicate: passalo a v0.46.0 nella prima release del
+  nuovo plugin, quando Zellij 0.46.0 esiste come binario.
+- Con Zellij 0.46 falliscono 5 test e2e già su `main` (click tab, comandi
+  nei tab nascosti, rename manuale, pittura colonne, Alt+[/]): da sistemare
+  nei commit 2-6, che riscrivono quei percorsi.
 - Opencode non emette `done`/`error` (anomalyco/opencode#60411): il rail e il
   ledger non mostrano la fine di un turno di Opencode. Nessun workaround nel
   plugin; il limite sparisce quando Opencode unisce la fix.

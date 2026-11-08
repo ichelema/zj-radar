@@ -86,6 +86,7 @@ Some docs and assets are test inputs. Edit them through their test.
 | Root `Cargo.toml` version + `=X.Y.Z` core pin, `plugins/zj-radar-claude/.claude-plugin/plugin.json` (version) | `workspace_core_pin_and_claude_plugin_versions_agree` in `hooks_manifest_tests.rs` (`release.yml` only checks the tag against `Cargo.toml`) |
 | `examples/radar-sidebar.kdl` | `crates/cli/src/layout.rs` |
 | Grant probe and Zellij version floor | text pins in `crates/plugin/src/lib.rs` |
+| `.github/workflows/e2e.yml` (`ZELLIJ_REV`, the Zellij the live suite builds) | `e2e_workflow_builds_the_zellij_rev_the_plugin_pins` in `crates/plugin/src/lib.rs`, against the `zellij-tile` rev |
 | `Notify::agent` docs | `crates/cli/src/agents.rs` |
 | `flake.nix` source filter | the inventory of every non-Rust file the hermetic build reads; a new `include_str!` outside crate sources needs an entry |
 

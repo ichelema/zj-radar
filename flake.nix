@@ -45,6 +45,8 @@
           || (pkgs.lib.hasSuffix "/examples/radar-sidebar.kdl" path)
           # include_str!'d by the plugin (config.rs, control.rs docs guard tests).
           || (pkgs.lib.hasSuffix "/docs/configuration.md" path)
+          # include_str!'d by the plugin's ZELLIJ_REV guard test (lib.rs).
+          || (pkgs.lib.hasSuffix "/.github/workflows/e2e.yml" path)
           # include_str!'d by the CLI's opencode setup (crates/cli/src/setup/mod.rs)
           # — the vendored JS bridge plugins written by `zj-radar setup opencode`
           # (1.x server plugin, 2.x TUI plugin).
