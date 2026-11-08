@@ -33,11 +33,12 @@ unicode-width = { workspace = true }
 # of host builds. Pinned exact: this pin IS the supported-version floor — Zellij
 # keeps compiled plugins working on newer hosts, so the doctor gate only checks
 # a minimum, and the `doctor_version_gate_matches_the_zellij_tile_pin` guard
-# test welds that floor to this line. Bump deliberately, alongside the docs
-# and `tools/wasm-fuel/src/proto/` (the benchmark harness's protobuf schema,
-# vendored from the matching zellij-utils release).
+# test welds that floor to this line. Bump deliberately, alongside the docs.
+# 0.46 (the attention/OSC 7501 API) is not on crates.io yet, so the pin is the
+# git rev of the 0.46.0 release; `version` makes Cargo check it is 0.46.0.
+# Move back to a plain `"=0.46.x"` once zellij-tile 0.46 is published.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-zellij-tile = "=0.44.3"
+zellij-tile = { git = "https://github.com/zellij-org/zellij", rev = "43c8710b3a9845f60d5a567c7410fc1197fabb66", version = "=0.46.0" }
 
 [dev-dependencies]
 insta = { workspace = true }

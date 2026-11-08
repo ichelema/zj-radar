@@ -22,6 +22,7 @@ pub enum Mode {
     Search,
     RenameTab,
     RenamePane,
+    RenameSession,
     Session,
     Move,
     Prompt,
@@ -31,7 +32,7 @@ pub enum Mode {
 impl Mode {
     /// The footer label. Sub-modes the user experiences as one step share a
     /// label: typing a needle and stepping through matches are both `SEARCH`,
-    /// renaming a tab or a pane is `RENAME`.
+    /// renaming a tab, a pane or the session is `RENAME`.
     pub fn label(self) -> &'static str {
         match self {
             Mode::Normal => "NORMAL",
@@ -41,7 +42,7 @@ impl Mode {
             Mode::Tab => "TAB",
             Mode::Scroll => "SCROLL",
             Mode::EnterSearch | Mode::Search => "SEARCH",
-            Mode::RenameTab | Mode::RenamePane => "RENAME",
+            Mode::RenameTab | Mode::RenamePane | Mode::RenameSession => "RENAME",
             Mode::Session => "SESSION",
             Mode::Move => "MOVE",
             Mode::Prompt => "PROMPT",
@@ -66,6 +67,7 @@ mod tests {
         assert_eq!(Mode::Search.label(), "SEARCH");
         assert_eq!(Mode::RenameTab.label(), "RENAME");
         assert_eq!(Mode::RenamePane.label(), "RENAME");
+        assert_eq!(Mode::RenameSession.label(), "RENAME");
         assert_eq!(Mode::Normal.label(), "NORMAL");
         assert_eq!(Mode::Tmux.label(), "TMUX");
     }

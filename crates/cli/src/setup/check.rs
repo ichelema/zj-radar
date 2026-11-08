@@ -70,8 +70,7 @@ pub(crate) fn zellij_check_items(f: &ZellijFacts, layout_name: &str) -> Vec<Chec
             "zellij binary",
             format!(
                 "found `{v}` — the sidebar needs Zellij {floor}+ (newer is fine; older \
-                 versions predate the plugin API this build targets, and 0.44 patches \
-                 before .3 let the sidebar pop out during layout swaps)"
+                 versions lack the pane attention API the rail reads agent status from)"
             ),
         ),
         Some(v) => CheckItem::ok("zellij binary", format!("found on PATH ({v})")),
@@ -726,7 +725,7 @@ mod tests {
             granted: Some(true),
             producers: vec![crate::agents::Agent::Codex],
             config_managed: false,
-            zellij_version: Some("zellij 0.44.3".to_string()),
+            zellij_version: Some("zellij 0.46.0".to_string()),
         }
     }
 
@@ -765,16 +764,15 @@ mod tests {
 
     #[test]
     fn zellij_version_gate_is_lenient_on_unparseable_output() {
-        assert!(zellij_version_is_supported("zellij 0.44.3"));
-        assert!(zellij_version_is_supported("0.44.10"));
-        // Same minor but predates the swap-layout pinning fix: the plugin
-        // loads, the sidebar pops out during layout cycling — must warn.
-        assert!(!zellij_version_is_supported("zellij 0.44.1"));
-        assert!(!zellij_version_is_supported("0.44.0"));
+        assert!(zellij_version_is_supported("zellij 0.46.0"));
+        assert!(zellij_version_is_supported("0.46.10"));
+        // Older minors lack the pane attention API — must warn.
+        assert!(!zellij_version_is_supported("zellij 0.45.1"));
+        assert!(!zellij_version_is_supported("0.44.3"));
         assert!(!zellij_version_is_supported("zellij 0.43.1"));
         // Newer releases keep compiled plugins working — the gate is a floor,
         // not a pinned minor, so later versions must pass.
-        assert!(zellij_version_is_supported("zellij 0.45.0"));
+        assert!(zellij_version_is_supported("zellij 0.47.0"));
         assert!(zellij_version_is_supported("zellij 1.0.0"));
         // Numeric comparison, not a starts_with-style prefix check: 0.440 is
         // genuinely above the floor, 0.4.4 genuinely below it.
@@ -783,7 +781,7 @@ mod tests {
         // No version-like token at all: err on the side of supported.
         assert!(zellij_version_is_supported("zellij (unknown build)"));
         // Floor minor with unparseable patch digits: likewise lenient.
-        assert!(zellij_version_is_supported("zellij 0.44.x"));
+        assert!(zellij_version_is_supported("zellij 0.46.x"));
     }
 
     #[test]

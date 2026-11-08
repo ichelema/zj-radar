@@ -630,16 +630,16 @@ impl ZellijSession {
 }
 
 /// Fail fast (with a clear message) if `zellij` is missing, and warn loudly if it
-/// is not the 0.44.x series the harness layout KDL and permission-prompt handling
+/// is not the 0.46.x series the harness layout KDL and permission-prompt handling
 /// target. A version skew otherwise surfaces as an opaque `wait_until_ready`
 /// timeout — "the plugin never rendered" — instead of "your zellij is too new".
 fn assert_zellij_version() {
     match Command::new("zellij").arg("--version").output() {
         Ok(out) => {
             let v = String::from_utf8_lossy(&out.stdout);
-            if !v.contains("0.44") {
+            if !v.contains("0.46") {
                 eprintln!(
-                    "[e2e] WARNING: harness targets zellij 0.44.x but found `{}`. \
+                    "[e2e] WARNING: harness targets zellij 0.46.x but found `{}`. \
                      Layout/permission behavior may differ; a timeout below likely means \
                      a version skew, not a plugin regression.",
                     v.trim()
@@ -647,7 +647,7 @@ fn assert_zellij_version() {
             }
         }
         Err(e) => panic!(
-            "[e2e] `zellij` not found on PATH ({e}). Install zellij 0.44.x to run the \
+            "[e2e] `zellij` not found on PATH ({e}). Install zellij 0.46.x to run the \
              live E2E suite (see CONTRIBUTING.md)."
         ),
     }

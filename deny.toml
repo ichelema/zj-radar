@@ -3,7 +3,8 @@
 #
 # Scope: advisories (RUSTSEC vulns in the tree we ship to users), licenses
 # (everything we statically link must be permissive), and sources (all deps
-# from crates.io — no surprise git/registry pulls). `bans` is deliberately
+# from crates.io, plus the one allowed git source below — no surprise
+# git/registry pulls). `bans` is deliberately
 # absent: duplicate-version noise without a policy need here.
 
 # Scan the SHIPPED tree only: dev-deps (the E2E PTY harness pulls portable-pty
@@ -14,14 +15,6 @@ exclude-dev = true
 
 [advisories]
 version = 2
-# Both are UNMAINTAINED notices (not vulns) pinned by zellij-tile 0.44's
-# clap 3 — nothing to upgrade on our side. Revisit on the next zellij bump;
-# cargo-deny warns if an ignore stops matching, so these can't go stale
-# silently.
-ignore = [
-  { id = "RUSTSEC-2024-0375", reason = "atty, via zellij-tile → zellij-utils → clap 3 (upstream pin)" },
-  { id = "RUSTSEC-2024-0370", reason = "proc-macro-error, via zellij-tile → clap_derive 3 (compile-time only, upstream pin)" },
-]
 
 # Every license below is present in the shipped tree today (cargo-deny warns
 # on unmatched allowances, keeping this list honest). All permissive or
@@ -50,3 +43,6 @@ multiple-versions = "allow"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# zellij-tile 0.46 (the attention API) is not on crates.io yet; the plugin
+# pins its git rev. Drop this once the plugin is back on a crates.io pin.
+allow-git = ["https://github.com/zellij-org/zellij"]

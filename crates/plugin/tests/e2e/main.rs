@@ -11,7 +11,7 @@
 //   just test-e2e
 //
 // Prerequisites:
-//   - `zellij` 0.44.x on PATH
+//   - `zellij` 0.46.x on PATH
 //   - The plugin wasm already built:
 //     `cargo build --release --target wasm32-wasip1`
 

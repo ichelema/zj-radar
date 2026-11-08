@@ -101,6 +101,7 @@ fn input_mode(mode: InputMode) -> mode::Mode {
         InputMode::Search => mode::Mode::Search,
         InputMode::RenameTab => mode::Mode::RenameTab,
         InputMode::RenamePane => mode::Mode::RenamePane,
+        InputMode::RenameSession => mode::Mode::RenameSession,
         InputMode::Session => mode::Mode::Session,
         InputMode::Move => mode::Mode::Move,
         InputMode::Prompt => mode::Mode::Prompt,
