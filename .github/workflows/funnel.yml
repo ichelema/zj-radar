@@ -35,17 +35,18 @@ env:
   ZELLIJ_REV: 43c8710b3a9845f60d5a567c7410fc1197fabb66
 
 jobs:
-  # Built on the host runner (the container has no Rust); the binary runs in
-  # the ubuntu:24.04 container below, same glibc as ubuntu-latest. The cache
-  # key is e2e.yml's, so either workflow can reuse the other's build.
+  # Built on the host runner (the container has no Rust). The runner is pinned
+  # to the container's release: a binary built on a newer ubuntu-latest needs
+  # a newer glibc than ubuntu:24.04 has. Its own cache key, so it never reuses
+  # e2e.yml's ubuntu-latest build.
   zellij:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/cache@v4
         id: zellij-cache
         with:
           path: ~/zellij-git
-          key: zellij-git-${{ runner.os }}-${{ env.ZELLIJ_REV }}
+          key: zellij-git-ubuntu-24.04-${{ env.ZELLIJ_REV }}
       - name: build zellij ${{ env.ZELLIJ_REV }}
         if: steps.zellij-cache.outputs.cache-hit != 'true'
         run: cargo install --locked --git https://github.com/zellij-org/zellij --rev "$ZELLIJ_REV" zellij --root ~/zellij-git

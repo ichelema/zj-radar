@@ -43,7 +43,8 @@ else
         | tar xz -C /usr/local/bin \
         || { echo "FAIL: download/extract of zellij ${ZELLIJ_VERSION}"; exit 1; }
 fi
-echo "zellij: $(zellij --version)"
+zellij_version="$(zellij --version)" || { echo "FAIL: installed zellij does not run"; exit 1; }
+echo "zellij: ${zellij_version}"
 
 # ── README step 1: the installer ─────────────────────────────────────────────
 if [ -n "${ZJ_RADAR_VERSION:-}" ]; then
