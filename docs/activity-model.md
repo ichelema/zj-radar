@@ -1,299 +1,205 @@
 # The activity model: states, classes, and presentation
 
 `design.md` documents the pipeline (how state moves); this documents the
-semantics (what a state means and how it looks). Everything here is shipped;
-§7 lists what remains.
+semantics (what a state means and how it looks). Zellij decides each pane's
+status; the plugin decides how it looks. Everything here is shipped.
 
 ## 1. The core principle
 
 > **A spinner means bounded work in progress.** Animation is a promise:
 > "this will complete, and you will want to know when."
 
-Everything else follows from one observation: the rail used to conflate *"a
-foreground process exists"* with *"work is happening."* The user-meaningful
-axis is **attention direction** — who is waiting on whom:
+The user-meaningful axis is **attention direction**, who is waiting on whom:
 
-- You wait on **it** → activity. Show progress, notify on completion.
-- **It** waits on you → attention. Show urgency (pending/error).
-- Neither (unending by design, or interactive) → context. Show identity,
-  quietly, or nothing. Never a spinner, never a completion promise.
+- You wait on **it** → activity. Show progress.
+- **It** waits on you → attention. Show urgency (needs you, error).
+- Neither (unending by design, or interactive) → context. Show identity
+  quietly, or nothing. Never a spinner.
 
 An open editor is not activity. A dev server is not "still running" in any
-sense the user needs animated. A `cargo build` is exactly what the spinner
-was made for.
+sense the user needs animated. A `cargo build` is exactly what the spinner was
+made for.
+
+Zellij applies half of this rule before the plugin sees anything: it lists a
+shell command only once it has run for `done_threshold_secs` (default 10), and
+leaves out full-screen commands and commands you type into. The plugin applies
+the other half with the steady classes (§2).
 
 ## 2. The three orthogonal axes
 
-Every tracked pane's presentation is a function of three independent facts.
-Keeping them orthogonal — rather than growing one enum sideways — is what
-keeps the model extensible:
+Every tracked pane's presentation is a function of three independent facts:
 
 | Axis | Type | Values | Who owns it |
 |---|---|---|---|
-| **Origin** | `ObservationOrigin` (exists) | `StatusPipe` \| `Command` | intake: pushed payload vs `CommandChanged` |
-| **Kind** | `Kind` (exists) | Claude, Codex, Opencode, Pi, Omp, Gemini, Test, Build, Deploy, Server, Remote, Command, Other | classification (`Kind::from_source` on the pushed source token / `command::classify`) |
-| **Class** | semantic vocabulary — **not** a stored or derived Rust type | `Job` \| `Service` \| `Remote` \| `Companion` | this document |
+| **Origin** | `ObservationOrigin` | `Program` \| `Command` | Zellij's attention source: an OSC 7501 record or any other non-command signal (`Program`), or a shell command, command pane, or foreground process (`Command`) |
+| **Kind** | `Kind` | Claude, Codex, Opencode, Pi, Omp, Gemini, Test, Build, Deploy, Server, Remote, Command, Other | `attention::kind_for_app` on the OSC 7501 `app`; every command-origin row is `Command` |
+| **Class** | semantic vocabulary, **not** a stored Rust type | `Job` \| `Service` \| `Remote` | this document |
 
-The classes are a semantic model, not an `AttentionClass` enum. No call site
-would ever match all four variants: `Companion` is consumed entirely at intake
-(§5) and never becomes an observation; `Service` and `Remote` share the
-*steady* presentation and its four readers (the glyph split in
-`render::running_glyph`, the cadence term `TrackedObservation::animating`,
-the run-tag exclusion in `render::run_tag`, and the roll-up tie-break); `Job`
-is the default everywhere. So the code follows its existing pattern of
-predicates rather than parallel enums (`Kind::is_agent()`,
-`Status::{is_active, needs_attention, is_completion}`): the interactive set is
-intake policy, and `Kind::is_steady()` (`is_service() || is_remote()`) sits
-behind the four readers.
+The kind table (`kinds!` in `kind.rs`) maps each `app` token to a kind and its
+mark. `kind_for_app` adds two names: `claude-code` is Claude, and `zellij` (a
+nested or remote Zellij, see
+[remote sessions](producers.md#remote-sessions-over-ssh)) is Remote. An
+unknown or missing `app` is Other. The tokens and marks are listed in
+[producers](producers.md#field-reference).
 
-- **`Job`** — bounded work with an end. Kinds: `Test`, `Build`, `Deploy`,
-  `Command`, `Other`.
-- **`Service`** — unending by design. Kind: `Server` (`npm run dev`,
-  `cargo watch`). Completion is not expected; an *exit* is news (often bad).
-- **`Remote`** — a live connection to another machine. Kind: `Remote` (`ssh`,
-  `mosh`, and their `DEFAULT_REMOTE` siblings — §4). Steady like `Service`
-  (nothing is progressing toward a completion the user is waiting on), but
-  its ending is phrased as a disconnect and carries its own notify toggle
-  (§3, §4) rather than a routine exit.
-- **`Companion`** — interactive; it waits on the user. Editors, pagers,
-  monitors, git TUIs, file managers, REPLs. Reachable only via the
-  interactive classification (§4); it is a class, not a `Kind` — `nvim` and
-  `htop` don't need distinct kinds to share a presentation.
-- **Agents are outside this axis.** They are push-owned: their producer
-  reports `Running`/`Pending`/`Done` directly, so no class needs deriving —
-  which is also why "class is a function of Kind" holds (an agent turn being
-  a bounded job is the *producer's* contract, not a classification).
+The classes are predicates on `Kind`, not an enum:
+
+- **`Job`**: bounded work with an end. Every kind that is not steady: the
+  agent kinds, `Test`, `Build`, `Deploy`, `Command`, `Other`.
+- **`Service`**: unending by design. Kind `Server` (`Kind::is_service`), from
+  `app=server`.
+- **`Remote`**: a live connection to another machine. Kind `Remote`
+  (`Kind::is_remote`), from `app=remote` or `app=zellij`. Steady like
+  `Service`, and it also marks the tab line while connected.
+
+`Kind::is_steady()` (`is_service() || is_remote()`) sits behind four readers:
+the glyph split in `render::running_glyph`, the cadence term
+`TrackedObservation::animating`, the run-tag exclusion in `render::run_tag`,
+and the roll-up tie-break. `Kind::is_remote()` alone drives the tab `⇄`
+marker.
+
+Agents (`Kind::is_agent()`) are Jobs that label their own turns: they spin,
+but wear no run tag.
+
+Origin decides three things on its own: only program-origin rows can be
+needs-you and carry the `✓` gesture, and only command-origin rows carry an
+exit code.
+
+There is no class for interactive programs. Zellij never lists an editor,
+pager, or REPL as working, so it never reaches the rail (§4).
 
 ## 3. The state × class presentation matrix
 
-`Status` (Idle < Done < Running < Pending < Error, severity-ordered) is
-unchanged — it is the *wire and lifecycle* vocabulary and it is correct.
-Presentation is `f(Status, class)`:
+`Status` (Idle < Done < Running < Pending < Error, severity-ordered) is the
+lifecycle vocabulary. It comes from Zellij's attention status:
 
-All cells below are **implemented** (the executable examples live in
-`docs/rail-reference.md` — scenarios AD/AE/AF/AG); only the upstream detection
-signal (§4 layer 4) remains future work.
-
-| | `Job` | `Service` | `Remote` | `Companion` |
-|---|---|---|---|---|
-| **Running** | `⠋` spinner + activity string; `· 4m` run tag once ≥ 1 minute (whole minutes, frozen at `1h+`; the true start survives re-promotions) | steady non-animated `▸` mark + name, **no spinner, no fast cadence** | steady `▸` + identity, same as `Service`; a right-aligned `⇄` also marks the tab line while connected | *never enters Running* — suppressed at intake (§5); renders the muted identity label (`○ $ nvim README.md`) |
-| **Done** | `●` + ledger hand-off, TTL recede to Idle, notify | exit of a service — `●`/`✗` per exit code, notify: a dead dev server is news | `●` phrased "disconnected", notify (`notify_remote`, independent of `notify_done`); tab flashes; identity label stays so the user sees *which* connection dropped | labeled completion (`● $ nvim`) via preserved identity for held/run panes; recede as Job |
-| **Error** | `✗`, persists until re-run, notify | same | `✗` phrased "connection lost", notify (`notify_remote`) | same |
-| **Pending** | agent-origin only: `◆` waiting-for-you + wait-age tag | n/a | n/a | n/a |
-| **Idle** | muted row if `ever_active` | muted row | muted row, `⇄` marker cleared (the marker tracks *connected*, not *was remote*) | muted identity label while the program is foreground (it also replaces a stale finished-command echo); nothing once it exits |
-
-**Background tasks** (the payload's `tasks`, today Claude only) render as
-`┊` sub-lines under their agent's pane line, reusing this matrix's
-vocabulary: running work the agent waits on spins with a `· 4m` age, a
-running service holds the steady `▸` with no age, and finished tasks show
-`●` completed / `✗` failed / muted `○` killed / muted `·` ended (outcome
-unknown — never a false green) with their frozen duration. While the agent's
-turn is over and it waits on that work, its own pane line holds a steady `⋯`
-and the spinner moves down to the task lines (the tab header keeps spinning:
-the tab as a whole is still working). Task state never feeds the
-roll-up, counts, or notifications: the agent reports its own outcome. At
-most three task lines per pane (two plus `┊ +N more` beyond that, failures
-sorted first after running work; a fold always keeps the first failure on a
-line, and `+N more` is error-coloured when it hides another). Below 20 columns, or under height
-pressure, a card drops them for a `+N` count on the pane line (running and
-failed tasks only; error-coloured when one failed, absent when all finished
-cleanly). The height squeeze order is:
-inter-card gaps go, idle tabs fold into the strip, the strip line goes, then
-task lines fold, and only then do pane rows compress.
-
-Ties in the tab-level roll-up: on equal severity a bounded job outranks a
-steady row (`Service` or `Remote`) as the tab's primary detail — a spinning
-build summarizes the tab better than a server or an ssh session that is
-merely up.
-
-Cadence rule, restated per class: only *animating* work
-(`TrackedObservation::animating` = Running minus steady (`Service` ∪
-`Remote`), so agent rows animate too) plus **scheduled
-one-shots** keep the 1 Hz timer armed — the one-shots being promotable
-pendings awaiting debounce, tentative-Dones awaiting confirm
-(`pending_done`), stale-Running grace clocks (`suspect_running`), unsettled
-notifications, flashes, and Done-awaiting-recede. The one-shots must count
-explicitly *because* the steady exclusion exists: pre-exclusion, "some row
-is Running" was an implicit tick source for all of them, and a Ctrl-C'd dev
-server still needs its Done confirm (and a killed `server`-source producer
-its ghost-expiry) within seconds, not on the ≤60s Slow heartbeat. `Service`,
-`Remote`, and `Companion` rows themselves never pin fast cadence — a dev
-server, a live ssh session, or an open editor left overnight all cost zero
-ticks. Note the long-runner *easing* does not save cadence — an eased
-spinner still repaints every 4th tick — so steady-row relief comes only from
-the steady mark plus the `animating` term.
-
-One behavior delta reviewers should expect: closing nvim in a shell pane no
-longer fires a "done — nvim" notification (no observation ever exists); a
-held `zellij run -- nvim` exit still notifies, because pane death is a
-genuine event. (A tab holding [agent, nvim] stays a multi-pane tree — the
-Interactive label earns a pane line via `earns_pane_line`.)
-
-Notification rule per class: `Job` notifies on Done/Error (the core product);
-`Service` notifies on exit (state *changed*, not state *continuing*);
-`Companion` never notifies except a labeled exit of a held pane.
-
-## 4. Detection: how a command earns its class
-
-Detection is layered, and the layers are **replaceable classifiers feeding one
-mechanism** — this is the anti-cat-and-mouse structure. The mechanism (§5)
-never knows how the classification was made.
-
-1. **Identity** (exists): exe name is an agent's wire-source token → agent
-   kinds, owned by the push pipe (`AGENT_NAMES`).
-2. **Structured argv** (exists): `TOOL_RULES` table → `Test`/`Build`/
-   `Deploy`/`Server`. Verb- and word-bounded, sees through `sudo`/`env`/
-   wrappers via the single `effective_program` peel — which also means
-   *children* classify: `git commit` spawning `$EDITOR` fires its own
-   `CommandChanged` and is classified as the editor. `ssh`/`mosh`-family
-   launchers (`DEFAULT_REMOTE`) get their own dedicated argv shape
-   (`display_remote`, routed ahead of the table since ssh's value-taking
-   short options don't fit `ToolRule`'s columns) — `Remote` when the
-   destination has no trailing command, `Command` (still a Job) when it does
-   (`ssh box cargo build`). `remote_commands` extras are a different, simpler
-   contract: matched by program name alone, arguments ignored, exactly like
-   `interactive_commands` — an extra is a session launcher, period.
-3. **Interactive names** (the issue-#13 fix): a conservative built-in set of
-   unambiguous TUIs — editors, pagers, `man`, monitors, git TUIs, file
-   managers, `fzf`; the authoritative list is `DEFAULT_INTERACTIVE` in
-   `crates/core/src/command.rs` (this doc deliberately doesn't copy it — the
-   list grows and a doc copy has no guard) — housed beside `TOOL_RULES`. It
-   is classification data, not an ignore list, extended by the
-   `interactive_commands` config key (comma/space-separated exe names,
-   live-applied via `config.v1`). The config field holds the user's *extras
-   only* (default: empty); the effective set is `DEFAULT_INTERACTIVE ∪
-   extras`, composed in the setter — because the `config_fields!` macro
-   assigns wholesale, a field seeded with the defaults would let
-   `interactive_commands "k9s"` silently *replace* them and un-quiet nvim.
-   Override semantics stay consistent with every other key
-   (wholesale-replace of the extras). Matched on `program_name` after the
-   peel.
-4. **Terminal signals** (future, upstream): `is_alternate_screen` /
-   `is_raw_mode` on Zellij's `PaneInfo` — the genuinely general detector.
-   Alt-screen sees through `ssh`/`docker exec -it`; raw-mode covers REPLs
-   (`python` bare vs `python train.py` — undecidable by name, decidable by
-   termios). Verified absent from zellij-tile 0.44.3 *and* unreleased main;
-   Zellij tracks both internally, so this is a feasible contribution. When it
-   lands, layer 4 outranks layer 3 and the name list decays into a fallback
-   for older Zellij — no state-machine change, it just becomes another
-   producer of the same classification.
-
-**Known accepted gaps** (status-quo noise, never broken semantics): bare
-REPLs and remote TUIs over ssh until layer 4 exists; Debian-style variant
-binaries (`vim.basic`) until configured. A miss is always cosmetic and
-self-describing — the noisy row displays the exact string the user pastes
-into the config key.
-
-**Four lists, four contracts** — the roles must never be merged:
-
-| List | Meaning | Consulted by |
+| Zellij attention | OSC 7501 `state` | `Status` |
 |---|---|---|
-| `IGNORE_NAMES` | "this pane is back at a shell prompt" | `is_shell_prompt` → exit-clears pushed status, arms the Running grace clock |
-| `AGENT_NAMES` | "owned by the push pipe; never command-track" | intake suppression + grace-clock cancel; pinned equal to the CLI's adapters |
-| interactive set | "a real command that never earns a Running row" | promotion policy only (§5) — **not** consulted by `is_shell_prompt` |
-| `DEFAULT_REMOTE` | "this pane's shell is on another machine" | `classify`'s dedicated branch (Kind + `display_remote`) and the intake `remote_commands` extras override |
+| `Working` | `working` | Running |
+| `NeedsYou` | `blocked` | Pending |
+| `Done` | `done` | Done |
+| `Failed` | `error` | Error |
+| `Idle`, `Quiet`, `NewOutput` | `idle` | Idle |
 
-Putting an editor in `IGNORE_NAMES` would make "opened nvim" read as
-"returned to shell" and wrongly exit-clear a finished agent's pushed status.
-That conflation is the trap issue #13's reporter flagged. The table's
-enforced home is the doc comments in `command.rs` plus a guard test
-(`interactive_set_disjoint_from_prompt_and_agent_names`: all four lists
-pairwise disjoint, same style as `agent_names_match_push_adapter_sources`) —
-a name drifting into two lists silently re-creates the trap.
+A muted pane reads Idle (`PaneAttention::effective_status`).
 
-## 5. The mechanism: quiet pendings
+Presentation is `f(Status, class)`. The executable examples live in
+[`rail-reference.md`](rail-reference.md) (scenarios AE, AF, AG).
 
-One state-machine change carries the whole model. In `CommandStore`, a
-`Pending` entry gains `promotable: bool`:
+| | `Job` | `Service` | `Remote` |
+|---|---|---|---|
+| **Running** | `⠋` spinner + Zellij's text; non-agent rows add a `· 4m` run tag once ≥ 1 minute (whole minutes, frozen at `1h+`); the spinner eases to a slow blink for long runs | steady `▸` + text, **no spinner, no run tag, no fast cadence** | steady `▸`, same as `Service`; a right-aligned `⇄` also marks the tab line |
+| **Pending** | `◆` + Zellij's label (`needs approval: …`); a `· 12m` wait tag once ≥ 1 minute; a `✓` hotspot; the tab flashes on entry | same | same |
+| **Done** | `●` + text; stays until Zellij marks the pane seen, then the row goes Idle and the completion enters the `earlier` ledger | same | same; the `⇄` marker clears |
+| **Error** | `✗`; a command row adds `exit N` when Zellij reports the code; ledgered like Done | same | same; the `⇄` marker clears |
+| **Idle** | muted `○` row while the pane still has an OSC 7501 record; no row otherwise | same | same; the `⇄` marker clears (it tracks *connected*, not *was remote*) |
 
-- **Intake** of an interactive-classified command: arm the
-  tentative-Done for any prior Running row (opening nvim after `cargo build`
-  finished still flips the build to Done), clear the exit dedup (a re-run's
-  exit must apply fresh), and insert a **non-promotable pending** carrying
-  the classified identity. The `is_foreground` flag is NOT consulted for an
-  interactive argv: a childless interactive ROOT (`zellij run -- nvim`)
-  reports `false`, and that report is the editor alive, not a prompt return —
-  shell panes can't reach the override because their childless root IS the
-  shell, which the ignore set catches.
-- **Promotion** (`on_timer`) filters on `promotable` — the Running row never
-  materializes.
-- **`on_exit` is unchanged** — the surviving pending's identity labels the
-  completion, so `zellij run -- nvim` closing reads `● $ nvim`, never a blank
-  row. (The identity-less untracked-pane fallback stays load-bearing for
-  fast run-pane commands; do not guard it.)
-- **`needs_ticks` counts only promotable pendings** — an open
-  editor must not pin the 1 Hz timer (the v0.3.1 cadence guarantee).
-- Prompt contract, agent grace clocks, prune grace (`tracked_pane_ids`
-  already includes pendings): all untouched.
+The text is Zellij's attention text. It already carries the label and the
+progress: `working 40%: …`, `needs approval: …`, `done: …`. The ledger drops
+the `done: ` and `failed: ` heads, which its glyph already says.
 
-**Level-triggered application.** One function,
-`CommandStore::set_interactive_extras` (reached via
-`RadarState::set_interactive_commands`): store the composed set + sweep
-already-promoted state — demote matching Running command-origin rows to Idle
-without ledgering, reconstructing their quiet pending from the observation so
-the swept state is identical to the intake state (muted label, labeled exit,
-symmetric un-quiet), and re-judge every pending against the new set. Called
-from two places — the end of `PluginRuntime::load` and after
-`apply_overrides` on the `config.v1` pipe.
-`load` assigns config *before* `load_snapshot`, so the single post-load call
-covers both a mid-session config change and a stale Running-nvim row
-rehydrated from another instance's snapshot; no ordering special cases.
+Seen is Zellij's state. A focused pane's Done is seen almost at once; the
+plugin still ledgers it from the pane's remembered record. The `✓` gesture
+asks Zellij to mark the pane seen (`mark_session_pane_seen`) and changes no
+local state.
 
-The sweep is what makes the fix apply to already-promoted rows: a mid-session
-TUI fires no further `CommandChanged` until it exits, so without it a config
-change (or a restart whose snapshot rehydrates the Running row) leaves the
-spinner and its cadence pin live until the editor closes. Dropping all
-command-origin Running rows and letting re-promotion recover would be unsound:
-re-reports are not guaranteed, so a legitimate build row could vanish for good.
-A row whose tentative-Done is already armed is exempt; its command has left the
-foreground, and the armed confirm flips it Done. Pendings re-judge on the
-intake-stamped peeled program name; the observation sweep matches on the
-display's first token, which equals the exe basename by construction (guard
-test, §7).
+**Background tasks** are the pane's OSC 7501 child records (`id`). They render
+as `┊` sub-lines under the pane line, in this matrix's vocabulary: a running or
+blocked child spins with a `· 4m` age, `●` done, `✗` failed, muted `·` idle,
+with their frozen duration once finished. The task lines never feed the
+roll-up or the counts. Two rules come from Zellij and the plugin's reading of
+it:
 
-Identity-preserving suppression rather than an ignore branch: the preserved
-identity is what the labeled exit needs (without it a held `zellij run -- nvim`
-exit inserts a blank Done row and a blank notification), and a future
-alt-screen classifier produces the identical mark.
+- A child raises the pane's own status only when it is `blocked` or `error`.
+- A pane with children and no root record takes its status from its most
+  severe child, which becomes the pane line (Opencode reports this way).
 
-**The muted label is a roll-up feature.** Quiet pendings live in
-`CommandStore.pending`; `rows()` reads only observations.
-`CommandStore::quiet_identity` feeds `roll_up`'s `quiet` lookup, which builds
-`PaneDisplay::Interactive`, shown only where no live observation outranks it
-and included in the roster via `earns_pane_line`. Promoting quiet commands to
-an Idle observation instead would either count an open editor in `done/total`
-forever (`ever_active: true`) or never show the identity (`ever_active: false`
-renders as Untracked).
+At most three task lines per pane: two plus `┊ +N more` beyond that, running
+work sorted first, then failures. A fold always keeps the first failure on a
+line, and `+N more` is error-coloured when it hides another. Below 20 columns,
+under height pressure, or with `task_lines count`, a card drops them for a
+`+N` count on the pane line (running and failed tasks only; error-coloured
+when one failed, absent when all finished cleanly). The height squeeze order
+is: inter-card gaps go, idle tabs fold into the strip, the strip line goes,
+then task lines fold, and only then do pane rows compress.
 
-## 6. Extension guide
+Ties in the tab-level roll-up: on equal severity a `Job` outranks a steady row
+(`Service` or `Remote`) as the tab's primary detail. A spinning build
+summarizes the tab better than a server or an ssh session that is merely up.
 
-- **New tool classifies wrong** → one `TOOL_RULES` row (kind + display).
-- **New TUI shows a spinner** → user: one `interactive_commands` entry,
-  live; maintainer: one name in the built-in set if it's ubiquitous.
-- **New presentation-relevant distinction** (the `Remote` class is the worked
-  example) → a row in the §3 matrix first, then a `Kind` predicate added
-  *with its first consumer* (`is_agent()`-style) — never a speculative enum
-  ahead of a call site that matches it.
-- **New detector** (alt-screen, raw-mode, anything) → a new producer of the
-  existing classification; zero changes to stores, roll-up, or render.
-- **New pushed agent** → unchanged: `Agent` variant + `AGENT_NAMES` entry;
-  the guard test walks you through it.
+Cadence rule per class: only *animating* work (`TrackedObservation::animating`
+= Running minus steady, so agent rows animate too) and a tab's Pending flash
+keep the 1 Hz timer armed. `Service` and `Remote` rows never pin the fast
+cadence: a dev server or a live ssh session left overnight costs zero ticks.
+The minute-granular ages (ledger, wait tags) run on the Slow heartbeat and
+freeze at `1h+`, so the timer can disarm. The long-run *easing* does not save
+cadence (an eased spinner still repaints every 4th tick), so steady-row relief
+comes only from the steady mark plus the `animating` term.
 
-## 7. Status
+Desktop notifications are Zellij's (`attention` → `desktop_notifications`);
+the plugin sends none.
 
-Shipped: the quiet-pending mechanism, the built-in interactive set and
-`interactive_commands` key with its level-triggered sweep, the Companion muted
-label, the Service steady `▸` and cadence exclusion, the long-Job run tag, the
-job-over-steady tie-break, and the Remote class (steady mark, tab `⇄` marker,
-disconnect notification with its own `notify_remote` toggle, `remote_commands`
-extras). Guard tests pin the seams: display first token equals exe basename,
-the four name lists pairwise disjoint, and rail-reference scenarios AD/AE/AF/AG.
+## 4. Where the status comes from
 
-Remaining: propose `is_alternate_screen`/`is_raw_mode` on Zellij's `PaneInfo`
-(§4 layer 4), the general detector for REPLs and TUIs behind ssh/docker.
-For `Remote` specifically, this observed-only change has two honest gaps
-until the pushed modality lands (a `zj-radar ssh` wrapper reporting the real
-exit code — see `docs/troubleshooting.md`): a clean `logout` and a dropped
-link are indistinguishable (an ordinary shell pane reports no exit code, so
-both notify as a disconnect), and a *hung* ssh shows as connected until it
-gives up (no termios/heartbeat signal to detect a stalled link).
+The plugin reads one source, Zellij's native per-pane attention, from the pane
+manifest (`PaneInfo::attention` and `program_status`) and from
+`PaneAttentionChanged`. `attention::NativePane::observation` turns it into the
+row. The plugin never classifies a command and never polls.
+
+**Programs (OSC 7501).** A program reports records; Zellij picks the deciding
+one (the root record, raised by a `blocked` or `error` child). Zellij's text
+and `app` decide the row's text and kind. The plugin overrides Zellij in one
+case only: when the pane has records but no root and Zellij's source is not the
+program, the most severe record decides (§3). The wire format is in
+[producers](producers.md#writing-your-own-producer).
+
+**Shell commands.** Zellij tracks commands through OSC 133 prompt marks,
+command panes, and the foreground process. Its rules, all on the Zellij side:
+
+- A command is working only after `done_threshold_secs` (default 10).
+- Full-screen commands and commands you type into are left out
+  (`track_commands`): editors, pagers, `htop`, an `ssh` shell.
+- A successful command reports Done only if it ran at least
+  `done_threshold_secs`; a failure always reports Error, with its exit code
+  when the shell reports one.
+- A pane whose program reports OSC 7501 is not command-tracked.
+- Without the `ReadPaneContents` permission Zellij strips the command text;
+  the plugin requests it.
+
+Every command row is `Kind::Command` (`$`) and a `Job`. There is no job,
+service, or editor classification of commands.
+
+**Other attention.** Zellij's other signals (a bell, a terminal notification,
+a watch) arrive as program-origin rows with no `app`: kind Other (`⦿`),
+usually needs-you.
+
+**Other sessions.** Zellij's `GlobalAttentionUpdate` feeds the cross-session
+badge with the same status vocabulary (`attention::PeerSession`).
+
+## 5. Extension guide
+
+- **A program needs its own mark** → one `kinds!` row in `kind.rs` (token +
+  marks), plus a `kind_for_app` arm when its `app` differs from the token.
+- **A new kind** → declare its side in `is_agent` and `is_service` /
+  `is_remote`; the matches are exhaustive, so it does not compile until you
+  do.
+- **A new presentation-relevant distinction** (the `Remote` class is the
+  worked example) → a row in the §3 matrix first, then a `Kind` predicate added
+  *with its first consumer*, never a speculative enum ahead of a call site
+  that matches it.
+- **A command shows wrong** → Zellij's `attention` settings decide it; the
+  plugin keeps no command name lists.
+- **A new agent** → nothing in zj-radar if it emits OSC 7501; add a `kinds!`
+  row only for a dedicated mark.
+
+## 6. Known limits
+
+- Opencode sends no `done` or `error` (anomalyco/opencode#60411): a finished
+  turn reads Idle and never reaches the ledger.
+- A plain `ssh` session with no remote Zellij shows nothing: it is a command
+  you type into.
+- A command that succeeds in under `done_threshold_secs` leaves no Done.
+- The run tag counts from when this rail first saw the status; a rail loaded
+  mid-run starts from zero.
+- A task line's age counts from the child record's last update, not its
+  start: OSC 7501 carries no start time.

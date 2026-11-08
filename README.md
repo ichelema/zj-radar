@@ -42,7 +42,7 @@ already run. It does not launch, wrap, or own your agents.
 
 ## Quick start
 
-Requires Zellij 0.44.3 or newer (`zellij --version`).
+Requires Zellij 0.46.0 or newer (`zellij --version`).
 
 ```sh
 # 1. Install the zj-radar CLI (prebuilt for Linux and Apple Silicon macOS;
@@ -58,16 +58,11 @@ zj-radar setup zellij --download
 zellij
 ```
 
-Then wire up your agents. Without a producer the rail lists your tabs but
-shows no agent status.
-
-```sh
-zj-radar setup claude    # Claude Code plugin, via its marketplace
-zj-radar setup codex     # Codex hooks; then run `/hooks` inside Codex to trust them
-zj-radar setup opencode  # Opencode bridge plugin; then restart opencode
-zj-radar setup pi        # pi bridge extension; then restart pi or run /reload
-zj-radar setup omp       # omp (oh-my-pi) bridge extension; then restart omp
-```
+Your agents need no setup: any program that reports its status to Zellij
+(OSC 7501) shows up, and Claude Code, Codex, Opencode, pi, and omp do
+([supported agents and their limits](https://github.com/marktoda/zj-radar/blob/main/docs/producers.md#supported-agents)).
+Upgrading from a release that installed agent adapters? Remove them first:
+[upgrade notes](https://github.com/marktoda/zj-radar/blob/main/docs/install.md#upgrading-from-a-release-with-agent-adapters).
 
 Want to look before you commit? `zj-radar run` starts a throwaway session with
 the rail wired in and leaves your config alone. Later, `zj-radar update` moves
@@ -78,16 +73,18 @@ manual setup, and the full removal list are in
 ## What you get
 
 - Per-tab and per-pane status for Claude Code, Codex, Opencode, pi, and
-  omp, plus any script that can send JSON.
+  omp, plus any program that reports to Zellij over OSC 7501.
 - Jump to the tab that needs you: click its row, or bind `attention-next`
   ([keybinds](https://github.com/marktoda/zj-radar/blob/main/docs/configuration.md#binding-keys-to-commands)).
 - Your Zellij stays yours: no new terminal, no tmux wrapper, no orchestrator.
-- Shell commands show up too. Builds and tests spin with an elapsed tag, dev
-  servers hold a steady `▸`, editors and pagers stay quiet.
-- Background work an agent started (a backgrounded test run, a subagent, a
-  dev server) gets its own lines under the agent's row. Claude Code only for
-  now, and it needs the `zj-radar` CLI on `PATH`.
-- Desktop notifications when an agent in another tab or pane finishes or needs you.
+- Shell commands show up too, from Zellij's own command tracking: a running
+  command spins with an elapsed tag, a failed one shows its exit code.
+- Background work an agent reports separately (a subagent, a backgrounded
+  test run) gets its own lines under the agent's row.
+- An `ssh` session into a host that runs Zellij shows that session's status
+  as a row of its own, with no setup on either side.
+- Desktop notifications when an agent finishes or needs you come from Zellij
+  itself (its `attention` settings), not from the rail.
 - Running several Zellij sessions? Each rail lists the others with live counts
   and click-to-switch (`session_tree true` expands each into its tabs and agents).
 
@@ -96,15 +93,17 @@ What every glyph and line means:
 
 ## How it works
 
-Agent hooks broadcast a small versioned JSON payload (`zj_radar.status.v1`)
-over `zellij pipe`. The sidebar consumes it, rolls panes up into tabs, and
-renders. It pins itself into your tab templates the same way Zellij's own
-status bar does, so it appears in every tab and survives layout swaps.
+Agents report their state to Zellij with OSC 7501, Zellij's program status
+protocol. Zellij turns that, and its own shell-command tracking, into
+per-pane attention. The sidebar reads Zellij's attention events, rolls panes
+up into tabs, and renders. It pins itself into your tab templates the same
+way Zellij's own status bar does, so it appears in every tab and survives
+layout swaps.
 
 The plugin is push-driven. It never polls panes and makes no blocking host
-calls on any per-event path; the one exception is a single cwd lookup when a
-pane is created, used to name the tab. Polling is what melted the predecessor
-plugin: see
+calls on any per-event path. The two exceptions are both for tab naming: one
+cwd lookup when a pane is created, and one background
+`git remote get-url origin` per directory. Polling is what melted the predecessor plugin: see
 [`docs/smart-tabs-postmortem.md`](https://github.com/marktoda/zj-radar/blob/main/docs/smart-tabs-postmortem.md).
 
 ## Configuration
@@ -117,14 +116,6 @@ plugins {
     radar location="file:~/.config/zellij/plugins/zj_radar.wasm" {
         density "cards"         // cards · comfortable · compact
         naming "managed"        // off · managed · force
-        notify true             // desktop notifications (macOS + Linux)
-        notify_done true        // per-status toggles (done · error · pending)
-        notify_error true
-        notify_pending true
-        notify_remote true         // a remote session (ssh, mosh) disconnecting
-        notify_when_focused false  // suppress when the pane is focused
-        interactive_commands ""    // extra editors/pagers/TUIs to keep quiet
-        remote_commands ""         // extra remote-session launchers
         spinner_fps 4              // working-spinner frames/s (1 = once a second)
         task_lines "lines"         // background tasks: lines · count · off
         ledger true                // recent completions under ─ earlier ─
@@ -156,12 +147,12 @@ The full option table, runtime pipes, and keybinds are in
 
 | Doc | What's in it |
 |-----|--------------|
-| [`docs/install.md`](https://github.com/marktoda/zj-radar/blob/main/docs/install.md) | Install paths (CLI, source, Nix, manual), layouts, permissions, `--check`, full removal. |
-| [`docs/using.md`](https://github.com/marktoda/zj-radar/blob/main/docs/using.md) | Reading the rail: glyphs, tree rows, tags, footer, mouse gestures, cross-session badge, notifications. |
+| [`docs/install.md`](https://github.com/marktoda/zj-radar/blob/main/docs/install.md) | Install paths (CLI, source, Nix, manual), layouts, permissions, `--check`, upgrading from agent adapters, full removal. |
+| [`docs/using.md`](https://github.com/marktoda/zj-radar/blob/main/docs/using.md) | Reading the rail: glyphs, tree rows, tags, footer, mouse gestures, cross-session badge. |
 | [`docs/configuration.md`](https://github.com/marktoda/zj-radar/blob/main/docs/configuration.md) | Option table, the `config.v1` and `cmd.v1` pipes, keybinds. |
-| [`docs/producers.md`](https://github.com/marktoda/zj-radar/blob/main/docs/producers.md) | Claude Code, Codex, Opencode, pi, omp, `notify generic`, and the wire format for your own producer. |
-| [`docs/troubleshooting.md`](https://github.com/marktoda/zj-radar/blob/main/docs/troubleshooting.md) | Symptom → fix: blank rail, no status, stuck rows, layout quirks, terminal rendering. |
-| [`docs/activity-model.md`](https://github.com/marktoda/zj-radar/blob/main/docs/activity-model.md) | Why builds spin, servers don't, and editors stay quiet. |
+| [`docs/producers.md`](https://github.com/marktoda/zj-radar/blob/main/docs/producers.md) | Which agents report status and their limits, and how to report from your own program. |
+| [`docs/troubleshooting.md`](https://github.com/marktoda/zj-radar/blob/main/docs/troubleshooting.md) | Symptom → fix: blank rail, missing agent status, layout quirks, terminal rendering. |
+| [`docs/activity-model.md`](https://github.com/marktoda/zj-radar/blob/main/docs/activity-model.md) | What each status and kind means and how it renders. |
 | [`docs/design.md`](https://github.com/marktoda/zj-radar/blob/main/docs/design.md) | Architecture and mechanisms. |
 | [`docs/rail-reference.md`](https://github.com/marktoda/zj-radar/blob/main/docs/rail-reference.md) | The executable render spec; the plugin's reference tests parse it. |
 | [`CONTEXT.md`](https://github.com/marktoda/zj-radar/blob/main/CONTEXT.md) | Domain glossary for contributors. |

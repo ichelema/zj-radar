@@ -37,7 +37,7 @@ fn resolver<'a>(map: &'a HashMap<u32, TrackedObservation>) -> impl Fn(u32) -> Op
 
 #[test]
 fn empty_panes_roll_up_to_idle() {
-    let display = roll_up(&[], |_id| None, |_| None);
+    let display = roll_up(&[], |_id| None);
     assert_eq!(display.status, Status::Idle);
     assert_eq!(display.progress, ProgressCounts::default());
     assert!(display.detail.is_none());
@@ -49,11 +49,11 @@ fn roll_up_is_focus_blind() {
     // Focus is render-only and resolved by the caller (it needs the tab's
     // floating-layer visibility): focusing a pane changes nothing roll_up makes.
     let mut map = HashMap::new();
-    map.insert(1, obs(ObservationOrigin::StatusPipe, Status::Running, 1));
-    map.insert(2, obs(ObservationOrigin::StatusPipe, Status::Running, 2));
+    map.insert(1, obs(ObservationOrigin::Program, Status::Running, 1));
+    map.insert(2, obs(ObservationOrigin::Program, Status::Running, 2));
     let unfocused = [pane(1, "a"), pane(2, "b")];
     let focused = [pane(1, "a"), TerminalPane { focused_in_tab: true, ..pane(2, "b") }];
-    assert_eq!(roll_up(&focused, resolver(&map), |_| None), roll_up(&unfocused, resolver(&map), |_| None));
+    assert_eq!(roll_up(&focused, resolver(&map)), roll_up(&unfocused, resolver(&map)));
 }
 
 #[test]
@@ -73,10 +73,10 @@ fn effective_focus_resolves_zellijs_per_layer_focus() {
 #[test]
 fn untracked_panes_are_shown_but_not_counted() {
     let mut map = HashMap::new();
-    map.insert(1, obs(ObservationOrigin::StatusPipe, Status::Running, 1));
+    map.insert(1, obs(ObservationOrigin::Program, Status::Running, 1));
     let panes = [pane(1, "codex"), pane(2, "shell")];
 
-    let display = roll_up(&panes, resolver(&map), |_| None);
+    let display = roll_up(&panes, resolver(&map));
 
     assert_eq!(display.status, Status::Running);
     assert_eq!(display.progress.total, 1, "only the tracked pane counts");
@@ -93,7 +93,7 @@ fn severity_precedence_picks_highest_active() {
     map.insert(2, obs(ObservationOrigin::Command, Status::Error, 1));
     let panes = [pane(1, "a"), pane(2, "b")];
 
-    let display = roll_up(&panes, resolver(&map), |_| None);
+    let display = roll_up(&panes, resolver(&map));
 
     assert_eq!(display.status, Status::Error, "error outranks done");
     let detail = display.detail.expect("an active pane sets the detail");
@@ -105,11 +105,11 @@ fn severity_precedence_picks_highest_active() {
 fn tie_break_prefers_later_change_tick_over_position() {
     // Higher-tick pane comes FIRST; positional logic would pick the second.
     let mut map = HashMap::new();
-    map.insert(1, obs(ObservationOrigin::StatusPipe, Status::Running, 9));
-    map.insert(2, obs(ObservationOrigin::StatusPipe, Status::Running, 5));
+    map.insert(1, obs(ObservationOrigin::Program, Status::Running, 9));
+    map.insert(2, obs(ObservationOrigin::Program, Status::Running, 5));
     let panes = [pane(1, "a"), pane(2, "b")];
 
-    let display = roll_up(&panes, resolver(&map), |_| None);
+    let display = roll_up(&panes, resolver(&map));
 
     assert_eq!(display.status, Status::Running);
     assert_eq!(
@@ -124,10 +124,10 @@ fn counts_done_total_and_pending() {
     let mut map = HashMap::new();
     map.insert(1, obs(ObservationOrigin::Command, Status::Done, 1));
     map.insert(2, obs(ObservationOrigin::Command, Status::Running, 1));
-    map.insert(3, obs(ObservationOrigin::StatusPipe, Status::Pending, 1));
+    map.insert(3, obs(ObservationOrigin::Program, Status::Pending, 1));
     let panes = [pane(1, "a"), pane(2, "b"), pane(3, "c")];
 
-    let display = roll_up(&panes, resolver(&map), |_| None);
+    let display = roll_up(&panes, resolver(&map));
 
     assert_eq!(display.progress.total, 3);
     assert_eq!(display.progress.done, 1);
@@ -142,12 +142,12 @@ fn pending_is_only_counted_for_tracked_panes() {
     // same set as `total`/`done`, never more, so progress stays internally
     // consistent (pending <= total).
     let mut map = HashMap::new();
-    let mut stale = obs(ObservationOrigin::StatusPipe, Status::Pending, 1);
+    let mut stale = obs(ObservationOrigin::Program, Status::Pending, 1);
     stale.ever_active = false;
     map.insert(1, stale);
     let panes = [pane(1, "shell")];
 
-    let display = roll_up(&panes, resolver(&map), |_| None);
+    let display = roll_up(&panes, resolver(&map));
 
     assert_eq!(display.progress.total, 0, "an un-tracked pane is not in total");
     assert_eq!(display.progress.pending, 0, "pending must not count a pane excluded from total");
@@ -163,15 +163,15 @@ fn pane_outcome_maps_finished_commands_only() {
     assert_eq!(pane_outcome(&command_obs(Status::Running, None)), None);
     // Agents (status pipe) never get a tag, even when Done.
     let mut agent = command_obs(Status::Done, Some(0));
-    agent.origin = ObservationOrigin::StatusPipe;
+    agent.origin = ObservationOrigin::Program;
     assert_eq!(pane_outcome(&agent), None);
 }
 
 #[test]
 fn tracked_pane_display_carries_last_change_tick_as_since_tick() {
     let panes = [pane(1, "shell")];
-    let ob = obs(ObservationOrigin::StatusPipe, Status::Running, 42);
-    let display = roll_up(&panes, |id| (id == 1).then_some(&ob), |_| None);
+    let ob = obs(ObservationOrigin::Program, Status::Running, 42);
+    let display = roll_up(&panes, |id| (id == 1).then_some(&ob));
     match &display.panes[0] {
         PaneDisplay::Tracked { since_tick, .. } => assert_eq!(*since_tick, 42),
         other => panic!("expected tracked pane, got {other:?}"),
@@ -182,9 +182,9 @@ fn tracked_pane_display_carries_last_change_tick_as_since_tick() {
 fn task_threads_through_to_pane_display_and_primary_detail() {
     let panes = [pane(1, "shell")];
     let mut obs = TrackedObservation::command(Status::Pending, "r".into(), "approve?".into(), Kind::Claude, 3);
-    obs.origin = ObservationOrigin::StatusPipe;
+    obs.origin = ObservationOrigin::Program;
     obs.task = "fix flaky e2e".into();
-    let display = roll_up(&panes, |id| (id == 1).then_some(&obs), |_| None);
+    let display = roll_up(&panes, |id| (id == 1).then_some(&obs));
     match &display.panes[0] {
         PaneDisplay::Tracked { task, msg, .. } => {
             assert_eq!(task, "fix flaky e2e");
@@ -218,7 +218,7 @@ fn arb_status() -> impl Strategy<Value = Status> {
 
 fn pane_specs() -> impl Strategy<Value = Vec<Spec>> {
     let spec = proptest::option::of((
-        prop_oneof![Just(ObservationOrigin::StatusPipe), Just(ObservationOrigin::Command)],
+        prop_oneof![Just(ObservationOrigin::Program), Just(ObservationOrigin::Command)],
         arb_status(),
         any::<bool>(),
         0u64..50,
@@ -280,7 +280,7 @@ proptest! {
     #[test]
     fn roll_up_invariants(specs in pane_specs()) {
         let (panes, map) = build(&specs);
-        let d = roll_up(&panes, |id| map.get(&id), |_| None);
+        let d = roll_up(&panes, |id| map.get(&id));
 
         // Every input pane appears exactly once, in input order.
         prop_assert_eq!(d.panes.len(), panes.len());
@@ -328,8 +328,8 @@ proptest! {
     #[test]
     fn roll_up_aggregate_is_order_independent(specs in pane_specs(), seed in any::<u64>()) {
         let (panes, map) = build(&specs);
-        let d1 = roll_up(&panes, |id| map.get(&id), |_| None);
-        let d2 = roll_up(&shuffled(&panes, seed), |id| map.get(&id), |_| None);
+        let d1 = roll_up(&panes, |id| map.get(&id));
+        let d2 = roll_up(&shuffled(&panes, seed), |id| map.get(&id));
 
         prop_assert_eq!(d1.status, d2.status);
         prop_assert_eq!(d1.progress, d2.progress);
@@ -337,48 +337,6 @@ proptest! {
             d1.detail.as_ref().map(|x| x.status),
             d2.detail.as_ref().map(|x| x.status)
         );
-    }
-}
-
-// ── Interactive (Companion) panes: docs/activity-model.md §3 ──
-
-/// A quiet lookup that answers "nvim" for the given pane id.
-fn quiet_nvim(target: u32) -> impl Fn(u32) -> Option<(&'static str, Kind)> {
-    move |id| (id == target).then_some(("nvim", Kind::Command))
-}
-
-#[test]
-fn quiet_identity_renders_interactive_where_untracked_would_be() {
-    let panes = [pane(1, "shell")];
-    let display = roll_up(&panes, |_| None, quiet_nvim(1));
-    assert_eq!(display.panes[0], PaneDisplay::Interactive { pane_id: 1, kind: Kind::Command, msg: "nvim".into() });
-    // Pure context: no counts, no severity, no detail.
-    assert_eq!(display.status, Status::Idle);
-    assert_eq!(display.progress, ProgressCounts::default());
-    assert!(display.detail.is_none());
-}
-
-#[test]
-fn quiet_identity_replaces_an_idle_observations_muted_row_but_keeps_counts() {
-    // An Idle ever_active observation is a stale finished-command echo; the
-    // open editor is the better label. Counts still come from the
-    // observation alone — an editor must never read as work in done/total.
-    let mut map = HashMap::new();
-    map.insert(1, obs(ObservationOrigin::Command, Status::Idle, 1));
-    let panes = [pane(1, "shell")];
-    let display = roll_up(&panes, resolver(&map), quiet_nvim(1));
-    assert!(display.panes[0].is_interactive());
-    assert_eq!(display.progress.total, 1, "ever_active stickiness is untouched");
-}
-
-#[test]
-fn quiet_identity_never_outranks_a_live_observation() {
-    for status in [Status::Running, Status::Pending, Status::Done, Status::Error] {
-        let mut map = HashMap::new();
-        map.insert(1, obs(ObservationOrigin::StatusPipe, status, 1));
-        let panes = [pane(1, "shell")];
-        let display = roll_up(&panes, resolver(&map), quiet_nvim(1));
-        assert!(display.panes[0].is_tracked(), "{status:?} keeps its Tracked row");
     }
 }
 
@@ -390,9 +348,9 @@ fn animating_tracks_running_jobs_not_services_and_sits_outside_the_ever_active_g
     let panes = [pane(1, "p")];
     let mut map = HashMap::new();
     map.insert(1, obs(ObservationOrigin::Command, Status::Running, 1)); // Kind::Build — a job
-    assert!(roll_up(&panes, resolver(&map), |_| None).animating, "a running job animates");
+    assert!(roll_up(&panes, resolver(&map)).animating, "a running job animates");
     map.insert(1, TrackedObservation { kind: Kind::Server, ..obs(ObservationOrigin::Command, Status::Running, 1) });
-    assert!(!roll_up(&panes, resolver(&map), |_| None).animating, "a running service holds the steady mark — no sweep");
+    assert!(!roll_up(&panes, resolver(&map)).animating, "a running service holds the steady mark — no sweep");
 
     // `animating` accrues OUTSIDE roll_up's ever_active gate — deliberate: a
     // snapshot-loaded Running row with ever_active=false renders untracked
@@ -401,10 +359,10 @@ fn animating_tracks_running_jobs_not_services_and_sits_outside_the_ever_active_g
     // (TrackedObservation::animating has no ever_active gate) or cadence and
     // paint could disagree about whether anything is in motion. Pinned so a
     // refactor that moves the `animating` accrual inside the gate fails here.
-    let mut stale = obs(ObservationOrigin::StatusPipe, Status::Running, 1);
+    let mut stale = obs(ObservationOrigin::Program, Status::Running, 1);
     stale.ever_active = false;
     map.insert(1, stale);
-    let display = roll_up(&panes, resolver(&map), |_| None);
+    let display = roll_up(&panes, resolver(&map));
     assert_eq!(display.progress.total, 0, "not counted");
     assert!(!display.panes[0].is_tracked(), "renders untracked — no spinner row of its own");
     assert!(display.animating, "yet the sweep arms — `animating` sits outside the ever_active gate");
@@ -423,12 +381,12 @@ fn primary_detail_tie_break_prefers_a_job_over_a_service() {
     map.insert(1, build);
     map.insert(2, server);
     let panes = [pane(1, "build"), pane(2, "dev")];
-    let display = roll_up(&panes, resolver(&map), |_| None);
+    let display = roll_up(&panes, resolver(&map));
     assert_eq!(display.detail.unwrap().kind, Kind::Build);
     // Severity still wins over the job preference: a Pending service beats a
     // Running job outright.
     map.get_mut(&2).unwrap().status = Status::Pending;
-    let display = roll_up(&panes, resolver(&map), |_| None);
+    let display = roll_up(&panes, resolver(&map));
     assert_eq!(display.detail.unwrap().kind, Kind::Server);
 }
 
@@ -442,7 +400,7 @@ fn primary_detail_tie_break_prefers_a_job_over_a_remote_session() {
     map.insert(1, build);
     map.insert(2, remote);
     let panes = [pane(1, "build"), pane(2, "ssh")];
-    let display = roll_up(&panes, resolver(&map), |_| None);
+    let display = roll_up(&panes, resolver(&map));
     assert_eq!(display.detail.unwrap().kind, Kind::Build);
 }
 
@@ -457,26 +415,12 @@ fn remote_field_set_only_while_a_remote_pane_is_running() {
     map.insert(1, job);
     map.insert(2, remote);
     let panes = [pane(1, "build"), pane(2, "ssh")];
-    let display = roll_up(&panes, resolver(&map), |_| None);
+    let display = roll_up(&panes, resolver(&map));
     assert!(display.remote, "a connected remote pane sets the tab-level fact");
     assert_eq!(display.detail.unwrap().kind, Kind::Build, "severity winner is unaffected");
 
     // Not merely "was remote": a Done remote session clears it.
     map.get_mut(&2).unwrap().status = Status::Done;
-    let display = roll_up(&panes, resolver(&map), |_| None);
+    let display = roll_up(&panes, resolver(&map));
     assert!(!display.remote, "a disconnected session clears the tab marker");
-}
-
-#[test]
-fn interactive_earns_a_pane_line_but_is_not_tracked() {
-    let d = PaneDisplay::Interactive { pane_id: 7, kind: Kind::Command, msg: "nvim".into() };
-    assert!(d.earns_pane_line());
-    assert!(d.is_interactive());
-    assert!(!d.is_tracked());
-    assert_eq!(d.render_status(), Status::Idle);
-    assert_eq!(d.msg(), "nvim");
-    assert_eq!(d.kind(), Kind::Command);
-    assert_eq!(d.status(), None, "no status — context, not activity");
-    assert_eq!(d.outcome(), None);
-    assert_eq!(d.since_tick(), None);
 }

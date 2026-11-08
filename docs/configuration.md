@@ -32,23 +32,15 @@ the field as it was, so a typo never resets a setting.
 | Key | Values | Default | Effect |
 |-----|--------|---------|--------|
 | `density` | `cards` · `comfortable` · `compact` | `cards` | Tinted card bands / blank separators / flush rail. |
-| `naming` | `off` · `managed` · `force` | `managed` | Auto-name tabs from the agent's repo or the pane's cwd/title. `managed` never overwrites a name you set by hand; `force` does. See note 1. |
+| `naming` | `off` · `managed` · `force` | `managed` | Auto-name tabs from the project's git remote, else the pane's directory or title ([order](using.md#anatomy)). `managed` never overwrites a name you set by hand; `force` does. See note 1. |
 | `header` | `true` · `false` | `true` | Show the ` RADAR` header and tab count. |
 | `glyphs` | `plain` · `nerd` | `plain` | Status glyph set. `nerd` needs a Nerd Font. |
 | `jump_hint` | `alt-n` · `hidden` | `hidden` | Footer advertises ` alt-[n] jump`. See note 2. |
 | `show_mode` | `true` · `false` | `false` | Show the current Zellij input mode (`NORMAL`, `LOCKED`, `PANE`, …) flush right on the footer's tally line. `NORMAL` is muted, other modes use the accent color. The label is dropped when the rail is too narrow to fit it beside the tally, and it lives in the footer, so a rail too short to draw the footer shows no mode. If two clients view the same tab in different modes, the most recent mode change shows. See [`install.md`](install.md#add-the-sidebar-to-a-layout) for dropping the status bar. |
-| `spinner_fps` | `1`–`10` | `4` | Frames per second of the working spinner on the visible rail. `1` steps once a second (the pre-0.9 pace). Each frame repaints the rail; hidden tabs and agents running past 10 minutes (whose spinner eases to a slow blink) never animate faster than once a second. |
+| `spinner_fps` | `1`–`10` | `4` | Frames per second of the working spinner on the visible rail. `1` steps once a second (the pre-0.9 pace). Each frame repaints the rail; hidden tabs and rows running past 10 minutes (whose spinner eases to a slow blink) never animate faster than once a second. |
 | `task_lines` | `lines` · `count` · `off` | `lines` | How an agent's background tasks show: a `┊` line per task, only a `+N` count on the agent's row, or nothing. See [`using.md`](using.md). |
 | `ledger` | `true` · `false` | `true` | Show the `─ earlier ─` list of recent completions. `false` shows only live panes; history is still recorded, so `true` brings it back. See [`using.md`](using.md). |
-| `notify` | `true` · `false` | `true` | Master switch for desktop notifications. |
-| `notify_done` | `true` · `false` | `true` | Notify on transition to `done`. |
-| `notify_error` | `true` · `false` | `true` | Notify on transition to `error`. |
-| `notify_pending` | `true` · `false` | `true` | Notify on transition to `pending`. |
-| `notify_remote` | `true` · `false` | `true` | Notify when a remote session (`ssh`, `mosh`, …) disconnects. Independent of `notify_done`/`notify_error`: a disconnect answers to this toggle alone, so silencing routine completions keeps disconnects, and `notify_remote false` silences only disconnects. |
-| `notify_when_focused` | `true` · `false` | `false` | Also notify for the focused pane. |
-| `session_tree` | `true` · `false` | `false` | Draw peer sessions' tab trees on this rail (off keeps one line per session). Display-only: every session publishes its tree regardless. See [`using.md`](using.md#cross-session-badge). |
-| `interactive_commands` | comma/space-separated exe names | *(empty)* | Extra programs to treat as interactive: never a spinning row, only a muted label. Extends the built-in set of editors, pagers, and TUIs. Applies live. See [`activity-model.md`](activity-model.md). |
-| `remote_commands` | comma/space-separated exe names | *(empty)* | Extra programs to treat as remote-session launchers (steady mark, tab `⇄` marker, disconnect notification). Matched by program name alone, arguments ignored. Extends the built-in set (`ssh`, `mosh`, `mosh-client`, `autossh`, `et`). Applies live. See [`activity-model.md`](activity-model.md). |
+| `session_tree` | `true` · `false` | `false` | Draw peer sessions' tab trees on this rail (off keeps one line per session). See [`using.md`](using.md#cross-session-badge). |
 
 Notes:
 
@@ -59,12 +51,6 @@ Notes:
    Window managers often claim those chords, and macOS terminals type `¡`
    unless option-as-alt is on. `zj-radar run` binds Alt-1..9 but does not set
    this, because it cannot verify the chord arrives.
-
-Three more keys (`role`, `grant_hint`, `defer_permission`) are set by
-`zj-radar run`'s generated layouts. Don't set them by hand.
-
-Notification behavior (transitions only, background panes by default, one per
-event across tabs) is described in [`using.md`](using.md#notifications).
 
 ## Runtime config
 
@@ -145,8 +131,8 @@ keybinds {
 }
 ```
 
-- `attention-next` / `attention-prev` walk the tabs whose agents are waiting
-  for you, errored, or done, in tab order, wrapping. Running and idle tabs are
+- `attention-next` / `attention-prev` walk the tabs that need you, errored,
+  or are done, in tab order, wrapping. Running and idle tabs are
   skipped.
 - `session-next` / `session-prev` move the cross-session badge's highlight
   through the order the badge renders in (see [Cross-session
@@ -159,5 +145,5 @@ These binds broadcast too, for the reason above: in a session without a
 rail they do nothing.
 
 Unknown verbs are ignored. Both pipes are inert until the sidebar has been
-granted permissions. Mouse gestures (`✓` acknowledge, `✕` dismiss) are
-described in [`using.md`](using.md#mouse).
+granted permissions. The `✓` mouse gesture is described in
+[`using.md`](using.md#mouse).

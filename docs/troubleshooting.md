@@ -13,167 +13,64 @@ face but receives no events, so everything looks dead. The blank case is
 Zellij drawing its own y/n prompt into one plugin pane, where at rail width it
 is unreadable ([zellij #4749](https://github.com/zellij-org/zellij/issues/4749)).
 You get here when the install-time grant was skipped or went stale: a declined
-consent prompt, an older CLI, a `permissions.kdl` the installer refused to
-edit, a partial grant from an older zj-radar (Zellij ignores an entry that
-does not cover every requested permission), an alias pointing at a
-`/nix/store/` path, or no resolvable Zellij cache directory.
+consent prompt, a `permissions.kdl` the installer refused to edit, a grant
+from an older zj-radar that lacks a permission this release requests
+([Permissions](install.md#permissions)), an alias pointing at a `/nix/store/`
+path, or no resolvable Zellij cache directory.
 
 **Fix:** `zj-radar setup zellij --check`; a non-`ok` `grant` item confirms it.
-Then one of:
+Then pick the fix for how the rail was installed:
 
-- in a `zj-radar run` session, press **Ctrl-y** to open the grant prompt in a
-  legible floating pane;
-- `zj-radar setup zellij -y` to pre-authorize, then open a new tab or restart
-  Zellij;
-- from inside the session, `zj-radar setup zellij --grant` and press `y` in
-  the floating pane it opens;
-- focus the blank pane and press `y` blind.
+- **With `setup zellij` (or `update`):** run `zj-radar setup zellij -y` to
+  pre-authorize, then open a new tab or restart Zellij.
+- **In a `zj-radar run` session:** quit and re-run `zj-radar run`; it
+  pre-authorizes its own wasm before launching.
+- **By hand, or when the two above cannot write the grant:** from inside the
+  session, run `zj-radar setup zellij --grant` and press `y` in the floating
+  pane it opens. Without the CLI, focus the blank rail pane and press `y`
+  blind.
 
-A rail that is blank because Zellij is older than 0.44.3 fails to load the
-wasm at all; no grant will wake it.
+A rail on Zellij older than 0.46.0 does not work at all; no grant fixes it.
 
-## Sidebar renders, but no status ever appears
+## An agent pane shows no status
 
-**Symptom:** the rail draws your tabs, but agents work and finish invisibly.
+**Symptom:** an agent works in a pane, but its row never appears or never
+leaves idle.
 
-The rail and the status feed are separate installs, so a rendering rail says
-nothing about the [producer](producers.md). In order:
+The rail shows what Zellij reports for the pane, and Zellij reports what the
+agent sends it over OSC 7501. Nothing needs installing, so check these in
+order:
 
-1. **`zj-radar setup zellij --check`.** The `producer` item says whether any
-   producer is wired; the `grant` item catches a missing permission.
-2. **Bypass the producer.** From a shell inside the session:
+1. **`zj-radar setup zellij --check`.** It flags a Zellij older than 0.46.0
+   and a missing grant.
+2. **Rule out the rail.** Report a status by hand from a shell in the session,
+   as in [Writing your own producer](producers.md#writing-your-own-producer).
+   If that row lights up, the rail is fine and the agent sends nothing.
+3. **The agent's version.** Each agent reports only from a release with
+   OSC 7501 support ([supported agents](producers.md#supported-agents)). omp
+   needs a release that contains
+   [can1357/oh-my-pi#17147](https://github.com/can1357/oh-my-pi/pull/17147);
+   before it, omp's own shell-integration output cleared its working state.
+4. **Claude Code's environment.** Claude Code reports nothing when
+   `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` is set in its environment, for
+   example in a Claude started from another Claude's Bash tool
+   ([Claude Code](producers.md#claude-code)). Start it without the variable:
+   `env -u CLAUDE_CODE_DISABLE_TERMINAL_TITLE claude`.
 
-   ```sh
-   zellij pipe --name zj_radar.status.v1 -- \
-     '{"v":1,"source":"test","pane":{"type":"terminal","id":'"${ZELLIJ_PANE_ID#terminal_}"'},"status":"running","repo":"demo","msg":"hello"}'
-   ```
+**Opencode never shows done.** Opencode reports only working and needs-you,
+with no done or error
+([anomalyco/opencode#60411](https://github.com/anomalyco/opencode/issues/60411)).
+A finished turn reads idle, and it never reaches `─ earlier ─`.
 
-   If a row lights up, the sidebar is fine and the producer is the problem. If
-   nothing happens, re-check the grant, and reload the wasm if `--download`
-   just updated it.
-3. **Producer prerequisites.** The agent must run inside the Zellij session;
-   the hooks no-op without `$ZELLIJ_PANE_ID`. The Claude plugin's bash
-   fallback needs `bash` and `jq`; installing the `zj-radar` CLI removes that
-   dependency.
-4. **Repeated test sends.** The CLI does not re-send a `running` identical to
-   the pane's last one within 10 seconds ([producers](producers.md#claude-code)).
-   When probing by hand, change the message between sends or set
-   `ZJ_RADAR_NO_DEDUP=1`.
-5. **Zellij too old.** The floor is 0.44.3; `--check` flags it.
+## Command rows show no command text
 
-## A Codex pane shows no status
+**Symptom:** shell commands get rows, but each one shows only its status.
 
-**Symptom:** Codex works in a pane, the hooks are installed and trusted, but
-its row never appears (or, with zj-radar 0.10 and older, Codex status shows up
-on the wrong pane).
+**Why:** Zellij withholds command text from a plugin without the
+`ReadPaneContents` permission. A grant written before this release lacks it.
 
-**Why:** since 0.157 Codex runs sessions on a shared background app-server
-daemon by default, and every session's hooks run inside that daemon with the
-environment it captured at startup: the `$ZELLIJ_PANE_ID` of whichever pane
-happened to start it. Nothing in the hook payload names the real pane, so
-`notify codex` ignores hooks that come from the daemon rather than paint the
-wrong row. Codex keeps hooks client-agnostic by design
-([openai/codex#48500](https://github.com/openai/codex/issues/48500)).
-
-**Fix:** run Codex without the daemon, either per launch or for good:
-
-```sh
-alias codex='codex --no-daemon'
-```
-
-```toml
-# $CODEX_HOME/config.toml (default ~/.codex)
-[features]
-daemon_auto_start = false
-```
-
-Then stop the running daemon with `codex app-server daemon stop`, since a TUI
-attaches to a live daemon whatever `daemon_auto_start` says.
-`zj-radar setup codex --check` reports the daemon's state.
-
-## A pi pane shows no status
-
-**Symptom:** pi works in a pane, but its row never appears.
-
-**Why:** the bridge extension reports only from pi's interactive TUI running
-under Zellij (`$ZELLIJ` set); print mode and `pi --no-extensions` report
-nothing. pi loads extensions at startup, so a pi that was already running
-when you ran `setup pi` has no bridge yet. A pi started through `npx pi` or
-`pnpm dlx pi` is not recognized as pi, because the launcher is the pane's
-command.
-
-**Fix:** run `zj-radar setup pi --check`, then restart pi or run `/reload`.
-Launch the installed `pi` binary rather than a package runner. Details in
-[producers](producers.md#pi).
-
-## An omp pane shows no status
-
-**Symptom:** omp works in a pane, but its row never appears.
-
-**Why:** same rules as pi: the bridge reports only from omp's interactive TUI
-under Zellij, and omp loads extensions at startup. omp also reads its
-extensions from the *active profile's* agent dir, so a bridge installed while
-`$OMP_PROFILE` (or `$PI_CONFIG_DIR` / `$PI_CODING_AGENT_DIR`) differed from
-your launch environment sits where omp never looks.
-
-**Fix:** run `zj-radar setup omp --check` in the environment you launch omp
-from, then restart omp. Details in [producers](producers.md#omp).
-
-## No background-task lines under a Claude pane
-
-**Symptom:** Claude backgrounds a test run or a subagent, and the pane shows
-`waiting on …` but no `┊` lines under it.
-
-**Why:** task lines need the `zj-radar` CLI on the `PATH` Claude Code's hooks
-see. Without it the plugin's bash fallback runs: it keeps the waiting status
-but sends no tasks.
-
-**Fix:** install the CLI ([install](install.md)) and make sure it is on the
-`PATH` Claude Code starts with. The next hook picks it up.
-
-## An editor, pager, or TUI shows a spinning "Running" row
-
-**Symptom:** opening an interactive program makes its pane spin forever.
-
-**Why:** interactive programs are recognized by name, and this one is not in
-the built-in set.
-
-**Fix:** add its exe name to the `interactive_commands` option
-([configuration](configuration.md)). It applies live; the spinning row demotes
-to a muted label at once.
-
-## An ssh/mosh session's disconnect notification fires for a clean logout too
-
-**Symptom:** a plain `exit`/`logout` from a remote session notifies
-"disconnected", the same as an actual dropped connection.
-
-**Why:** this is an honest, documented limitation of the observed-only
-`Remote` class ([`activity-model.md`](activity-model.md) §7): Zellij reports
-no exit code for a command run inside an ordinary shell pane (only held
-panes, `zellij run`/`close_on_exit false`, get one), so a clean logout and a
-dropped link are the same event to the plugin. Distinguishing them needs a
-pushed producer (a future `zj-radar ssh` wrapper reporting the real exit
-code) — out of scope for this change.
-
-**Related:** a *hung* ssh (a network partition with no clean exit) shows as
-connected until the connection itself gives up — there is no termios/
-heartbeat signal available to detect a stalled link sooner. Add
-`ServerAliveInterval 15` and `ServerAliveCountMax 3` to `~/.ssh/config` so a
-dead link surfaces (and the pane's row updates) within about a minute instead
-of hanging indefinitely.
-
-## A command row is stuck "Running" forever
-
-**Symptom:** a shell command's row keeps spinning after the pane is back at its
-prompt.
-
-**Why:** Zellij dropped the `CommandChanged` exit event. The sidebar promotes
-a foreground command after a short debounce, and without the matching
-back-to-prompt event nothing clears it.
-
-**Fix:** run any other command in that pane, or close the pane. Agent rows
-have their own safety net: a `running` row whose pane sits at the prompt is
-cleared after about 15 seconds.
+**Fix:** re-grant as in
+[Sidebar shows "needs permission"](#sidebar-shows-needs-permission-or-looks-blank).
 
 ## Can't open a new tab (the two-template rule)
 
@@ -260,23 +157,6 @@ away.
   }
   ```
 
-## First-run prompt coordination
-
-**Symptom:** on a fresh layout the sidebar asks for permissions in one tab
-while the others wait; occasionally a late-spawned sidebar starts empty until
-the next broadcast.
-
-**Why:** with one instance per tab, one instance owns the first-run prompt and
-the others wait for Zellij's cached answer. Coordination uses Zellij's shared
-plugin cache, falling back to the plugin's `/tmp/zj-radar` (on the host,
-`$TMPDIR/zellij-<uid>/zj-radar`). If neither is writable, more
-than one instance may prompt and late sidebars start empty until the next
-broadcast.
-
-**Fix:** pre-authorize at install time, or grant once in a floating pane
-([Permissions](install.md#permissions)); every later instance reuses the
-cached grant.
-
 ## Session crashes with "too many open files" (EMFILE)
 
 **Symptom:** in a long-lived session, `zellij pipe` calls hang, stuck `zellij
@@ -287,10 +167,9 @@ consumed the message. An instance parked at its permission prompt never does,
 so each broadcast leaves one blocked client pinning two server file
 descriptors.
 
-**Fix:** grant the prompt so no instance stays wedged (above), and make sure
-your producers are current. Bundled producers bound every send with a
-deadline; third-party producers must too. See
-[Bound your sends](producers.md#bound-your-sends).
+**Fix:** grant the prompt so no instance stays wedged
+([above](#sidebar-shows-needs-permission-or-looks-blank)), and give scripted
+`zellij pipe` sends a deadline (for example `timeout 5 zellij pipe …`).
 
 ## Cards look flat (no colored row backgrounds)
 
@@ -332,12 +211,6 @@ A running session keeps the plugin it loaded. Restart Zellij, or open a new
 session. `zj-radar update --check` confirms the installed wasm matches the
 release. If it reports the wasm as a symlink managed by Nix or home-manager,
 `update` left it alone; update the flake input instead.
-
-## Codex panes go dark after `zj-radar update`
-
-When an update rewrites the Codex hooks, Codex treats them as new and skips
-them until you trust them again. Run `/hooks` inside Codex and trust the
-zj-radar command hook; the rows light up on the next turn.
 
 ## Zellij plugin-reload quirks
 

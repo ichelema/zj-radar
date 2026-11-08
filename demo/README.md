@@ -4,8 +4,8 @@ Everything needed to regenerate the repo's hero media and screenshots — and a
 zero-dependency way to **see the sidebar in action without wiring up a real
 agent**.
 
-The trick: zj-radar's only interface is the `zj_radar.status.v1` pipe broadcast,
-so [`agent.sh`](agent.sh) just *plays* a scripted status arc for its own pane.
+The trick: the rail reads Zellij's own program status (the OSC 7501 escape
+sequence), so [`agent.sh`](agent.sh) just *plays* a scripted status arc for its own pane.
 Each tab runs a different arc; the rail animates the rest (the spinner and
 elapsed clock advance on the plugin's own 1-second timer).
 
@@ -51,7 +51,7 @@ zellij --config target/demo/config.kdl --layout target/demo/layout.kdl
 
 | File | What it is |
 |------|------------|
-| `agent.sh` | Broadcasts a timed status arc for `$ZELLIJ_PANE_ID`; the focused arcs also print agent-style output to fill the content pane. |
+| `agent.sh` | Prints a timed OSC 7501 status arc into its own pane; the focused arcs also print agent-style output to fill the content pane. |
 | `banner.sh` | The intro title card (tool name + glyph legend) shown for the first ~3s. |
 | `demorc.sh` | A minimal bash rcfile giving runtime tabs (`Ctrl+t n` while exploring live) a clean `$ ` prompt instead of the recording host's shell config. |
 | `layout.kdl` | Tabs running `agent.sh` arcs (one with two panes → a roll-up tree); radar sidebar pinned left via a direct `file:` plugin path. Template — `__WASM__`/`__ROOT__` filled at record time. |
@@ -67,10 +67,9 @@ recording flaky:
 - **Permissions** — rewrites this wasm's grant block in Zellij's
   `permissions.kdl` with the full set the plugin requests, so the recording
   shows no first-run prompt (a stale partial grant would block the rail).
-- **Process-tree shape** (in `agent.sh`) — Zellij reports a pane whose root
-  process has no child as "back at the shell prompt", and the plugin rightly
-  exit-clears the pane's pushed status on that signal (that's how it catches
-  killed agents). agent.sh therefore never sits childless while it matters:
+- **Process-tree shape** (in `agent.sh`) — Zellij reads a pane whose root
+  process has no child as "back at the shell prompt", which is not how a live
+  agent looks. agent.sh therefore never sits childless while it matters:
   the beat-3 `read` parks a `sleep` guard child, and `hold` runs `tail` as a
   child rather than `exec`ing it.
 - **Nested Zellij** — unsets `ZELLIJ*` before launching vhs, so the inner
@@ -87,7 +86,7 @@ recording flaky:
   `config.kdl`.)
 - **Timing is wall-clock.** The `Sleep`s in `hero.tape` and the `sleep`s in
   `agent.sh` share one clock, offset by the ~2–3s it takes the session to start
-  and the agents to begin broadcasting. If a beat lands early/late, nudge the
+  and the agents to begin emitting. If a beat lands early/late, nudge the
   two together. The two exceptions are event-driven and self-syncing: the
   tape's `Wait+Screen` anchors, and beat 3's resume (`agent.sh` blocks on
   `read` until the tape's `y` arrives).

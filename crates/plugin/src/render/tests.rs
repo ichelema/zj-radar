@@ -78,7 +78,7 @@ fn display(status: Status, done: usize, total: usize, detail: Option<PrimaryDeta
                 since_tick: d.since_tick,
                 outcome: d.outcome,
                 pending_epoch_s: d.pending_epoch_s,
-                origin: crate::observation::ObservationOrigin::StatusPipe,
+                origin: crate::observation::ObservationOrigin::Program,
                 acknowledged: false,
                 tasks: Default::default(),
             }]
@@ -846,10 +846,7 @@ fn panel_faces_never_exceed_height() {
     for height in [0usize, 1, 2, 3, 5, 7, 12, 100] {
         for (name, face) in [
             ("onboarding", onboarding(&RenderOpts { height, ..ro(24, 0) })),
-            (
-                "needs_permission",
-                needs_permission(&RenderOpts { height, ..ro(24, 0) }, crate::config::GrantHint::CtrlY),
-            ),
+            ("needs_permission", needs_permission(&RenderOpts { height, ..ro(24, 0) })),
         ] {
             assert!(face.line_count() <= height, "{name} at height {height} emits {} lines", face.line_count());
             // vt100 scrolls when the newline COUNT reaches the pane height
@@ -932,7 +929,7 @@ fn pe(id: u32, kind: Kind, status: Status, msg: &str) -> PaneDisplay {
         since_tick: 0,
         outcome: None,
         pending_epoch_s: None,
-        origin: crate::observation::ObservationOrigin::StatusPipe,
+        origin: crate::observation::ObservationOrigin::Program,
         acknowledged: false,
         tasks: Default::default(),
     }
@@ -3111,7 +3108,7 @@ prop_compose! {
                 since_tick: 0,
                 outcome: None,
                 pending_epoch_s: None,
-                origin: crate::observation::ObservationOrigin::StatusPipe,
+                origin: crate::observation::ObservationOrigin::Program,
                 acknowledged: false,
                 tasks: bg,
             }
@@ -3439,7 +3436,7 @@ fn hotspot_metadata_survives_cards_finalize_and_excludes_question_and_overflow_l
         since_tick: 0,
         outcome: None,
         pending_epoch_s: None,
-        origin: crate::observation::ObservationOrigin::StatusPipe,
+        origin: crate::observation::ObservationOrigin::Program,
         acknowledged: false,
         tasks: Default::default(),
     };
@@ -3695,26 +3692,17 @@ fn seg_is_always_reset_terminated() {
 fn needs_permission_face_is_distinct_and_actionable() {
     let opts = ro(24, 0); // existing test helper: RenderOpts at width 24
     let onboard = onboarding(&opts).ansi;
-    let needs = needs_permission(&opts, crate::config::GrantHint::Generic).ansi;
+    let needs = needs_permission(&opts).ansi;
     assert_ne!(needs, onboard, "permission face must differ from idle onboarding");
-    // The searched substrings ("Ctrl-y", "permission", "press y") contain no
+    // The searched substrings ("permission", "press y") contain no
     // characters that appear in SGR escape sequences (`\x1b`, `[`, digits, `;`,
     // `m`), so a plain `contains` on the raw ANSI string is valid without
     // stripping SGR first.
     //
-    // Default (setup-injected rails, unknown installs): NO Ctrl-y promise —
-    // that keybind only exists in run-owned configs. The generic wording
-    // (focus + press y) is true everywhere: Zellij binds its native prompt to
-    // a rail pane.
-    assert!(!needs.contains("Ctrl-y"), "default face must not promise an uninstalled keybind:\n{needs}");
-    assert!(needs.contains("press y"), "default face must name the universal grant action:\n{needs}");
+    // The wording (focus + press y) is true everywhere: Zellij binds its
+    // native prompt to a rail pane.
+    assert!(needs.contains("press y"), "the face must name the universal grant action:\n{needs}");
     assert!(needs.to_lowercase().contains("permission"), "must mention permission");
-
-    // Run-owned configs pass `grant_hint "ctrl-y"` and get the float keybind.
-    let ctrl_y = needs_permission(&ro(24, 0), crate::config::GrantHint::CtrlY).ansi;
-    assert!(ctrl_y.contains("Ctrl-y"), "run installs must name the grant keybind:\n{ctrl_y}");
-    // Both variants keep the same height: three hint lines behind one face.
-    assert_eq!(needs.matches('\n').count(), ctrl_y.matches('\n').count());
 }
 
 #[test]
@@ -3860,7 +3848,7 @@ fn running_row_eases_to_slow_blink_after_long_runner_threshold() {
 /// Local test helper: field order matches `BadgeEntry`'s declaration EXCEPT
 /// `is_current` moves up next to `name` — the shape most test call sites
 /// read naturally ("work, current, 3 running, 0 attention, no attention tab,
-/// not selected, not stale").
+/// not selected").
 fn badge_entry(
     name: &str,
     is_current: bool,
@@ -3869,27 +3857,14 @@ fn badge_entry(
     attention_tab_position: Option<usize>,
     selected: bool,
 ) -> BadgeEntry {
-    stale_badge_entry(name, is_current, running, attention, attention_tab_position, selected, false)
-}
-/// As `badge_entry`, with an explicit trailing `stale` flag — for the
-/// dimmed/clickable/skip-cycle pins.
-fn stale_badge_entry(
-    name: &str,
-    is_current: bool,
-    running: usize,
-    attention: usize,
-    attention_tab_position: Option<usize>,
-    selected: bool,
-    stale: bool,
-) -> BadgeEntry {
     BadgeEntry {
         name: name.to_string(),
         running,
         attention,
         attention_tab_position,
+        attention_pane_id: None,
         is_current,
         selected,
-        stale,
         tabs: vec![],
     }
 }
@@ -3913,17 +3888,17 @@ fn badge_absent_with_single_session_and_lockstep_with_many() {
     assert_eq!(lines[2].target, None, "separator line is click-inert");
 }
 
-/// A peer entry whose presence carries `tabs` tabs of `agents` running
+/// A peer entry whose summary carries `tabs` tabs of `agents` running
 /// Claude panes each (tab `t` at position `t`, named `t{t}`, panes `a{t}.{p}`).
 fn peer_with_tree(name: &str, tabs: usize, agents: usize) -> BadgeEntry {
-    use crate::presence::{PresencePane, PresenceTab};
+    use crate::sessions::{SummaryPane, SummaryTab};
     let mut peer = badge_entry(name, false, tabs * agents, 0, None, false);
     peer.tabs = (0..tabs)
-        .map(|t| PresenceTab {
+        .map(|t| SummaryTab {
             position: t,
             name: format!("t{t}"),
             panes: (0..agents)
-                .map(|p| PresencePane {
+                .map(|p| SummaryPane {
                     kind: "claude".into(),
                     status: "running".into(),
                     label: format!("a{t}.{p}"),
@@ -3937,12 +3912,12 @@ fn peer_with_tree(name: &str, tabs: usize, agents: usize) -> BadgeEntry {
 
 #[test]
 fn peer_session_tree_lists_tabs_and_agents_with_tab_targets() {
-    use crate::presence::{PresencePane, PresenceTab};
+    use crate::sessions::{SummaryPane, SummaryTab};
     let mut peer = badge_entry("review", false, 1, 0, None, false);
-    peer.tabs = vec![PresenceTab {
+    peer.tabs = vec![SummaryTab {
         position: 2,
         name: "PR 8577".into(),
-        panes: vec![PresencePane {
+        panes: vec![SummaryPane {
             kind: "claude".into(),
             status: "running".into(),
             label: "reviewing CI".into(),
@@ -3958,6 +3933,26 @@ fn peer_session_tree_lists_tabs_and_agents_with_tab_targets() {
         assert_eq!(target.session.as_deref(), Some("review"));
         assert_eq!(target.session_tab_position(), Some(2));
     }
+}
+
+#[test]
+fn peer_lines_with_pane_ids_focus_the_pane_not_a_tab() {
+    use crate::sessions::{SummaryPane, SummaryTab};
+    let mut peer = badge_entry("review", false, 1, 1, None, false);
+    peer.attention_pane_id = Some(9);
+    let pane = |id, label: &str| SummaryPane {
+        pane_id: Some(id),
+        kind: "claude".into(),
+        status: "pending".into(),
+        label: label.into(),
+    };
+    peer.tabs = vec![SummaryTab { position: 0, name: "t".into(), panes: vec![pane(9, "a"), pane(4, "b")] }];
+    let targets: Vec<(Option<u32>, Option<usize>)> = render_peer_children(&peer, usize::MAX, &ro(36, 18))
+        .iter()
+        .map(|l| l.target.as_ref().map(|t| (t.pane_id, t.session_tab_position())).unwrap())
+        .collect();
+    // The tab line takes its first pane.
+    assert_eq!(targets, vec![(Some(9), None), (Some(9), None), (Some(4), None)]);
 }
 
 #[test]
@@ -4055,7 +4050,7 @@ fn idle_strip_sits_under_the_local_cards_not_the_peer_tree() {
 #[test]
 fn session_tree_off_keeps_the_compact_badge_above_the_cards() {
     // Default: the badge is one line per session above the cards — the peer
-    // presence may carry a tree (a peer with the option on), but it's ignored.
+    // the summary may carry a tree (a peer with the option on), but it's ignored.
     let rows = vec![tab(1, "local", display(Status::Running, 0, 1, Some(pd("r", "b", "localjob", Status::Running))))];
     let badge = vec![badge_entry("work", true, 1, 0, None, false), peer_with_tree("peer", 2, 2)];
     let opts = RenderOpts { height: 40, density: crate::config::Density::Cards, badge, ..ro(32, 0) };
@@ -4119,82 +4114,6 @@ fn badge_encodes_missing_attention_as_a_sentinel_not_tab_zero() {
     let lines = render_session_badge(&with_attention, &ro(24, 0));
     let t = lines[1].target.clone().expect("peer line is clickable");
     assert_eq!(t.session_tab_position(), Some(0), "attention genuinely at tab 0 must still resolve to Some(0)");
-}
-
-// -- Pinning: stale badge entries -------------------------------------------
-// A stale-but-not-yet-dead session dims on the badge rather than vanishing
-// (`Sessions`' fresh → stale → dead ladder; the reap itself lives in
-// sessions.rs — a dead entry never reaches this renderer). The renderer's
-// job is narrow: paint a stale entry in a receded color and keep its click
-// target — `Sessions::cycle` (sessions.rs's own tests) is what actually
-// keeps Alt+[/] from landing on it.
-
-#[test]
-fn stale_badge_entry_renders_dimmed_but_stays_clickable() {
-    let opts = ro(24, 0);
-    let idle_color = tc_fg(opts.theme.idle_text);
-    let stale_color = tc_fg(crate::theme::blend(opts.theme.idle_text, opts.theme.rail_bg, 0.5));
-
-    let entries =
-        vec![badge_entry("work", true, 0, 0, None, false), stale_badge_entry("alpha", false, 0, 0, None, false, true)];
-    let lines = render_session_badge(&entries, &opts);
-
-    // Still fully clickable — a click on a stale entry is a deliberate act;
-    // `entry.stale` only ever affects color, never the target.
-    let t = lines[1].target.clone().expect("a stale peer line must still be clickable");
-    assert_eq!(t.session.as_deref(), Some("alpha"));
-
-    // Its label paints in the receded stale color, not the ordinary muted
-    // idle_text every fresh line uses.
-    assert!(
-        lines[1].text.contains(&format!("{stale_color}alpha")),
-        "stale label must render in the receded stale color, got {:?}",
-        lines[1].text
-    );
-    assert!(
-        !lines[1].text.contains(&format!("{idle_color}alpha")),
-        "stale label must not render in the plain idle color, got {:?}",
-        lines[1].text
-    );
-}
-
-#[test]
-fn stale_entry_undims_once_superseded_by_a_fresh_entry() {
-    // The recreation case: the exact same name, now reported fresh, must
-    // render in the ordinary idle color again — nothing about a name alone
-    // pins a line to stale forever.
-    let opts = ro(24, 0);
-    let idle_color = tc_fg(opts.theme.idle_text);
-    let stale_color = tc_fg(crate::theme::blend(opts.theme.idle_text, opts.theme.rail_bg, 0.5));
-
-    let stale_entries =
-        vec![badge_entry("work", true, 0, 0, None, false), stale_badge_entry("alpha", false, 0, 0, None, false, true)];
-    let stale_lines = render_session_badge(&stale_entries, &opts);
-    assert!(stale_lines[1].text.contains(&format!("{stale_color}alpha")));
-
-    let fresh_entries = vec![
-        badge_entry("work", true, 0, 0, None, false),
-        badge_entry("alpha", false, 0, 0, None, false), // same name, now fresh
-    ];
-    let fresh_lines = render_session_badge(&fresh_entries, &opts);
-    assert!(
-        fresh_lines[1].text.contains(&format!("{idle_color}alpha")),
-        "a superseding fresh presence must undim the line back to the plain idle color"
-    );
-    assert!(!fresh_lines[1].text.contains(&format!("{stale_color}alpha")));
-}
-
-#[test]
-fn lone_fresh_own_entry_with_only_stale_peers_still_renders() {
-    // The single-session zero-line rule counts `entries.len()`, not fresh
-    // entries — a stale-but-not-yet-dead peer still counts toward the 2+
-    // threshold: it stays visible (dimmed) until the dead reap.
-    let entries =
-        vec![badge_entry("work", true, 0, 0, None, false), stale_badge_entry("alpha", false, 0, 0, None, false, true)];
-    assert!(
-        !render_session_badge(&entries, &ro(24, 0)).is_empty(),
-        "a lone fresh own-entry plus only stale peers must still render the badge"
-    );
 }
 
 // ── show_mode: the Zellij input mode, right-aligned on the tally line ──

@@ -5,7 +5,7 @@
 //! and the naming *state* (`applied`: which name this module last applied to each
 //! tab, the basis for stickiness). It is fed resolved [`TabFacts`] — the caller
 //! does the joins across its stores and pane topology, so this module never
-//! learns about `StatusStore`, `CommandStore`, `TerminalPane`, or a cwd map.
+//! learns about `RadarState`'s observations, `TerminalPane`, or a cwd map.
 //!
 //! Stickiness in one candidate space: `computed_name` takes the top candidate and
 //! `name_supported` asks whether a name sits anywhere in that same space. Both
@@ -18,7 +18,8 @@ use crate::radar_state::TabId;
 use std::collections::HashMap;
 
 /// The naming facts for one pane, resolved by the caller. `repo` is the only
-/// fact this module cannot derive itself (it comes from the status store); the
+/// fact this module cannot derive itself (the project name from the cwd's git
+/// remote, [`repo_from_remote`], else a pushed status's repo); the
 /// raw `cwd` and `title` are processed here (worktree resolution, basename,
 /// activity-prefix stripping). `repo` may be `Some("")` — the empty filter lives
 /// in [`name_candidates`], matching the pre-extraction behavior.
@@ -61,6 +62,14 @@ pub(crate) struct TabNamer {
     /// The basis for stickiness: a name is "ours" while `applied[id] ==` the
     /// tab's current name.
     applied: HashMap<TabId, String>,
+    /// Tabs whose next `rename` ignores stickiness ([`TabNamer::repick`]).
+    repick: std::collections::HashSet<TabId>,
+    /// Renames sent but not yet echoed, keyed by tab: the name the tab showed
+    /// when we sent it. Until that name changes (our echo, a manual rename, an
+    /// undo) the same name is not sent again: a duplicate sent on an event
+    /// before the echo could land after a manual rename and overwrite it.
+    // ponytail: a rename Zellij drops is not retried until the tab's name changes; add a retry if one ever goes missing.
+    in_flight: HashMap<TabId, String>,
 }
 
 impl TabNamer {
@@ -78,12 +87,17 @@ impl TabNamer {
         let force = mode == NamingMode::Force;
         let mut out = Vec::new();
         for tab in tabs {
+            let echo_pending = self.in_flight.get(&tab.id) == Some(&tab.name);
+            if !echo_pending {
+                self.in_flight.remove(&tab.id);
+            }
             let ours = self.applied.get(&tab.id) == Some(&tab.name);
+            let repick = self.repick.remove(&tab.id);
             // Stickiness: a name we applied stays put as long as some pane still
             // justifies it, so moving focus between panes in different repos does
             // not flip the tab name. We only re-pick once no pane supports it
             // (e.g. the pane that named the tab closed).
-            if ours && name_supported(&tab.panes, &tab.name) {
+            if ours && !repick && name_supported(&tab.panes, &tab.name) {
                 continue;
             }
             // Sanitized exactly like the tab intake sanitizes host names: what
@@ -97,8 +111,12 @@ impl TabNamer {
             if desired.is_empty() || desired == tab.name {
                 continue;
             }
+            if echo_pending && self.applied.get(&tab.id) == Some(&desired) {
+                continue;
+            }
             if force || is_default_name(&tab.name) || ours {
                 self.applied.insert(tab.id, desired.clone());
+                self.in_flight.insert(tab.id, tab.name.clone());
                 out.push(TabRename { id: tab.id, name: desired });
             }
         }
@@ -112,6 +130,14 @@ impl TabNamer {
     /// which always carries the full current tab set.
     pub(crate) fn retain_tabs(&mut self, live: &std::collections::HashSet<TabId>) {
         self.applied.retain(|id, _| live.contains(id));
+        self.repick.retain(|id| live.contains(id));
+        self.in_flight.retain(|id, _| live.contains(id));
+    }
+
+    /// Skip stickiness on this tab's next `rename`: a better candidate has
+    /// arrived (a git remote name) for a name this module applied.
+    pub(crate) fn repick(&mut self, id: TabId) {
+        self.repick.insert(id);
     }
 
     #[cfg(test)]
@@ -196,8 +222,8 @@ fn cwd_basename(path: &str) -> Option<String> {
 /// conventions: Claude (`<repo>/.claude/worktrees/<branch>`) and Codex
 /// (`<repo>/.Codex/worktrees/<branch>`). A cwd sitting inside such a worktree
 /// belongs, conceptually, to the parent repo — so naming should follow the repo,
-/// not the (per-branch) worktree directory. Mirrors the CLI's git-common-dir
-/// resolution (`cli::notify`) without needing a `git` process from inside wasm.
+/// not the (per-branch) worktree directory. A path check, so it needs no `git`
+/// process from inside wasm.
 const WORKTREE_MARKERS: [&str; 2] = ["/.claude/worktrees/", "/.Codex/worktrees/"];
 
 /// Resolve the directory NAME a tab should take from a pane's cwd. For a cwd
@@ -226,8 +252,32 @@ fn strip_activity_prefix(title: &str) -> &str {
     }
 }
 
+/// The project name in a git remote URL: its last path segment, without a
+/// trailing `/` or `.git` (`git@github.com:o/r.git`, `https://h/o/r/`,
+/// `ssh://h:22/o/r.git` → `r`). `None` for an empty URL. `url` is
+/// `git remote get-url origin` output, so it is sanitized like a tab name.
+pub(crate) fn repo_from_remote(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/');
+    let last = url.rsplit(['/', ':']).next()?;
+    let name = last.strip_suffix(".git").unwrap_or(last);
+    let name = crate::payload::sanitize(name, crate::payload::MAX_TAB_NAME_CHARS);
+    (!name.is_empty()).then_some(name)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repo_from_remote_takes_the_last_segment() {
+        use super::repo_from_remote;
+        assert_eq!(repo_from_remote("git@github.com:o/r.git\n").as_deref(), Some("r"));
+        assert_eq!(repo_from_remote("https://h/o/r").as_deref(), Some("r"));
+        assert_eq!(repo_from_remote("https://h/o/r/").as_deref(), Some("r"));
+        assert_eq!(repo_from_remote("ssh://h:22/o/r.git").as_deref(), Some("r"));
+        assert_eq!(repo_from_remote("/srv/git/zj-radar.git").as_deref(), Some("zj-radar"));
+        assert_eq!(repo_from_remote(""), None);
+        assert_eq!(repo_from_remote("   "), None);
+    }
+
     use super::*;
 
     /// Build a pane carrying just a repo (unfocused unless `focused`).
@@ -484,5 +534,33 @@ mod tests {
         let tabs = vec![tab(1, "alpha", vec![repo_pane("beta", true)])];
         assert_eq!(namer.rename(&tabs, NamingMode::Managed), renamed_to("beta"));
         assert_eq!(namer.applied_name(TabId::new(1)), Some("beta"));
+    }
+
+    #[test]
+    fn an_in_flight_rename_is_not_resent_before_its_echo() {
+        // Zellij echoes a rename in a later TabUpdate. Events before the echo
+        // still show the old name; re-sending on each of them let a late
+        // duplicate land after a manual rename and overwrite it.
+        let mut namer = TabNamer::default();
+        let pending = vec![tab(1, "Tab #2", vec![repo_pane("home", true)])];
+        assert_eq!(namer.rename(&pending, NamingMode::Managed), renamed_to("home"));
+        assert!(namer.rename(&pending, NamingMode::Managed).is_empty(), "echo pending: no duplicate");
+        // The manual rename's echo wins and stays.
+        let manual = vec![tab(1, "keep-this-manual-name", vec![repo_pane("home", true)])];
+        assert!(namer.rename(&manual, NamingMode::Managed).is_empty());
+        // Undo back to the default name: the tab is named again.
+        assert_eq!(namer.rename(&pending, NamingMode::Managed), renamed_to("home"));
+    }
+
+    #[test]
+    fn a_different_name_is_sent_even_while_an_echo_is_pending() {
+        // Only exact duplicates wait: a new candidate (here a git remote name)
+        // goes out at once, and is itself not repeated before its echo.
+        let mut namer = TabNamer::default();
+        let pending = vec![tab(1, "Tab #2", vec![repo_pane("home", true)])];
+        assert_eq!(namer.rename(&pending, NamingMode::Managed), renamed_to("home"));
+        let better = vec![tab(1, "Tab #2", vec![repo_pane("zj-radar", true)])];
+        assert_eq!(namer.rename(&better, NamingMode::Managed), renamed_to("zj-radar"));
+        assert!(namer.rename(&better, NamingMode::Managed).is_empty(), "no duplicate of the new name");
     }
 }

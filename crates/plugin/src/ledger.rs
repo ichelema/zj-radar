@@ -1,41 +1,35 @@
 //! The completion ledger: a small ring of "what finished earlier" entries that
 //! cards hand off to when a Done/Error leaves the rail (spec §4). Pure data +
-//! policy: `RadarState` feeds it recede edges (wired in `radar_state.rs`); the
-//! renderer consumes prepared lines. Convergent across instances because every
-//! entry edge is a shared signal and the snapshot merges rings.
+//! policy, memory only: `RadarState` feeds it the native completion edges
+//! (wired in `radar_state.rs`); the renderer consumes prepared lines.
 //!
-//! Consumers, by seam: `push` via `RadarState::ledger_receded` (every edge
-//! that retires a card); `to_vec`/`replace`/`merge` via snapshot persistence
-//! (`RadarState::snapshot_json`/`load_snapshot`); `entries`/`format_age` via
+//! Consumers, by seam: `push` via `RadarState::ledger_native` (every edge
+//! that retires a card); `entries`/`format_age` via
 //! the rail's bottom region (`render::render_bottom` through
 //! `RadarState::ledger_lines`); `any_unsaturated`/`SATURATE_S` via
-//! `PluginRuntime::desired_cadence` (the Slow-vs-disarm cadence pick); and
-//! `is_empty` via `PluginRuntime::render`'s onboarding-vs-rail choice.
+//! `PluginRuntime::desired_cadence` (the Slow-vs-disarm cadence pick).
 
-use crate::observation::{ObservationOrigin, TrackedObservation};
 use crate::payload::{sanitize, MAX_MSG_CHARS, MAX_TAB_NAME_CHARS};
 use crate::radar_state::TabId;
-use crate::status::Status;
-use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-/// Storage cap for the ring — bounds the snapshot and the merge work, NOT what
+/// Storage cap for the ring — bounds memory, NOT what
 /// the rail shows (`render::LEDGER_DISPLAY_CAP` caps that at 10 rows).
 pub(crate) const LEDGER_CAP: usize = 32;
 /// Two entries within this many seconds and equal (pane, outcome, label) are
-/// the same event observed by different instances (spec §4.3).
+/// the same event reported twice (spec §4.3).
 pub(crate) const MERGE_WINDOW_S: u64 = 4;
 /// Ages ≥ this render as the frozen "1h+" — the display never changes again,
 /// which is what lets the idle timer fully disarm (spec §4.4/§10).
 pub(crate) const SATURATE_S: u64 = 3600;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LedgerOutcome {
     Done,
     Error,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LedgerEntry {
     pub at_epoch_s: u64,
     pub outcome: LedgerOutcome,
@@ -46,57 +40,8 @@ pub(crate) struct LedgerEntry {
 }
 
 impl LedgerEntry {
-    /// Build an entry from an observation leaving the card. `None` unless the
-    /// observation is a stamped completion (Done/Error with a completion epoch —
-    /// an unstamped one can only come from a pre-v3 snapshot; skipping it is the
-    /// accepted transient, spec §4.3).
-    pub(crate) fn from_observation(
-        pane_id: u32,
-        obs: &TrackedObservation,
-        tab_id: TabId,
-        tab_name: &str,
-    ) -> Option<LedgerEntry> {
-        let outcome = match obs.status {
-            Status::Done => LedgerOutcome::Done,
-            Status::Error => LedgerOutcome::Error,
-            _ => return None,
-        };
-        let at_epoch_s = obs.completed_epoch_s?;
-        // An empty msg still needs a row identity — a ledger line never reads
-        // blank. Agent turns fall back to "turn done"; a command completion
-        // with no recorded command string (an exit that beat every
-        // `CommandChanged` edge) falls back to its kind's own token
-        // ("command", "test", …), the same identity the card's mark carries.
-        let label = if obs.msg.trim().is_empty() {
-            match obs.origin {
-                ObservationOrigin::Command => obs.kind.as_source().to_string(),
-                ObservationOrigin::StatusPipe => "turn done".to_string(),
-            }
-        } else {
-            obs.msg.clone()
-        };
-        Some(LedgerEntry {
-            at_epoch_s,
-            outcome,
-            tab_id,
-            tab_name: sanitized_or(tab_name, MAX_TAB_NAME_CHARS, "tab"),
-            label,
-            pane_id,
-        })
-    }
-
-    /// Re-scrub the free-text fields. Live entries are built from
-    /// already-sanitized state; this is for entries loaded off disk, where a
-    /// pre-sanitize build (or a hand-edited snapshot) may have persisted raw
-    /// control chars that would otherwise reach the render grid.
-    /// `from_observation` never builds a blank field; disk-loaded entries are
-    /// held to the same never-blank policy — an all-control-chars value
-    /// scrubs to nothing and falls back to a fixed token instead. The label
-    /// fallback is deliberately origin-neutral ("done", not "turn done"):
-    /// origin is not retained on a disk-loaded entry, so this seam cannot
-    /// know whether the entry was an agent turn or a command completion —
-    /// only `from_observation`, which still holds the observation, may pick
-    /// an origin-specific token.
+    /// Scrub the free-text fields (strip controls/ANSI, cap), never leaving
+    /// one blank: an all-control-chars value falls back to a fixed token.
     pub(crate) fn sanitized(mut self) -> LedgerEntry {
         self.tab_name = sanitized_or(&self.tab_name, MAX_TAB_NAME_CHARS, "tab");
         self.label = sanitized_or(&self.label, MAX_MSG_CHARS, "done");
@@ -118,9 +63,8 @@ fn sanitized_or(text: &str, max_chars: usize, fallback: &str) -> String {
     }
 }
 
-/// Same (pane, outcome, label) within `MERGE_WINDOW_S` — the nearest-neighbor
-/// match shared by `push` and `merge` (spec §4.3). Symmetric in its two
-/// arguments.
+/// Same (pane, outcome, label) within `MERGE_WINDOW_S` — the match `push`
+/// dedups on (spec §4.3).
 fn is_same_event(a: &LedgerEntry, b: &LedgerEntry) -> bool {
     a.pane_id == b.pane_id
         && a.outcome == b.outcome
@@ -136,16 +80,9 @@ pub(crate) struct Ledger {
 
 impl Ledger {
     /// Append unless a matching entry (same pane/outcome/label within
-    /// MERGE_WINDOW_S) is already present — the dedup guard that stops
-    /// overlapping recede edges (prune racing TTL) double-appending.
-    ///
-    /// Deliberately asymmetric with `merge` on which stamp survives a match:
-    /// `push` keeps the EXISTING entry's stamp (the duplicate is this instance
-    /// re-observing its own local edge, so first-seen is the honest completion
-    /// time), while `merge` keeps the LATER stamp (two instances stamped the
-    /// same event independently; the later one is the fresher knowledge). Safe
-    /// because a match by definition lies within MERGE_WINDOW_S: whichever
-    /// stamp wins, rendered ages differ by ≤4s and re-merging still matches.
+    /// MERGE_WINDOW_S) is already present — the dedup guard that stops the
+    /// two edges of one completion (`native_changed`) double-appending. The
+    /// EXISTING entry's stamp is kept: first-seen is the honest completion time.
     pub(crate) fn push(&mut self, entry: LedgerEntry) -> bool {
         if self.entries.iter().any(|existing| is_same_event(existing, &entry)) {
             return false;
@@ -160,45 +97,14 @@ impl Ledger {
         self.entries.iter()
     }
 
-    /// Consumed (via `RadarState::ledger_is_empty`) by `PluginRuntime::render`:
-    /// zero tracked tabs AND an empty ledger is the only state that shows the
-    /// onboarding face instead of the rail.
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
-    }
-
-    pub(crate) fn to_vec(&self) -> Vec<LedgerEntry> {
-        self.entries.iter().cloned().collect()
-    }
-
-    /// sorted desc, capped
-    pub(crate) fn replace(&mut self, entries: Vec<LedgerEntry>) {
-        let mut sorted = entries;
-        sorted.sort_by_key(|e| std::cmp::Reverse(e.at_epoch_s));
-        sorted.truncate(LEDGER_CAP);
-        self.entries = sorted.into();
     }
 
     /// Any entry still younger than SATURATE_S? (Drives the Slow cadence.)
     pub(crate) fn any_unsaturated(&self, now_epoch_s: u64) -> bool {
         self.entries.iter().any(|e| now_epoch_s.saturating_sub(e.at_epoch_s) < SATURATE_S)
-    }
-
-    /// Union of two rings: nearest-neighbor match on (pane, outcome, label)
-    /// within MERGE_WINDOW_S keeps the later stamp; result sorted by
-    /// at_epoch_s desc, truncated to LEDGER_CAP.
-    pub(crate) fn merge(a: Vec<LedgerEntry>, b: Vec<LedgerEntry>) -> Vec<LedgerEntry> {
-        let mut all = a;
-        all.extend(b);
-        all.sort_by_key(|e| std::cmp::Reverse(e.at_epoch_s));
-        let mut kept: Vec<LedgerEntry> = Vec::with_capacity(all.len());
-        for candidate in all {
-            if !kept.iter().any(|k| is_same_event(k, &candidate)) {
-                kept.push(candidate);
-            }
-        }
-        kept.truncate(LEDGER_CAP);
-        kept
     }
 }
 
@@ -231,25 +137,6 @@ pub(crate) fn minute_tag(age: u64) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn obs(status: Status, origin: ObservationOrigin, msg: &str, completed_epoch_s: Option<u64>) -> TrackedObservation {
-        TrackedObservation {
-            origin,
-            status,
-            repo: "repo".into(),
-            branch: "main".into(),
-            msg: msg.to_string(),
-            task: String::new(),
-            kind: crate::kind::Kind::Claude,
-            last_change_tick: 1,
-            ever_active: true,
-            exit_code: None,
-            completed_epoch_s,
-            pending_epoch_s: None,
-            acknowledged: false,
-            tasks: Default::default(),
-        }
-    }
-
     fn entry(pane_id: u32, outcome: LedgerOutcome, label: &str, at_epoch_s: u64) -> LedgerEntry {
         LedgerEntry {
             at_epoch_s,
@@ -279,51 +166,6 @@ mod tests {
     }
 
     #[test]
-    fn from_observation_maps_command_and_agent_labels() {
-        // Command-origin: msg passes through untouched.
-        let o = obs(Status::Done, ObservationOrigin::Command, "cargo test", Some(100));
-        let e = LedgerEntry::from_observation(1, &o, TabId::new(0), "work").unwrap();
-        assert_eq!(e.label, "cargo test");
-        assert_eq!(e.outcome, LedgerOutcome::Done);
-        assert_eq!(e.tab_name, "work");
-        assert_eq!(e.at_epoch_s, 100);
-        assert_eq!(e.pane_id, 1);
-
-        // Command-origin with an empty message falls back to the kind's own
-        // token — never a blank ledger row.
-        let mut o = obs(Status::Error, ObservationOrigin::Command, "  ", Some(150));
-        o.kind = crate::kind::Kind::Command;
-        let e = LedgerEntry::from_observation(6, &o, TabId::new(0), "work").unwrap();
-        assert_eq!(e.label, "command");
-        let mut o = obs(Status::Done, ObservationOrigin::Command, "", Some(160));
-        o.kind = crate::kind::Kind::Test;
-        let e = LedgerEntry::from_observation(7, &o, TabId::new(0), "work").unwrap();
-        assert_eq!(e.label, "test");
-
-        // Agent-origin (status pipe) with an empty message falls back to
-        // "turn done".
-        let o = obs(Status::Error, ObservationOrigin::StatusPipe, "   ", Some(200));
-        let e = LedgerEntry::from_observation(2, &o, TabId::new(1), "").unwrap();
-        assert_eq!(e.label, "turn done");
-        assert_eq!(e.outcome, LedgerOutcome::Error);
-        // Empty tab name sanitizes to the "tab" fallback.
-        assert_eq!(e.tab_name, "tab");
-
-        // Agent-origin with a real message passes it through.
-        let o = obs(Status::Done, ObservationOrigin::StatusPipe, "reviewed PR", Some(300));
-        let e = LedgerEntry::from_observation(3, &o, TabId::new(0), "work").unwrap();
-        assert_eq!(e.label, "reviewed PR");
-
-        // Running (not a completion) never ledgers, even with a stamp.
-        let o = obs(Status::Running, ObservationOrigin::StatusPipe, "busy", Some(400));
-        assert!(LedgerEntry::from_observation(4, &o, TabId::new(0), "work").is_none());
-
-        // Done without a completion stamp (pre-v3 snapshot transient) skips too.
-        let o = obs(Status::Done, ObservationOrigin::Command, "cargo build", None);
-        assert!(LedgerEntry::from_observation(5, &o, TabId::new(0), "work").is_none());
-    }
-
-    #[test]
     fn push_dedups_within_window_and_caps_at_32() {
         let mut ledger = Ledger::default();
         assert!(ledger.is_empty());
@@ -332,7 +174,7 @@ mod tests {
         // Same (pane, outcome, label) 2s later is the same event — rejected.
         assert!(!ledger.push(entry(1, LedgerOutcome::Done, "cargo test", 102)));
         assert_eq!(ledger.entries().count(), 1);
-        assert_eq!(ledger.to_vec()[0].at_epoch_s, 100, "the original stamp is kept, not the dup's");
+        assert_eq!(ledger.entries().next().unwrap().at_epoch_s, 100, "the original stamp is kept, not the dup's");
 
         // A different label on the same pane is a distinct event.
         assert!(ledger.push(entry(1, LedgerOutcome::Done, "cargo build", 103)));
@@ -348,59 +190,6 @@ mod tests {
         let newest = ledger.entries().next().unwrap();
         assert_eq!(newest.pane_id, 39, "newest push stays at the front");
         assert!(ledger.entries().all(|e| e.pane_id >= 8), "the oldest 8 were evicted");
-    }
-
-    #[test]
-    fn merge_is_idempotent_and_dedups_across_boundaries() {
-        // 1s-apart stamps MUST merge even at any absolute value (nearest-
-        // neighbor, not fixed buckets): entries at 7999 and 8001 collapse to
-        // one, keeping the later (8001) stamp.
-        let a = vec![entry(1, LedgerOutcome::Done, "x", 7999)];
-        let b = vec![entry(1, LedgerOutcome::Done, "x", 8001)];
-        let merged = Ledger::merge(a, b);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].at_epoch_s, 8001);
-
-        // merge(a, a) == a for an already-deduped, sorted-desc ring.
-        let a = vec![entry(1, LedgerOutcome::Done, "x", 300), entry(2, LedgerOutcome::Error, "y", 100)];
-        assert_eq!(Ledger::merge(a.clone(), a.clone()), a);
-
-        // Distinct completions more than MERGE_WINDOW_S apart both survive.
-        let a = vec![entry(1, LedgerOutcome::Done, "x", 100)];
-        let b = vec![entry(1, LedgerOutcome::Done, "x", 105)];
-        let merged = Ledger::merge(a, b);
-        assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].at_epoch_s, 105);
-        assert_eq!(merged[1].at_epoch_s, 100);
-    }
-
-    #[test]
-    fn merge_collapses_identical_completions_within_4s_by_design() {
-        // The accepted artifact, pinned so it's deliberate: two genuinely
-        // distinct completions that happen to share (pane, outcome, label)
-        // within the merge window collapse into one row. Spec §4.3 accepts
-        // this rather than growing a per-completion identity.
-        let a = vec![entry(1, LedgerOutcome::Done, "cargo test", 1000)];
-        let b = vec![entry(1, LedgerOutcome::Done, "cargo test", 1004)];
-        let merged = Ledger::merge(a, b);
-        assert_eq!(merged, vec![entry(1, LedgerOutcome::Done, "cargo test", 1004)]);
-    }
-
-    #[test]
-    fn replace_sorts_desc_and_caps() {
-        let mut ledger = Ledger::default();
-        let unsorted = vec![
-            entry(1, LedgerOutcome::Done, "a", 50),
-            entry(2, LedgerOutcome::Done, "b", 200),
-            entry(3, LedgerOutcome::Done, "c", 100),
-        ];
-        ledger.replace(unsorted);
-        let got: Vec<u64> = ledger.entries().map(|e| e.at_epoch_s).collect();
-        assert_eq!(got, vec![200, 100, 50]);
-
-        let oversized: Vec<LedgerEntry> = (0..40u32).map(|i| entry(i, LedgerOutcome::Done, "x", i as u64)).collect();
-        ledger.replace(oversized);
-        assert_eq!(ledger.to_vec().len(), LEDGER_CAP);
     }
 
     #[test]

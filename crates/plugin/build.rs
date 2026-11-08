@@ -9,8 +9,7 @@
 //! any heap, paid once per tab per client. The plugin's deepest call chains
 //! are serde_json's decode (recursion capped at 128 by the library) and the
 //! renderer, neither of which comes near 256 KiB; an overflow traps rather
-//! than corrupting memory (the stack sits first in memory). `tools/wasm-fuel`
-//! prints the resulting initial pages so the number cannot drift unnoticed.
+//! than corrupting memory (the stack sits first in memory).
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");

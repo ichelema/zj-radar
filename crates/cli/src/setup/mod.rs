@@ -1,143 +1,25 @@
-//! `zj-radar setup [claude|codex|opencode|pi|omp|zellij]` — idempotent,
-//! conflict-aware local wiring. Claude is wired through Claude Code's own
-//! plugin marketplace (we drive the `claude plugin` CLI, never its files);
-//! Codex gets hooks.json entries; Opencode gets vendored JS bridge plugins
-//! dropped into its auto-loaded global plugins dir (no `opencode.json` edit:
-//! a 1.x server plugin file plus a 2.x TUI plugin directory); pi gets a
-//! vendored JS bridge extension in its auto-loaded extensions dir, and so
-//! does omp (oh-my-pi, a pi fork);
-//! Zellij setup installs the wasm at a stable path and manages the `radar`
-//! alias in `config.kdl`.
+//! `zj-radar setup [zellij]` — idempotent, conflict-aware local wiring of the
+//! sidebar: install the wasm at a stable path, manage the `radar` alias in
+//! `config.kdl`, inject the rail into a layout, and pre-authorize the plugin's
+//! permissions. Agents need no setup: they emit OSC 7501 themselves.
 
 mod analyze;
 mod check;
-mod claude;
-mod codex;
 pub(crate) mod detect;
 mod download;
 mod edit;
-mod omp;
-mod opencode;
-mod pi;
-mod preseed;
-mod vendored;
+pub(crate) mod preseed;
 mod zellij;
 pub(crate) use analyze::*;
 pub(crate) use check::*;
-pub(crate) use claude::*;
-pub(crate) use codex::*;
 pub(crate) use download::*;
 pub(crate) use edit::*;
-pub(crate) use omp::*;
-pub(crate) use opencode::*;
-pub(crate) use pi::*;
 pub(crate) use zellij::*;
 
 use std::path::{Path, PathBuf};
 
-/// Our legacy Codex notify invocation — also the idempotency/uninstall marker.
-pub(crate) const CODEX_NOTIFY_MARKER: [&str; 3] = ["zj-radar", "notify", "codex"];
-// Also used by `run`'s producer detection so the two agree on what marks a wired
-// Codex producer (shared single source of truth).
-pub(crate) const CODEX_HOOK_MARKER: &str = "ZJ_RADAR_CODEX_HOOK=v1";
-pub(crate) const CODEX_HOOK_COMMAND: &str = "ZJ_RADAR_CODEX_HOOK=v1 zj-radar notify codex";
-// No space before the `&&`: cmd.exe folds everything up to the separator into
-// the env var's VALUE, so `v1 &&` would set the marker to "v1 " and break the
-// marker round-trip that idempotency/uninstall detection depends on.
-pub(crate) const CODEX_HOOK_COMMAND_WINDOWS: &str = "cmd /C \"set ZJ_RADAR_CODEX_HOOK=v1&& zj-radar notify codex\"";
-// Kill ceiling for the generated hook entries — derived from the send cap,
-// never hand-copied: the CLI's graceful bounded no-op lands at ~cap (its
-// in-subtree watchdog kills the pipe client at the deadline) with a cap + 1 s
-// parent-reaper backstop, so a ceiling equal to the cap means the hook runner
-// always kills the hook first and the clean-exit contract is dead code. cap +
-// 5 leaves the backstop plus generous spawn/derivation slack, matching the
-// Claude plugin's edge hooks (welded there by the headroom guard in
-// crates/plugin's hooks_manifest_tests).
-pub(crate) const CODEX_HOOK_TIMEOUT_SECS: u64 = crate::pipe::DEFAULT_PIPE_TIMEOUT_SECS + 5;
-// `PostToolUse` looks like a pure duplicate of `PreToolUse` (both derive the
-// same activity string from the same tool payload), but it is load-bearing:
-// after a `PermissionRequest` mid-turn flips the pane to Pending, the tool's
-// Post broadcast is the Pending→Running recovery edge — without it an
-// answered prompt stays flagged "needs you" until the next tool or Stop. The
-// duplicate case is instead de-duplicated on the RECEIVING side: the plugin's
-// `status_pipe` treats an identical re-broadcast as a strict no-op (see
-// `CONTEXT.md` → Render gate), so keeping Post costs only the pipe delivery,
-// not a render+persist per rail instance.
-pub(crate) const CODEX_HOOK_EVENTS: [&str; 7] =
-    ["UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "SubagentStart", "SubagentStop", "Stop"];
 pub(crate) const ZELLIJ_ALIAS_BEGIN: &str = "// zj-radar: managed plugin alias begin";
 pub(crate) const ZELLIJ_ALIAS_END: &str = "// zj-radar: managed plugin alias end";
-// The one-time trust step Codex requires before it runs installed hooks. One
-// copy (the CODEX_HOOK_MARKER precedent) shared by setup's install epilogue
-// and the doctor's note item, so the advice can't drift between them. No
-// trailing punctuation — callers supply their own.
-pub(crate) const CODEX_HOOK_TRUST_ADVICE: &str = "run `/hooks` in Codex to review and trust the zj-radar command hook";
-/// Codex 0.157+ runs hooks in a shared daemon whose pane env is stale, and
-/// `notify codex` drops them (`codex_daemon`, issue #71).
-pub(crate) const CODEX_DAEMON_ADVICE: &str = "Codex 0.157+ starts a shared app-server daemon whose hooks can't \
-     tell panes apart, so zj-radar ignores them; launch codex with `--no-daemon`, or set \
-     `[features] daemon_auto_start = false` in config.toml";
-pub(crate) const CODEX_DAEMON_RUNNING_ADVICE: &str = "a shared Codex app-server daemon is running: its hooks carry \
-     the env of the pane that started it, so zj-radar ignores them and Codex rows stay dark; launch codex with \
-     `--no-daemon`, or set `[features] daemon_auto_start = false` in config.toml and run \
-     `codex app-server daemon stop`";
-
-/// The ownership marker family stamped into every vendored opencode bridge
-/// file's header (`// ZJ_RADAR_OPENCODE_PLUGIN=<version>`). One shared source
-/// of truth (the CODEX_HOOK_MARKER precedent) behind `setup opencode`'s
-/// install/uninstall gating, the doctor, and `run`'s producer detection, so
-/// the three can't drift on what counts as "ours". Ownership keys on the
-/// prefix (`detect::opencode_plugin_is_ours`), so a bridge from any zj-radar
-/// release is ours to rewrite; the version suffix says which opencode plugin
-/// API the file speaks.
-pub(crate) const OPENCODE_PLUGIN_MARKER_PREFIX: &str = "ZJ_RADAR_OPENCODE_PLUGIN=";
-/// The 1.x (server-plugin API) bridge's marker. Only the weld tests need the
-/// exact strings — production code keys on the prefix.
-#[cfg(test)]
-pub(crate) const OPENCODE_PLUGIN_MARKER: &str = "ZJ_RADAR_OPENCODE_PLUGIN=v1";
-/// The 2.x (TUI-plugin API) bridge's marker.
-#[cfg(test)]
-pub(crate) const OPENCODE_TUI_PLUGIN_MARKER: &str = "ZJ_RADAR_OPENCODE_PLUGIN=v2";
-/// The file opencode 1.x auto-loads from its global plugins dir (2.x also
-/// loads it, as an inert server plugin — see the file's header). Inside the
-/// cargo package via `include_str!` so `cargo publish` works (a repo-root path
-/// would break crates.io installs).
-pub(crate) const OPENCODE_PLUGIN_FILE_NAME: &str = "zj-radar.js";
-/// The directory opencode 2.x's TUI discovers under its global plugins dir,
-/// and the TUI entrypoint it resolves inside it. 2.x discovers TUI plugins as
-/// *directories* only, and 1.x ignores directories, so the two bridges never
-/// collide: `plugins/zj-radar.js` (1.x) beside `plugins/zj-radar/tui.js` (2.x).
-pub(crate) const OPENCODE_TUI_PLUGIN_DIR_NAME: &str = "zj-radar";
-pub(crate) const OPENCODE_TUI_PLUGIN_FILE_NAME: &str = "tui.js";
-/// The vendored bridge plugins, embedded so `setup opencode` writes known-good
-/// copies and `cargo publish` packages them. `flake.nix` filter entries cover
-/// these non-Rust `include_str!` inputs for the hermetic build.
-pub(crate) const OPENCODE_PLUGIN_JS: &str = include_str!("opencode_plugin.js");
-pub(crate) const OPENCODE_TUI_PLUGIN_JS: &str = include_str!("opencode_tui_plugin.js");
-
-/// The ownership marker stamped into the vendored pi bridge's header line
-/// (`// ZJ_RADAR_PI_EXTENSION=<version>`). Shared by `setup pi`'s
-/// install/uninstall gating, the doctor, and producer detection. Ownership
-/// keys on the prefix so a bridge from any release is ours to rewrite.
-pub(crate) const PI_EXTENSION_MARKER_PREFIX: &str = "ZJ_RADAR_PI_EXTENSION=";
-#[cfg(test)]
-pub(crate) const PI_EXTENSION_MARKER: &str = "ZJ_RADAR_PI_EXTENSION=v1";
-/// The file pi auto-loads from its global extensions dir.
-pub(crate) const PI_EXTENSION_FILE_NAME: &str = "zj-radar.js";
-/// The vendored pi bridge extension (see `flake.nix`'s filter for the
-/// hermetic build's copy of this non-Rust `include_str!` input).
-pub(crate) const PI_EXTENSION_JS: &str = include_str!("pi_extension.js");
-
-/// The ownership marker stamped into the vendored omp bridge's header line
-/// (`// ZJ_RADAR_OMP_EXTENSION=<version>`) — pi's scheme, its own prefix.
-pub(crate) const OMP_EXTENSION_MARKER_PREFIX: &str = "ZJ_RADAR_OMP_EXTENSION=";
-#[cfg(test)]
-pub(crate) const OMP_EXTENSION_MARKER: &str = "ZJ_RADAR_OMP_EXTENSION=v1";
-/// The file omp auto-loads from its user extensions dir. Distinct from pi's
-/// name: the two agents can share one extensions dir (`omp.rs`).
-pub(crate) const OMP_EXTENSION_FILE_NAME: &str = "zj-radar-omp.js";
-/// The vendored omp bridge extension (see `flake.nix`'s filter).
-pub(crate) const OMP_EXTENSION_JS: &str = include_str!("omp_extension.js");
 
 pub struct SetupOptions<'a> {
     pub targets: &'a [String],
@@ -148,7 +30,6 @@ pub struct SetupOptions<'a> {
     pub dry_run: bool,
     pub yes: bool,
     pub check: bool,
-    pub legacy_notify: bool,
     pub force: bool,
     /// Non-interactive consent to inject the rail into the target layout.
     pub inject: bool,
@@ -189,27 +70,6 @@ pub(crate) struct ZellijSetupOpts<'a> {
     is_tty: bool,
 }
 
-pub(crate) struct CodexSetupOpts {
-    legacy_notify: bool,
-    /// Named on the command line (not swept in by bare `setup`): see [`report_skip`].
-    explicit: bool,
-    force: bool,
-    dry_run: bool,
-    yes: bool,
-    is_tty: bool,
-}
-
-/// Options for the vendored-bridge targets (opencode, pi, omp): all are "drop a
-/// marked file into the agent's auto-loaded dir", so they take the same knobs.
-pub(crate) struct BridgeSetupOpts {
-    /// Named on the command line (not swept in by bare `setup`): see [`report_skip`].
-    pub explicit: bool,
-    pub force: bool,
-    pub dry_run: bool,
-    pub yes: bool,
-    pub is_tty: bool,
-}
-
 /// The single operation a `setup` invocation performs. Resolving this once makes
 /// the precedence (grant > check > uninstall > install) explicit instead of
 /// implicit in the order of `if` blocks.
@@ -239,92 +99,49 @@ pub(crate) fn which(bin: &str) -> bool {
     std::env::var_os("PATH").map(|paths| std::env::split_paths(&paths).any(|p| p.join(bin).is_file())).unwrap_or(false)
 }
 
-/// Entry point for `zj-radar setup`.
+/// Agents that older releases wired; naming one gets the removal hint.
+const REMOVED_AGENT_TARGETS: [&str; 5] = ["claude", "codex", "opencode", "pi", "omp"];
+
+/// Why `setup <target>` refuses: `zellij` is the only target left.
+fn unsupported_target_message(target: &str) -> String {
+    let mut msg = format!(
+        "setup does not support '{target}': zj-radar no longer wires agents \
+         (agents that emit OSC 7501 need no setup)."
+    );
+    if REMOVED_AGENT_TARGETS.contains(&target) {
+        msg.push_str(&format!(
+            " Remove its old adapter by hand: docs/install.md, \"Upgrading from a release \
+             with agent adapters\". A CLI from a release with adapters also removes it \
+             (`zj-radar setup {target} --uninstall`)."
+        ));
+    }
+    msg
+}
+
+/// Entry point for `zj-radar setup`. The only target is `zellij`, which is
+/// also what no target means.
 pub fn run(options: SetupOptions<'_>) {
+    let mut unsupported = false;
+    for target in options.targets.iter().filter(|t| t.as_str() != "zellij") {
+        crate::exit::fail_report("zj-radar", unsupported_target_message(target));
+        unsupported = true;
+    }
+    if unsupported {
+        return;
+    }
+
     let mode = mode_from_flags(options.grant, options.check, options.uninstall);
 
     if mode == Mode::Grant {
-        // Same cross-target hygiene as --inject/--layout below: --grant opens
-        // the ZELLIJ permission float, so `setup codex --grant` silently
-        // granting zellij would read as "codex got wired".
-        for a in options.targets.iter().filter(|a| a.as_str() != "zellij") {
-            eprintln!("zj-radar: --grant applies to the zellij target only — ignoring '{a}'");
-        }
         if let Some(config_dir) = zellij_config_dir_or_report() {
             run_grant(&config_dir);
         }
         return;
     }
 
-    let bare = options.targets.is_empty() && options.wasm.is_none() && !options.download;
-    // Bare `setup` = detected agents only: every agent target joins there,
-    // and each `setup_*` itself skips gracefully when its agent is absent.
-    let named = |t: &str| options.targets.iter().any(|a| a == t);
-    let want_codex = bare || named("codex");
-    let want_opencode = bare || named("opencode");
-    let want_claude = bare || named("claude");
-    let want_pi = bare || named("pi");
-    let want_omp = bare || named("omp");
-    let want_zellij = named("zellij") || options.wasm.is_some() || options.download;
-    for a in options
-        .targets
-        .iter()
-        .filter(|a| !matches!(a.as_str(), "claude" | "codex" | "opencode" | "pi" | "omp" | "zellij"))
-    {
-        crate::exit::fail_report(
-            "zj-radar",
-            format!("setup does not support '{a}' (supported: claude, codex, opencode, pi, omp, zellij). Skipping."),
-        );
-    }
-    // Cross-target flag hygiene: `--wasm`/`--download` *imply* the zellij
-    // target (they're zellij artifacts, see `want_zellij`), but `--inject`/
-    // `--layout` do not — silently ignoring them on a codex-only invocation
-    // would read as "injected". Say so instead.
-    if !want_zellij {
-        if options.inject {
-            eprintln!("zj-radar: --inject applies to the zellij target only — add `zellij` to the targets to use it");
-        }
-        if options.layout.is_some() {
-            eprintln!("zj-radar: --layout applies to the zellij target only — add `zellij` to the targets to use it");
-        }
-    }
-    if want_zellij && options.legacy_notify && !want_codex {
-        eprintln!("zj-radar: --legacy-notify applies to the codex target only — add `codex` to the targets to use it");
-    }
-
     if mode == Mode::Check {
-        // Bare `--check` is the doctor: it inspects the zellij half (checking
-        // needs no wasm source, and "is my install healthy?" wants the rail's
-        // state too) plus every DETECTED agent. An explicit target always
-        // reports; the bare doctor includes an agent only when it is present
-        // here (binary on PATH, or its config/bridge/plugin already
-        // installed), so a
-        // machine without that agent isn't failed by it. `update` runs this
-        // same bare doctor.
-        let both = options.targets.is_empty();
-        let mut missing = false;
-        if want_zellij || both {
-            missing |= check_zellij(options.layout);
-        }
-        if named("codex") || (both && codex_installed(which("codex"))) {
-            missing |= check_codex(options.legacy_notify);
-        }
-        // Claude's local install is a shell alias (never on PATH), so the
-        // installed plugin counts as present too.
-        let claude_wired = || crate::producers::ProducerTexts::read().is_wired(crate::agents::Agent::Claude);
-        if named("claude") || (both && (which("claude") || claude_wired())) {
-            missing |= check_claude();
-        }
-        if named("opencode") || (both && (which("opencode") || opencode_bridge_is_ours())) {
-            missing |= check_opencode();
-        }
-        if named("pi") || (both && (which("pi") || pi_extension_is_ours_on_disk())) {
-            missing |= check_pi();
-        }
-        if named("omp") || (both && (which("omp") || omp_extension_is_ours_on_disk())) {
-            missing |= check_omp();
-        }
-        if missing {
+        // The doctor inspects the zellij install; checking needs no wasm source.
+        if check_zellij(options.layout) {
             // The items above are the diagnostic; this sets the exit code so
             // `zj-radar setup --check && zj-radar run` can gate on the doctor.
             crate::exit::fail_report("zj-radar", "check found missing items (listed above)");
@@ -333,105 +150,36 @@ pub fn run(options: SetupOptions<'_>) {
     }
 
     let uninstall = mode == Mode::Uninstall;
+    let wasm_source = if uninstall {
+        WasmSource::None
+    } else {
+        match wasm_source(options.wasm, options.download) {
+            Ok(s) => s,
+            Err(e) => {
+                crate::exit::fail_report("zellij", format!("refused — {e}"));
+                return;
+            }
+        }
+    };
     // Tty-ness resolved ONCE at the invocation boundary (the `inject_mode`
-    // pattern); every consent step in the targets below takes it as a
-    // parameter rather than probing stdin again mid-chain.
+    // pattern); the consent steps take it as a parameter rather than probing
+    // stdin again mid-chain.
     let is_tty = {
         use std::io::IsTerminal;
         std::io::stdin().is_terminal()
     };
-    if want_zellij {
-        let wasm_source = if uninstall {
-            WasmSource::None
-        } else {
-            match wasm_source(options.wasm, options.download) {
-                Ok(s) => s,
-                Err(e) => {
-                    crate::exit::fail_report("zellij", format!("refused — {e}"));
-                    return;
-                }
-            }
-        };
-        setup_zellij(
-            uninstall,
-            ZellijSetupOpts {
-                wasm_source,
-                force: options.force,
-                inject: options.inject,
-                layout: options.layout,
-                dry_run: options.dry_run,
-                yes: options.yes,
-                is_tty,
-            },
-        );
-    }
-    if want_codex {
-        setup_codex(
-            uninstall,
-            CodexSetupOpts {
-                legacy_notify: options.legacy_notify,
-                explicit: named("codex"),
-                force: options.force,
-                dry_run: options.dry_run,
-                yes: options.yes,
-                is_tty,
-            },
-        );
-    }
-    if want_claude {
-        setup_claude(uninstall, named("claude"), options.dry_run, options.yes, is_tty);
-    }
-    if want_opencode {
-        setup_opencode(
-            uninstall,
-            BridgeSetupOpts {
-                explicit: named("opencode"),
-                force: options.force,
-                dry_run: options.dry_run,
-                yes: options.yes,
-                is_tty,
-            },
-        );
-    }
-    if want_pi {
-        setup_pi(
-            uninstall,
-            BridgeSetupOpts {
-                explicit: named("pi"),
-                force: options.force,
-                dry_run: options.dry_run,
-                yes: options.yes,
-                is_tty,
-            },
-        );
-    }
-    if want_omp {
-        setup_omp(
-            uninstall,
-            BridgeSetupOpts {
-                explicit: named("omp"),
-                force: options.force,
-                dry_run: options.dry_run,
-                yes: options.yes,
-                is_tty,
-            },
-        );
-    }
-    if bare && !uninstall {
-        hint_zellij_setup();
-    }
-}
-
-/// Bare `setup` wires agents only, and agent status needs the sidebar too —
-/// so when no `radar` alias is in `config.kdl` yet, name the step that
-/// installs it. A hint, never a failure: the agents half did succeed (and a
-/// `zj-radar run` user needs no config-side install at all).
-fn hint_zellij_setup() {
-    let Some(config_dir) = zellij_config_dir() else { return };
-    let config_text = std::fs::read_to_string(zellij_config_path(&config_dir)).ok();
-    if !radar_alias_present(config_text.as_deref()) {
-        println!("zj-radar: the sidebar isn't installed yet — run `zj-radar setup zellij --download` next");
-    }
+    setup_zellij(
+        uninstall,
+        ZellijSetupOpts {
+            wasm_source,
+            force: options.force,
+            inject: options.inject,
+            layout: options.layout,
+            dry_run: options.dry_run,
+            yes: options.yes,
+            is_tty,
+        },
+    );
 }
 
 /// The shared preamble for every `setup_*` step: turn an editor's
@@ -445,30 +193,6 @@ pub(crate) fn edit_or_report(label: &str, edit: Result<Outcome, String>) -> Opti
             crate::exit::fail_report(label, format!("refused — {e}"));
             None
         }
-    }
-}
-
-/// Report an agent target that wired nothing — its agent is absent here, or
-/// its write went unconfirmed. Bare `setup` sweeps every agent and wires
-/// whichever it finds, so there a skip is the expected quiet outcome (exit 0).
-/// A target the user NAMED that ends up unwired is a failure instead, so
-/// `zj-radar setup pi && …` never reads a no-op as success.
-pub(crate) fn report_skip(label: &str, reason: &str, explicit: bool) {
-    if explicit {
-        crate::exit::fail_report(label, format!("skipped ({reason})"));
-    } else {
-        println!("{label}: skipped ({reason})");
-    }
-}
-
-/// The tail of a declined [`confirm`]. A user answering "n" at a real prompt
-/// is never a failure (see `exit`), but no tty means nobody was asked: for a
-/// named target that is [`report_skip`]'s unwired-target failure.
-pub(crate) fn report_declined(label: &str, is_tty: bool, explicit: bool) {
-    if explicit && !is_tty {
-        report_skip(label, "no tty to confirm — re-run with -y", true);
-    } else {
-        println!("{label}: skipped (declined)");
     }
 }
 
@@ -503,14 +227,11 @@ fn consented(answer: &str) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
-/// [`confirm_and_write`]'s consent inputs: `-y`, the boundary tty probe, and
-/// whether the target was named (which picks the decline's severity, see
-/// [`report_declined`]).
+/// [`confirm_and_write`]'s consent inputs: `-y` and the boundary tty probe.
 #[derive(Clone, Copy)]
 pub(crate) struct Consent {
     pub yes: bool,
     pub is_tty: bool,
-    pub explicit: bool,
 }
 
 /// The shared "commit an edit" tail for every `setup_*` step: prompt (unless
@@ -528,9 +249,9 @@ pub(crate) fn confirm_and_write(
     prompt: &str,
     pre_write: impl FnOnce() -> Result<(), String>,
 ) -> bool {
-    let Consent { yes, is_tty, explicit } = consent;
+    let Consent { yes, is_tty } = consent;
     if !confirm(prompt, yes, is_tty) {
-        report_declined(label, is_tty, explicit);
+        println!("{label}: skipped (declined)");
         return false;
     }
     if let Err(e) = pre_write() {
@@ -591,6 +312,18 @@ mod tests {
         assert!(matches!(mode_from_flags(false, true, true), Mode::Check));
         assert!(matches!(mode_from_flags(false, false, true), Mode::Uninstall));
         assert!(matches!(mode_from_flags(false, false, false), Mode::Install));
+    }
+
+    #[test]
+    fn unsupported_target_hints_removal_only_for_the_old_agents() {
+        for agent in REMOVED_AGENT_TARGETS {
+            let msg = unsupported_target_message(agent);
+            assert!(msg.contains("no longer wires agents"), "{msg}");
+            assert!(msg.contains("by hand: docs/install.md"), "{msg}");
+            assert!(msg.contains(&format!("zj-radar setup {agent} --uninstall")), "{msg}");
+        }
+        let msg = unsupported_target_message("gemini");
+        assert!(msg.contains("no longer wires agents") && !msg.contains("--uninstall"), "{msg}");
     }
 
     #[test]

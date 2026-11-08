@@ -10,9 +10,8 @@
 //! `TerminalPane` — so the arrows run one way: `radar_state` builds these,
 //! `render` consumes them, and neither imports the other.
 //!
-//! The "two sources, status wins" knowledge lives in the caller's `resolve`
-//! closure — `roll_up` never learns there is more than one store, which keeps
-//! the source seam (`StatusStore` / `CommandStore`) free to evolve.
+//! Where a pane's observation comes from lives in the caller's `resolve`
+//! closure — `roll_up` never learns about the source.
 
 use crate::kind::Kind;
 use crate::observation::{ObservationOrigin, TrackedObservation};
@@ -90,30 +89,15 @@ pub(crate) enum PaneDisplay {
         outcome: Option<ExitOutcome>,
         /// Waiting-on-you stamp (Pending only) — see `PrimaryDetail`.
         pending_epoch_s: Option<u64>,
-        /// The right-click acknowledge exemption: the payload rode in with
-        /// `ack: true` (the user has already seen this status), so the
-        /// notifier skips it. Cleared by the pane's next real broadcast —
-        /// see `StatusStore::apply`.
+        /// The user has already seen this status (hides the `✓` hotspot).
         acknowledged: bool,
-        /// Background tasks the agent started (`core::task`), rendered as
+        /// Background tasks the agent started (`task.rs`, from OSC 7501 child records), rendered as
         /// `┊` sub-lines under the pane line.
         tasks: BgTasks,
     },
     Untracked {
         pane_id: u32,
         title: String,
-    },
-    /// A pane whose foreground is an interactive command (editor/pager/TUI) —
-    /// the Companion class (`docs/activity-model.md`): it waits on the user,
-    /// so it is pane *context*, not activity. Renders as a muted identity
-    /// label (`└ ○ $ nvim README.md`), never a spinner, and contributes
-    /// nothing to counts, severity, or notifications. Built from the command
-    /// store's quiet pending; shown only when no live observation outranks it
-    /// (an active/attention observation keeps its `Tracked` row).
-    Interactive {
-        pane_id: u32,
-        kind: Kind,
-        msg: String,
     },
 }
 
@@ -131,31 +115,21 @@ impl PaneDisplay {
     }
 
     /// Whether this pane earns a line in the rail's pane roster: tracked
-    /// panes (they have an observation to show) and interactive panes (their
-    /// muted identity label IS the line). Untracked panes render nothing.
+    /// panes (they have an observation to show). Untracked panes render nothing.
     pub(crate) fn earns_pane_line(&self) -> bool {
-        matches!(self, Self::Tracked { .. } | Self::Interactive { .. })
-    }
-
-    /// Interactive only — test vocabulary, like `is_tracked`; production
-    /// code reads `status()` (an Interactive pane has no observation-status).
-    #[cfg(test)]
-    pub(crate) fn is_interactive(&self) -> bool {
-        matches!(self, Self::Interactive { .. })
+        matches!(self, Self::Tracked { .. })
     }
 
     pub(crate) fn pane_id(&self) -> u32 {
         match self {
-            Self::Tracked { pane_id, .. } | Self::Untracked { pane_id, .. } | Self::Interactive { pane_id, .. } => {
-                *pane_id
-            }
+            Self::Tracked { pane_id, .. } | Self::Untracked { pane_id, .. } => *pane_id,
         }
     }
 
     pub(crate) fn status(&self) -> Option<Status> {
         match self {
             Self::Tracked { status, .. } => Some(*status),
-            Self::Untracked { .. } | Self::Interactive { .. } => None,
+            Self::Untracked { .. } => None,
         }
     }
 
@@ -165,14 +139,14 @@ impl PaneDisplay {
 
     pub(crate) fn kind(&self) -> Kind {
         match self {
-            Self::Tracked { kind, .. } | Self::Interactive { kind, .. } => *kind,
+            Self::Tracked { kind, .. } => *kind,
             Self::Untracked { .. } => Kind::Other,
         }
     }
 
     pub(crate) fn msg(&self) -> &str {
         match self {
-            Self::Tracked { msg, .. } | Self::Interactive { msg, .. } => msg,
+            Self::Tracked { msg, .. } => msg,
             Self::Untracked { title, .. } => title,
         }
     }
@@ -180,7 +154,7 @@ impl PaneDisplay {
     pub(crate) fn task(&self) -> &str {
         match self {
             Self::Tracked { task, .. } => task,
-            Self::Untracked { .. } | Self::Interactive { .. } => "",
+            Self::Untracked { .. } => "",
         }
     }
 
@@ -190,14 +164,14 @@ impl PaneDisplay {
     pub(crate) fn since_tick(&self) -> Option<u64> {
         match self {
             Self::Tracked { since_tick, .. } => Some(*since_tick),
-            Self::Untracked { .. } | Self::Interactive { .. } => None,
+            Self::Untracked { .. } => None,
         }
     }
 
     pub(crate) fn outcome(&self) -> Option<ExitOutcome> {
         match self {
             Self::Tracked { outcome, .. } => *outcome,
-            Self::Untracked { .. } | Self::Interactive { .. } => None,
+            Self::Untracked { .. } => None,
         }
     }
 
@@ -205,11 +179,11 @@ impl PaneDisplay {
     pub(crate) fn pending_epoch_s(&self) -> Option<u64> {
         match self {
             Self::Tracked { pending_epoch_s, .. } => *pending_epoch_s,
-            Self::Untracked { .. } | Self::Interactive { .. } => None,
+            Self::Untracked { .. } => None,
         }
     }
 
-    /// Background tasks (empty for untracked/interactive panes) — feeds
+    /// Background tasks (empty for untracked panes) — feeds
     /// `render`'s task sub-lines and the agent line's waiting glyph.
     pub(crate) fn tasks(&self) -> Option<&BgTasks> {
         match self {
@@ -226,12 +200,12 @@ impl PaneDisplay {
     pub(crate) fn has_unacknowledged_status_pending(&self) -> bool {
         matches!(
             self,
-            Self::Tracked { status: Status::Pending, acknowledged: false, origin: ObservationOrigin::StatusPipe, .. }
+            Self::Tracked { status: Status::Pending, acknowledged: false, origin: ObservationOrigin::Program, .. }
         )
     }
 
     pub(crate) fn is_status_origin(&self) -> bool {
-        matches!(self, Self::Tracked { origin: ObservationOrigin::StatusPipe, .. })
+        matches!(self, Self::Tracked { origin: ObservationOrigin::Program, .. })
     }
 }
 
@@ -273,24 +247,15 @@ pub(crate) struct ProgressCounts {
 
 /// Roll a tab's panes up into a single `TabDisplay`.
 ///
-/// `resolve` maps a pane id to its resolved observation, if any. The caller owns
-/// the precedence across observation sources (status pipe vs command); this
-/// function only sees "is there an observation for this pane?". `quiet` maps a
-/// pane id to its interactive foreground identity `(msg, kind)`, if any — the
-/// command store's quiet pending (`docs/activity-model.md` §5).
+/// `resolve` maps a pane id to its resolved observation, if any; this function
+/// only sees "is there an observation for this pane?".
 ///
 /// A pane with no observation — or one that has never been active — renders as an
 /// untracked pane and does not count toward `done/total`. `pending` is counted
-/// whenever an observation reports `Pending`, active or not. A quiet identity
-/// renders as [`PaneDisplay::Interactive`] whenever no live observation outranks
-/// it: it replaces the Untracked face and an *Idle* observation's muted row
-/// ("nvim" beats a stale finished-command echo), but never a non-idle one —
-/// counts and severity always come from observations alone, so an open editor
-/// can't read as work in `done/total`.
-pub(crate) fn roll_up<'a, 'q>(
+/// whenever an observation reports `Pending`, active or not.
+pub(crate) fn roll_up<'a>(
     panes: &[TerminalPane],
     resolve: impl Fn(u32) -> Option<&'a TrackedObservation>,
-    quiet: impl Fn(u32) -> Option<(&'q str, Kind)>,
 ) -> TabDisplay {
     let mut best: Option<PrimaryDetail> = None;
     let mut done = 0usize;
@@ -300,14 +265,9 @@ pub(crate) fn roll_up<'a, 'q>(
     let mut remote = false;
     let mut pane_displays = Vec::with_capacity(panes.len());
 
-    let interactive = |pane_id: u32| {
-        quiet(pane_id).map(|(msg, kind)| PaneDisplay::Interactive { pane_id, kind, msg: msg.to_string() })
-    };
-
     for pane in panes {
         let Some(s) = resolve(pane.id) else {
-            let display = interactive(pane.id).unwrap_or_else(|| PaneDisplay::untracked(pane.id, &pane.title));
-            pane_displays.push(display);
+            pane_displays.push(PaneDisplay::untracked(pane.id, &pane.title));
             continue;
         };
 
@@ -322,8 +282,7 @@ pub(crate) fn roll_up<'a, 'q>(
             if s.status == Status::Pending {
                 pending += 1;
             }
-            let display = if s.status == Status::Idle { interactive(pane.id) } else { None };
-            pane_displays.push(display.unwrap_or_else(|| PaneDisplay::Tracked {
+            pane_displays.push(PaneDisplay::Tracked {
                 pane_id: pane.id,
                 kind: s.kind,
                 origin: s.origin,
@@ -335,10 +294,9 @@ pub(crate) fn roll_up<'a, 'q>(
                 pending_epoch_s: s.pending_epoch_s,
                 acknowledged: s.acknowledged,
                 tasks: s.tasks.clone(),
-            }));
+            });
         } else {
-            let display = interactive(pane.id).unwrap_or_else(|| PaneDisplay::untracked(pane.id, &pane.title));
-            pane_displays.push(display);
+            pane_displays.push(PaneDisplay::untracked(pane.id, &pane.title));
         }
         animating = animating || s.animating();
         remote = remote || (s.kind.is_remote() && s.status == Status::Running);
@@ -380,7 +338,7 @@ pub(crate) fn roll_up<'a, 'q>(
 }
 
 /// Derive the end-result outcome tag for a pane, scoped to *command-origin*
-/// panes — agents (status pipe) keep their hook msg with no tag. Done → `Ok`
+/// panes — agents (OSC 7501) keep their msg with no tag. Done → `Ok`
 /// (no tag; the line-1 status glyph is the one done signal); Error →
 /// `Failed(exit_code)` (`exit N`, or `✗` when the code is unknown). Returns
 /// `None` for active/idle panes and all agents.
@@ -415,7 +373,7 @@ pub(crate) struct TabRow {
 impl TabRow {
     /// The 0-based tab position Zellij's switch/jump APIs speak — `number`
     /// is the rail's 1-based display ordinal. The one home for that
-    /// conversion (`target_for_row`'s click targets, `own_presence`'s
+    /// conversion (`target_for_row`'s click targets, `own_counts`'s
     /// `attention_tab_position`), so the two consumers can never disagree
     /// off-by-one.
     pub(crate) fn tab_position(&self) -> usize {

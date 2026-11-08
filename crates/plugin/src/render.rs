@@ -16,9 +16,8 @@
 use crate::config::Density;
 use crate::kind::Kind;
 // One minute band for every age display (its `1h+` freeze is load-bearing
-// for cadence disarm — pre-session-name; a named session stays Slow-armed
-// for the presence heartbeat, see `desired_cadence`) — owned by the ledger,
-// shared by the wait/run tags.
+// for cadence disarm — see `desired_cadence`) — owned by the ledger, shared
+// by the wait/run tags.
 use crate::ledger::minute_tag;
 use crate::rollup::{ExitOutcome, LedgerLine, PaneDisplay, TabDisplay, TabRow};
 use crate::sessions::BadgeEntry;
@@ -42,14 +41,10 @@ const BOLD: &str = "\x1b[1m";
 /// spinner eases from full speed to a slow two-frame blink (see
 /// `spin_glyph`). 600 ticks — the tick-driven render clock isn't wall-clock
 /// 1:1, but at typical UI tick rates this reads as "on the order of minutes".
-/// Honest only because `since_tick` is honest: `StatusStore::apply` preserves
-/// `last_change_tick` across a same-status re-broadcast
-/// (`status_store.rs::apply_sets_last_change_tick_only_on_status_change`) and
-/// `CommandStore` preserves it across a same-command re-promotion
-/// (`promotion_preserves_running_since_for_same_command`,
-/// `crates/core/src/command.rs`) — so a long-runner's `since_tick` reflects
-/// when the work truly started, not the last time it happened to re-announce
-/// itself.
+/// Honest only because `since_tick` is honest: `NativePane::observation`
+/// preserves `last_change_tick` across a same-status manifest — so a
+/// long-runner's `since_tick` reflects when the work truly started, not the
+/// last time Zellij happened to re-report it.
 pub const EASE_AFTER_TICKS: u64 = 600;
 
 /// Most pane lines a multi-pane tab renders before folding the remainder into
@@ -68,8 +63,8 @@ const TREE_PREFIX_COLS: usize = 3;
 /// connected, neither is progressing, so nothing animates
 /// (`docs/activity-model.md` §3: a spinner promises bounded work). The
 /// steadiness is also what lets the timer stand down around an all-steady
-/// rail (to Slow once the session name is known — the presence heartbeat, see
-/// `desired_cadence` — or fully pre-name): identical rows across ticks fall to
+/// rail (to Slow, or fully disarmed once nothing ages — see
+/// `desired_cadence`): identical rows across ticks fall to
 /// the render gate, and the cadence predicates count only
 /// `TrackedObservation::animating` rows.
 const SERVICE_GLYPH: char = '▸';
@@ -183,8 +178,8 @@ pub struct RenderOpts {
     /// are wall-clock, not tick-relative.
     pub now_epoch_s: u64,
     /// Whether the footer may advertise the `alt-[n] jump` chord. Zellij owns
-    /// keybinds, not the plugin, so this is config-driven honesty (the
-    /// `GrantHint` pattern) — and strictly opt-in: NO in-tree config sets it.
+    /// keybinds, not the plugin, so this is config-driven honesty — and
+    /// strictly opt-in: NO in-tree config sets it.
     /// Even the `run`-owned config, which bakes the Alt-1..9 → GoToTab binds,
     /// deliberately omits it (`run.rs` pins that): Alt+digit is commonly
     /// claimed upstream of Zellij (WM hotkeys, macOS Option typing `¡`) and
@@ -196,8 +191,8 @@ pub struct RenderOpts {
     /// known (`Sessions::badge()`'s contract). Its headings come from
     /// [`render_session_badge`] and, with `session_tree` on, each peer's tab
     /// tree from [`render_peer_children`]; `render_body` places both. Zero
-    /// lines whenever `len() <= 1` (only this session, or no peer presence
-    /// has crossed the shared `/cache` root yet), so every caller that never
+    /// lines whenever `len() <= 1` (only this session, or no other session
+    /// reported by Zellij yet), so every caller that never
     /// populates this renders byte-identical to before this field existed.
     pub badge: Vec<BadgeEntry>,
     /// `task_lines` config: full `┊` task lines, only the compact `+N` count,
@@ -307,7 +302,7 @@ fn truncate(s: &str, max: usize) -> std::borrow::Cow<'_, str> {
 /// needs to carry "no attention tab" (`Option::None`) losslessly through a
 /// field that stays a plain `usize` for every other target — see that
 /// method's doc. `session: Option<String>` (owned: a peer's name, read off
-/// its `Presence`, isn't a value this module can borrow from) is why
+/// its `SessionSummary`, isn't a value this module can borrow from) is why
 /// the struct can no longer derive `Copy`; every call site that used to rely
 /// on implicit-copy semantics now clones explicitly at its last use.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -322,20 +317,18 @@ pub struct RailTarget {
 /// than the small set of physical cells that are actionable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HotspotAction {
-    DismissPresence { name: String },
     Acknowledge { target: RailTarget },
 }
 
 impl HotspotAction {
     fn glyph(&self) -> &'static str {
         match self {
-            Self::DismissPresence { .. } => "✕",
             Self::Acknowledge { .. } => "✓",
         }
     }
 
     fn width(&self) -> usize {
-        // Frozen vocabulary: both glyphs are exactly one display cell.
+        // Frozen vocabulary: the glyph is exactly one display cell.
         UnicodeWidthStr::width(self.glyph())
     }
 }
@@ -660,12 +653,9 @@ pub fn onboarding(opts: &RenderOpts) -> RenderedRail {
 
 /// Rail face shown when permission has NOT been granted. Distinct from
 /// `onboarding` (which is the granted-but-idle face) so a blocked install is
-/// never mistaken for a working one. Points at the `Ctrl-y` keybind (baked into
-/// the owned `config.kdl`) rather than "press y here": the borderless rail can't
-/// host Zellij's prompt legibly (Zellij #4749), and on an attached session no
-/// onboarding float was ever opened — `Ctrl-y` summons that legible float from
-/// any session state.
-pub fn needs_permission(opts: &RenderOpts, grant_hint: crate::config::GrantHint) -> RenderedRail {
+/// never mistaken for a working one. The hint is true for every install:
+/// Zellij binds its own prompt to a rail pane, so focus it and answer.
+pub fn needs_permission(opts: &RenderOpts) -> RenderedRail {
     let w = opts.width;
     let mut out = String::new();
     let accent = Role::Accent.ansi();
@@ -675,15 +665,7 @@ pub fn needs_permission(opts: &RenderOpts, grant_hint: crate::config::GrantHint)
     push_panel_line(&mut out, accent, &"═".repeat(w), w);
     push_panel_line(&mut out, needs, " ⚠ needs permission", w);
     out.push('\n');
-    // The escape-hatch hint must only promise what this install actually
-    // bound: run-owned configs bake the Ctrl-y float keybind; a setup-injected
-    // rail has no such bind, so it gets the universally true wording (Zellij's
-    // own prompt is bound to a rail pane — focus it and answer).
-    let hint: [&str; 3] = match grant_hint {
-        crate::config::GrantHint::CtrlY => [" press Ctrl-y to", " open the grant", " prompt."],
-        crate::config::GrantHint::Generic => [" focus this pane;", " press y when the", " prompt appears."],
-    };
-    for line in hint {
+    for line in [" focus this pane;", " press y when the", " prompt appears."] {
         push_panel_line(&mut out, muted, line, w);
     }
     RenderedRail::from_ansi_without_targets(&out, opts.height)
@@ -710,8 +692,7 @@ fn identity_and_detail<'a>(status: Status, task: &'a str, msg: &'a str) -> (&'a 
 /// The `· 12m` wait tag for a pane blocked on the user: whole minutes since
 /// the waiting-on-you edge (`pending_epoch_s`), frozen at `1h+` once saturated
 /// — the same freeze the ledger uses, so the Slow cadence can disarm
-/// (pre-session-name; a named session stays Slow-armed for the presence
-/// heartbeat — see `desired_cadence`). `None`
+/// (see `desired_cadence`). `None`
 /// under a minute (a fresh ask needs no clock), for every non-Pending status,
 /// and for unstamped rows (pre-upgrade snapshots). Per ⟦D-timer⟧ this lives on
 /// the pane's identity line, never the tab line.
@@ -869,8 +850,6 @@ const HOTSPOT_SLOT_COLS: usize = 2;
 const TAB_HEADER_HOTSPOT_MIN: usize = 4 + HOTSPOT_SLOT_COLS;
 /// Pane identity line: tree prefix(3) + glyph(1) + sp(1) + mark(1) = 6, + slot.
 const PANE_LINE_HOTSPOT_MIN: usize = 6 + HOTSPOT_SLOT_COLS;
-/// Session badge line: here-marker(1) + sp(1) = 2, + slot.
-const BADGE_LINE_HOTSPOT_MIN: usize = 2 + HOTSPOT_SLOT_COLS;
 
 /// Owns the complete hotspot suffix contract: admission at a site's minimum
 /// width, reservation of separator+glyph, and release-build enforcement when
@@ -1128,7 +1107,7 @@ struct CompactTasksTag {
 
 /// The compact `+N` tag for a pane's tasks, or `None` when nothing is worth
 /// counting. It counts only what still matters at a glance — running work
-/// and failures — because the finished-fine ones (`●` / killed / `·`) are the
+/// and failures — because the finished-fine ones (`●` / `·`) are the
 /// detail the full form has room for and the compact form exists to drop.
 /// A failure turns the tag red: the full form deliberately ranks failures
 /// above services so they never hide behind `+N more`, and the compact form
@@ -1247,7 +1226,6 @@ fn emit_task_line(task: &BgTask, ctx: &TaskLineCtx) -> String {
         (TaskState::Running, false) => (SERVICE_GLYPH, Role::Working),
         (TaskState::Completed, _) => (Status::Done.glyph_for(opts.glyphs), Role::Success),
         (TaskState::Failed, _) => (Status::Error.glyph_for(opts.glyphs), Role::Error),
-        (TaskState::Killed, _) => (Status::Idle.glyph_for(opts.glyphs), Role::Muted),
         (TaskState::Ended, _) => ('·', Role::Muted),
     };
     let label = if task.label.trim().is_empty() { "task" } else { task.label.as_str() };
@@ -1720,15 +1698,10 @@ fn header_rule(width: usize, now_tick: u64, working: bool, accent: &str) -> Stri
 /// [`render_peer_children`] draws each peer's tree and `render_body` splits
 /// the headings around the local cards (see the separator note below).
 /// Renders ZERO lines when `entries.len() <= 1` — only the current
-/// session, or no peer presence has crossed the shared `/cache` root yet —
-/// so the feature is invisible until there's genuinely something
-/// cross-session to show, and
+/// session, or no other session reported by Zellij yet — so the feature is
+/// invisible until there's genuinely something cross-session to show, and
 /// every existing single-session snapshot/test stays byte-identical (the
-/// badge is additive, never a subtraction from the render surface). A lone
-/// fresh own-entry plus only STALE peers still clears this threshold and
-/// renders (a stale-but-not-yet-dead entry stays visible by design — only
-/// `sessions::DEAD_AFTER_SECS` reaps) — the count is over `entries`, not
-/// over fresh entries.
+/// badge is additive, never a subtraction from the render surface).
 ///
 /// The current session's own line carries NO click target at all — you
 /// can't "switch to" the session you're already in, and unlike a peer line
@@ -1737,17 +1710,14 @@ fn header_rule(width: usize, now_tick: u64, working: bool, accent: &str) -> Stri
 /// peer via [`RailTarget::for_session`], which bakes in `tab_position` NOW
 /// (at line-build time, from the entry's `attention_tab_position`) rather
 /// than leaving `mouse_click` to re-derive it later against a badge that may
-/// have moved on by the time the click lands. This applies uniformly to
-/// stale peers too — a click on one is a deliberate act (`entry.stale` only
-/// affects color, never the target).
+/// have moved on by the time the click lands.
 ///
 /// Text is `name` plus, only when nonzero, a running count and an attention
 /// count — each paired with the SAME glyph the per-tab rows already use for
 /// that status (`Status::Running`/`Status::Pending`, run through
 /// `opts.glyphs`) rather than inventing a parallel icon vocabulary the nerd/
 /// plain config wouldn't know about. `selected` (the pending Alt+[/] cycle
-/// target) renders bold+accent; a `stale` entry recedes past the ordinary
-/// muted `idle_text` (see the color derivation below); every other label —
+/// target) renders bold+accent; every other label —
 /// including the current line's — renders in `idle_text`, so the badge
 /// reads as a status strip, not a second row of cards. The one accent in
 /// that strip is the current line's `•` you-are-here marker: rendered in
@@ -1774,24 +1744,12 @@ fn render_session_badge(entries: &[BadgeEntry], opts: &RenderOpts) -> Vec<Line> 
     }
     let width = opts.width;
     let idle = tc_fg(opts.theme.idle_text);
-    // A stale entry (dimmed, never dropped from the badge) recedes
-    // one step further than the ordinary muted `idle_text` every other line
-    // uses — blended halfway toward the panel background, the same "recede
-    // toward bg" idiom `DerivedColors::from_bg_fg` already uses for its own
-    // surface ladder, rather than inventing a parallel dim vocabulary. It
-    // stays fully clickable (`target` below doesn't distinguish stale from
-    // fresh) — a click on it is a deliberate act.
-    let stale = tc_fg(crate::theme::blend(opts.theme.idle_text, opts.theme.rail_bg, 0.5));
     let accent = Role::Accent.ansi();
     let running_glyph = Status::Running.glyph_for(opts.glyphs);
     let attention_glyph = Status::Pending.glyph_for(opts.glyphs);
     let mut lines: Vec<Line> = entries
         .iter()
         .map(|entry| {
-            let hotspot =
-                (entry.stale && !entry.is_current).then(|| HotspotAction::DismissPresence { name: entry.name.clone() });
-            let hotspot = HotspotSlot::new(width, BADGE_LINE_HOTSPOT_MIN, hotspot);
-            let content_width = hotspot.content_width();
             let mut label = entry.name.clone();
             if entry.running > 0 {
                 label.push_str(&format!(" {}{}", entry.running, running_glyph));
@@ -1805,36 +1763,30 @@ fn render_session_badge(entries: &[BadgeEntry], opts: &RenderOpts) -> Vec<Line> 
             let marker = if entry.is_current { "•" } else { " " };
             const PREFIX_VIS: usize = 2; // marker + its separating space
             let text = prefixed_line(
-                content_width,
+                width,
                 PREFIX_VIS,
                 || format!("{marker} {label}"),
                 |avail| {
                     let clamped = truncate(&label, avail);
-                    let label_seg = if entry.selected {
-                        Seg::bold(accent, clamped)
-                    } else if entry.stale {
-                        Seg::new(&stale, clamped)
-                    } else {
-                        Seg::new(&idle, clamped)
-                    };
+                    let label_seg = if entry.selected { Seg::bold(accent, clamped) } else { Seg::new(&idle, clamped) };
                     // Peers' alignment space paints identically in any
                     // color — byte-stable output.
                     let marker_color = if entry.is_current { accent } else { &idle };
                     format!("{} {}", Seg::new(marker_color, marker), label_seg)
                 },
             );
-            let target =
-                (!entry.is_current).then(|| RailTarget::for_session(entry.name.clone(), entry.attention_tab_position));
-            let line = Line::new(text, target, LineBg::Rail);
-            let hotspot_color = if entry.selected { accent } else { &stale };
-            hotspot.finish(line, hotspot_color)
+            let target = (!entry.is_current).then(|| RailTarget {
+                pane_id: entry.attention_pane_id,
+                ..RailTarget::for_session(entry.name.clone(), entry.attention_tab_position)
+            });
+            Line::new(text, target, LineBg::Rail)
         })
         .collect();
     lines.push(Line::new("\n".to_string(), None, LineBg::Rail));
     lines
 }
 
-/// A peer session's read-only tab tree (from its bounded presence file):
+/// A peer session's read-only tab tree (from `GlobalAttentionUpdate`):
 /// one line per tab, then one per agent pane under it, at most `budget`
 /// lines in tree order. Every line targets the peer session at that tab.
 /// Local tabs never come through here — they render as full cards.
@@ -1860,7 +1812,14 @@ fn render_peer_children(entry: &BadgeEntry, budget: usize, opts: &RenderOpts) ->
         .enumerate()
         .map(|(i, &(t, pane))| {
             let tab = &entry.tabs[t];
-            let target = RailTarget::for_session(entry.name.clone(), Some(tab.position));
+            // A pane id (a tab line takes its first pane's) focuses that pane
+            // in the peer; only without one does the tab position steer.
+            let pane_id = match pane {
+                Some(p) => tab.panes[p].pane_id,
+                None => tab.panes.first().and_then(|p| p.pane_id),
+            };
+            let tab_position = if pane_id.is_some() { None } else { Some(tab.position) };
+            let target = RailTarget { pane_id, ..RailTarget::for_session(entry.name.clone(), tab_position) };
             let text = match pane {
                 None => {
                     let connector = if Some(t) == last_tab { "└" } else { "├" };

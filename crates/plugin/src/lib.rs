@@ -3,18 +3,12 @@
 //! # Shape
 //! - [`State`] is the per-tab plugin instance Zellij loads. It owns a
 //!   [`runtime::PluginRuntime`] (the host-testable state machine — pure apart
-//!   from wall-clock reads via `clock::now_epoch_s`; the stores it drives take
-//!   epochs as arguments, which is where determinism matters) and a
-//!   [`session_files::SessionFiles`] (snapshot + permission-marker persistence).
+//!   from wall-clock reads via `clock::now_epoch_s`).
 //! - The `#[cfg(target_arch = "wasm32")] impl ZellijPlugin for State` block is the
 //!   only code that touches the Zellij host API; everything it calls is pure logic
 //!   in the modules below. Host tests exercise that logic without a wasm build.
 //! - The `#[cfg(test)] impl State` block holds test-only fixtures (`build_rows`,
 //!   …) that are never linked into the shipped wasm.
-//!
-//! The shared wire/classification types are re-exported from [`zj_radar_core`]
-//! (see below) so the modules here address them as `crate::status`,
-//! `crate::payload`, … with no per-reference churn at the crate boundary.
 
 // On a plain host build (`cargo build`, not wasm, not test) the only consumers
 // of the pure modules are the wasm glue (cfg'd out) and the unit tests (cfg'd
@@ -24,34 +18,25 @@
 // `cargo test` (not(test) is false) and the wasm build.
 #![cfg_attr(all(not(target_arch = "wasm32"), not(test)), allow(dead_code))]
 
-// Re-export the shared core so the plugin glue and modules keep addressing these
-// as `crate::status`, `crate::payload`, … with no per-reference churn.
-pub(crate) use zj_radar_core::{command, kind, observation, payload, status, task};
-// `pipe` is consumed only by the wasm glue (`Effect::BroadcastStatus`), which
-// is cfg'd off host builds — an unconditional import would warn there.
-#[cfg(target_arch = "wasm32")]
-pub(crate) use zj_radar_core::pipe;
-
+mod attention;
 mod clock;
 mod config;
 mod control;
-#[cfg(test)]
-mod hooks_manifest_tests;
+mod kind;
 mod ledger;
 mod mode;
-mod notify_rules;
-mod permission;
-mod presence;
+mod observation;
+mod payload;
 mod radar_state;
 #[cfg(test)]
 mod reference_tests;
 mod render;
 mod rollup;
 mod runtime;
-mod session_files;
 mod sessions;
-mod status_store;
+mod status;
 mod tab_namer;
+mod task;
 #[cfg(test)]
 mod test_fixtures;
 mod theme;
@@ -64,22 +49,17 @@ use radar_state::{RadarTab, TabId};
 #[cfg(test)]
 use rollup::TabRow;
 use runtime::PluginRuntime;
-use session_files::SessionFiles;
 
 #[cfg(target_arch = "wasm32")]
 use runtime::Effect;
-#[cfg(target_arch = "wasm32")]
-use session_files::SessionFileIds;
 #[cfg(target_arch = "wasm32")]
 use std::collections::BTreeMap;
 #[cfg(target_arch = "wasm32")]
 use zellij_tile::prelude::*;
 
 // Pipe names live with their vocabularies (host-testable, so the guard tests
-// in control.rs/lib.rs can pin them against docs and the bash producer);
-// these aliases just keep the match arms below short.
-#[cfg(target_arch = "wasm32")]
-const PIPE_NAME: &str = payload::STATUS_PIPE_NAME;
+// in control.rs/config.rs can pin them against the docs); these aliases just
+// keep the match arms below short.
 #[cfg(target_arch = "wasm32")]
 const CONFIG_PIPE: &str = config::CONFIG_PIPE;
 #[cfg(target_arch = "wasm32")]
@@ -101,6 +81,7 @@ fn input_mode(mode: InputMode) -> mode::Mode {
         InputMode::Search => mode::Mode::Search,
         InputMode::RenameTab => mode::Mode::RenameTab,
         InputMode::RenamePane => mode::Mode::RenamePane,
+        InputMode::RenameSession => mode::Mode::RenameSession,
         InputMode::Session => mode::Mode::Session,
         InputMode::Move => mode::Mode::Move,
         InputMode::Prompt => mode::Mode::Prompt,
@@ -126,8 +107,6 @@ fn theme_palette(colors: &Styling) -> Option<theme::DerivedColors> {
 #[derive(Default)]
 pub struct State {
     runtime: PluginRuntime,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    session_files: SessionFiles,
     #[cfg(target_arch = "wasm32")]
     plugin_id: Option<u32>,
 }
@@ -173,7 +152,7 @@ impl State {
     /// produce misleading results.
     #[cfg(test)]
     fn render_at(&mut self, width: usize) {
-        self.runtime.permission = crate::permission::PermissionState::Resolved { granted: true };
+        self.runtime.permission = crate::runtime::PermissionState::Resolved { granted: true };
         let height = if self.runtime.last_render_height == 0 {
             self.runtime.natural_height(width)
         } else {
@@ -209,22 +188,14 @@ impl State {
 #[cfg(target_arch = "wasm32")]
 impl State {
     fn handle_outcome(&mut self, outcome: runtime::Outcome) -> bool {
-        let render = outcome.render;
-        self.handle_effects(outcome.effects) || render
+        self.handle_effects(outcome.effects);
+        outcome.render
     }
 
-    /// Returns whether any *re-entrant* outcome handled along the way (see
-    /// `Effect::ReadPresences`) wants a repaint. Most effects are
-    /// fire-and-forget host calls with nothing to report; `ResolveCwd`
-    /// deliberately drops its nested render flag (see `resolve_cwd`'s doc
-    /// comment) rather than folding it in here.
-    fn handle_effects(&mut self, effects: Vec<Effect>) -> bool {
-        let mut render = false;
-        // Set when a token takeover's re-entrant republish just wrote this
-        // instance's presence: a later `PersistPresence` in the same batch
-        // would serialize and write the identical tree again (the JSON is
-        // derived lazily from the same runtime state), so it is skipped.
-        let mut presence_republished = false;
+    /// Effects are fire-and-forget host calls with nothing to report;
+    /// `ResolveCwd` deliberately drops its nested render flag (see
+    /// `resolve_cwd`'s doc comment).
+    fn handle_effects(&mut self, effects: Vec<Effect>) {
         for effect in effects {
             match effect {
                 // Keep in lockstep with REQUIRED_PLUGIN_PERMISSIONS in
@@ -236,107 +207,33 @@ impl State {
                     PermissionType::ReadCliPipes,
                     PermissionType::ChangeApplicationState,
                     PermissionType::RunCommands,
+                    // Without it Zellij strips the command text from attention.
+                    PermissionType::ReadPaneContents,
                 ]),
                 Effect::SetSelectable(selectable) => set_selectable(selectable),
                 Effect::SetTimeout(cadence) => set_timeout(cadence.seconds()),
-                Effect::PersistSnapshot => {
-                    self.session_files.persist_snapshot(|existing| self.runtime.snapshot_json(existing))
-                }
-                Effect::PersistPermissionMarker(marker) => self.session_files.persist_permission_marker(marker),
-                Effect::HeartbeatPermissionLock => self.session_files.heartbeat_permission_lock(),
                 Effect::RenameTab { tab_id, name } => rename_tab_with_id(tab_id.raw() as u64, &name),
                 Effect::SwitchTab { position } => switch_tab_to(position as u32 + 1),
                 Effect::ShowPane { pane_id } => {
                     show_pane_with_id(PaneId::Terminal(pane_id), false, true);
                 }
                 Effect::ResolveCwd { pane_ids } => self.resolve_cwd(pane_ids),
-                Effect::CloseSelf => close_self(),
-                Effect::Notify { key, title, body, unless_focused } => {
-                    // Every per-tab instance emits this same effect for the
-                    // same event; the shared claim file elects exactly one
-                    // dispatcher so N visited tabs ≠ N identical toasts. A
-                    // hidden rail's own focus is stale, so first re-check the
-                    // focus the active rail published (see the effect).
-                    let focused = unless_focused.is_some_and(|id| self.session_files.shared_focus() == Some(id));
-                    if !focused && self.session_files.claim_notification(&key) {
-                        let argv = crate::notify_rules::notify_command(&title, &body);
-                        let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-                        run_command(&args, std::collections::BTreeMap::new());
-                    }
+                Effect::ResolveRepo { cwd } => {
+                    let context = BTreeMap::from([
+                        ("zj_radar".to_string(), "repo".to_string()),
+                        ("cwd".to_string(), cwd.clone()),
+                    ]);
+                    run_command(&["git", "-C", &cwd, "remote", "get-url", "origin"], context);
                 }
-                Effect::PublishFocus { pane_id } => self.session_files.publish_focus(pane_id),
-                Effect::PersistPresence { .. } if presence_republished => {}
-                Effect::PersistPresence { unless_fresher_than } => {
-                    self.session_files.persist_presence(unless_fresher_than, runtime::PRESENCE_RESCUE_AFTER, || {
-                        self.runtime.presence_json()
-                    })
-                }
-                Effect::ClaimPresenceWriter { preempt } => {
-                    // A takeover means the file holds another instance's
-                    // (possibly frozen) view: republish ours, re-entrantly.
-                    // The runtime emits the claim ahead of `project`'s own
-                    // presence effect, so the flag covers the outer write.
-                    if self.session_files.claim_presence_writer(preempt) {
-                        let outcome = self.runtime.presence_writer_acquired();
-                        render |= self.handle_outcome(outcome);
-                        presence_republished = true;
-                    }
-                }
-                Effect::ReadPresences => {
-                    let raw =
-                        self.session_files.read_peer_presences().into_iter().map(|p| (p.json, p.age_secs)).collect();
-                    let outcome = self.runtime.presences_changed(raw);
-                    render |= self.handle_outcome(outcome);
-                }
-                Effect::SwitchSession { name, tab_position } => match tab_position {
-                    Some(pos) => switch_session_with_focus(&name, Some(pos), None),
-                    None => switch_session(Some(&name)),
+                Effect::SwitchSession { name, tab_position, pane_id } => match (tab_position, pane_id) {
+                    (None, None) => switch_session(Some(&name)),
+                    _ => switch_session_with_focus(&name, tab_position, pane_id.map(|id| (id, false))),
                 },
-                Effect::DismissPresence { name } => {
-                    // The predicate parses each candidate file the same way
-                    // the read path does (`Presence::parse`), so a dismiss
-                    // matches names exactly as leniently as the badge that
-                    // showed them — while `remove_presences_matching` itself
-                    // stays parse-agnostic (see its doc for the layering).
-                    self.session_files.remove_presences_matching(|json| {
-                        crate::presence::Presence::parse(json).is_some_and(|p| p.session_name == name)
-                    });
-                }
-                Effect::BroadcastStatus { payload } => {
-                    // Same delivery every CLI producer already uses
-                    // (`crates/cli/src/notify.rs`'s `broadcast`): `zellij
-                    // pipe --name zj_radar.status.v1 -- <payload>`, spawned
-                    // via `run_command` (the `RunCommands` grant this plugin
-                    // already requests). The alternative considered —
-                    // zellij-tile's `pipe_message_to_plugin` — was rejected:
-                    // its `MessageToPlugin` addresses ONE destination plugin
-                    // (`destination_plugin_id`/`plugin_url`; see
-                    // zellij-utils 0.44.3's `data.rs`), not every instance
-                    // subscribed to a named pipe, so it can't fan out to
-                    // every tab's rail the way this gesture's convergence
-                    // requires. `zellij pipe` already does exactly that —
-                    // it's the same host route every producer's broadcast
-                    // takes, proven in production — and reaches THIS
-                    // instance too, which is the whole point: the click
-                    // itself mutates nothing (`Effect::BroadcastStatus`'s
-                    // doc), so this instance's own convergence rides the
-                    // echo like everyone else's.
-                    //
-                    // The spawned `zellij pipe` blocks until every rail
-                    // instance consumes the message, and the plugin's
-                    // `run_command` returns no handle — so the deadline rides
-                    // INSIDE the spawned subtree instead: the shared argv's
-                    // sleep+kill watchdog (`core::pipe`) reaps a client hung
-                    // on a wedged receiver (e.g. stuck at a permission
-                    // prompt), closing the orphaned-process leak this arm
-                    // previously documented as an accepted risk.
-                    let argv = crate::pipe::self_limiting_pipe_argv(&payload, crate::pipe::DEFAULT_PIPE_TIMEOUT_SECS);
-                    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-                    run_command(&args, std::collections::BTreeMap::new());
+                Effect::MarkSeen { session, pane_id } => {
+                    mark_session_pane_seen(&session, PaneId::Terminal(pane_id));
                 }
             }
         }
-        render
     }
 
     /// Bootstrap tab names for freshly-opened panes by reading each pane's cwd
@@ -360,6 +257,42 @@ impl State {
     }
 }
 
+/// Zellij's attention status in the rail's vocabulary. Muted panes read Idle.
+#[cfg(target_arch = "wasm32")]
+fn native_status(s: AttentionStatus) -> status::Status {
+    use status::Status;
+    match s {
+        AttentionStatus::Working => Status::Running,
+        AttentionStatus::NeedsYou => Status::Pending,
+        AttentionStatus::Done => Status::Done,
+        AttentionStatus::Failed => Status::Error,
+        AttentionStatus::Idle | AttentionStatus::Quiet | AttentionStatus::NewOutput => Status::Idle,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_attention(a: PaneAttention) -> attention::PaneAttention {
+    attention::PaneAttention {
+        status: native_status(a.effective_status()),
+        source: match a.source {
+            Some(AttentionSource::ProgramStatus) => attention::Source::Program,
+            Some(AttentionSource::ShellCommand | AttentionSource::CommandPane | AttentionSource::ForegroundProcess) => {
+                attention::Source::Command
+            }
+            _ => attention::Source::Other,
+        },
+        text: a.text,
+        app: a.detail.app,
+        exit_code: a.detail.exit_code,
+        since_ms: a.since_ms,
+        remembered: a.remembered.map(|r| attention::Remembered {
+            status: native_status(r.status),
+            text: r.text,
+            since_ms: r.since_ms,
+        }),
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 impl ZellijPlugin for State {
     fn load(&mut self, config: BTreeMap<String, String>) {
@@ -367,13 +300,20 @@ impl ZellijPlugin for State {
             EventType::TabUpdate,
             EventType::PaneUpdate,
             EventType::CwdChanged,
-            EventType::CommandChanged,
             EventType::Timer,
             EventType::Mouse,
             EventType::PermissionRequestResult,
+            // Every other session on this server, with counts and the panes
+            // that want attention: the cross-session badge's peers.
+            EventType::GlobalAttentionUpdate,
+            // One pane's attention moved; unlike `PaneUpdate` it reaches the
+            // instances of hidden tabs too (ledger edges, counts).
+            EventType::PaneAttentionChanged,
+            // The git remote reads behind tab names (`Effect::ResolveRepo`).
+            EventType::RunCommandResult,
             // Replaces `SessionUpdate`: stock zj-radar never calls the
             // blocking `get_session_list()` host fn that's the ONLY thing
-            // that repopulates `SessionUpdate`'s peer list in zellij 0.44.3
+            // that repopulates `SessionUpdate`'s peer list (checked on zellij 0.44.3)
             // (`docs/design.md`, "Why not SessionUpdate") — only Zellij's own
             // session-manager plugin does, so a user without it open would
             // see an empty cross-session badge forever. `ModeUpdate` fires
@@ -382,11 +322,7 @@ impl ZellijPlugin for State {
             // unconditional on every successful plugin load — no polling,
             // no other plugin required) and carries `ModeInfo.session_name`,
             // which is all this plugin ever needed from `SessionUpdate` in
-            // the first place; liveness itself now comes from the presence
-            // files' own mtimes, graded per entry rather than read from a
-            // Zellij-reported peer list: fresh (≤90s,
-            // `sessions::STALE_AFTER_SECS`) → stale/dimmed (90–300s) →
-            // reaped past `sessions::DEAD_AFTER_SECS` (300s).
+            // the first place.
             EventType::ModeUpdate,
             // Never handled (falls to `update`'s `_ => false`), subscribed
             // purely as an opt-out: Zellij ≥0.44 treats a plugin subscribed
@@ -400,18 +336,13 @@ impl ZellijPlugin for State {
             EventType::InitialKeybinds,
             // Tab shown / hidden (tab switch, close, layout apply, client
             // detach; never at load). A hidden rail skips its paints only;
-            // state, ticks, and snapshot writes carry on —
+            // state and ticks carry on —
             // `PluginRuntime::hidden` has the contract.
             EventType::Visible,
         ]);
-        // Seed from the shared snapshot so a tab opened after agents were already
-        // running shows their real status instead of a blank (all-idle) rail.
         let ids = get_plugin_ids();
         self.plugin_id = Some(ids.plugin_id);
-        let session = SessionFiles::open(SessionFileIds { plugin_id: ids.plugin_id, zellij_pid: ids.zellij_pid });
-        self.session_files = session.files;
-        let outcome =
-            self.runtime.load(config::Config::from_map(&config), session.snapshot.as_deref(), session.permission);
+        let outcome = self.runtime.load(config::Config::from_map(&config));
         self.handle_outcome(outcome);
     }
 
@@ -455,21 +386,60 @@ impl ZellijPlugin for State {
                             is_floating: p.is_floating,
                             default_bg: p.default_bg,
                             default_fg: p.default_fg,
-                            exited: p.exited,
-                            exit_status: p.exit_status,
+                            attention: Some(attention::NativePane {
+                                records: p
+                                    .program_status
+                                    .into_iter()
+                                    .map(|r| attention::Record {
+                                        status: native_status(r.state().attention_status()),
+                                        id: r.id,
+                                        app: r.app,
+                                        title: r.title,
+                                        msg: r.msg,
+                                        updated_ms: r.updated_ms,
+                                    })
+                                    .collect(),
+                                attention: native_attention(p.attention),
+                            }),
                         })
                     })
                     .collect();
                 let outcome = self.runtime.panes_changed(radar_state::PaneUpdate::from_raw(raw));
                 self.handle_outcome(outcome)
             }
+            Event::GlobalAttentionUpdate(global) => {
+                let peers = global
+                    .sessions
+                    .into_iter()
+                    .filter(|s| !s.is_current)
+                    .map(|s| {
+                        let counts = s.attention.counts;
+                        attention::PeerSession {
+                            working: counts.working,
+                            needs_you: counts.needs_you + counts.failed,
+                            items: s
+                                .attention
+                                .items
+                                .into_iter()
+                                .filter_map(|item| match item.pane_id {
+                                    PaneId::Terminal(pane_id) => Some(attention::PeerItem {
+                                        pane_id,
+                                        tab_id: item.tab_id,
+                                        tab_name: item.tab_name,
+                                        attention: native_attention(item.attention),
+                                    }),
+                                    PaneId::Plugin(_) => None,
+                                })
+                                .collect(),
+                            name: s.name,
+                        }
+                        .summary()
+                    })
+                    .collect();
+                let outcome = self.runtime.global_attention_changed(peers);
+                self.handle_outcome(outcome)
+            }
             Event::Timer(elapsed_s) => {
-                // Re-probe (marker + lock) each tick — but only while the
-                // permission machine is still waiting on a peer, so it can take
-                // over a prompt whose owner died holding a now-stale lock. Once
-                // the state settles (request in-flight or resolved) the runtime
-                // ignores the probe, so skip the disk reads: with one instance
-                // per tab, probing forever is N marker reads per second.
                 // Upstream documents `elapsed_s` only as the timer-expiry
                 // payload: elapsed seconds since the `set_timeout` call, which
                 // for a fired one-shot is ~= the duration it was armed with —
@@ -477,12 +447,7 @@ impl ZellijPlugin for State {
                 // needs: its 5s stale-fire threshold discriminates a ~1s (Fast)
                 // arm from a ~60s (Slow) one with wide margin either way, so
                 // scheduler jitter can't flip the classification.
-                let probe = if self.runtime.wants_permission_probe() {
-                    self.session_files.refresh_permission_probe()
-                } else {
-                    crate::permission::PermissionProbe::default()
-                };
-                let outcome = self.runtime.timer(probe, elapsed_s, crate::clock::now_epoch_s());
+                let outcome = self.runtime.timer(elapsed_s, crate::clock::now_epoch_s());
                 self.handle_outcome(outcome)
             }
             Event::Mouse(Mouse::LeftClick(line, col)) => {
@@ -517,12 +482,18 @@ impl ZellijPlugin for State {
                 }
                 false // plugin panes: nothing observed, nothing to repaint
             }
-            Event::CommandChanged(pane_id, command, is_foreground, _clients) => {
-                if let PaneId::Terminal(id) = pane_id {
-                    let outcome = self.runtime.command_changed(id, &command, is_foreground);
-                    return self.handle_outcome(outcome);
+            Event::RunCommandResult(exit_code, stdout, _stderr, mut context) => {
+                if context.get("zj_radar").map(String::as_str) != Some("repo") {
+                    return false; // not a repo lookup: no result to read
                 }
-                false // plugin panes: nothing observed, nothing to repaint
+                let Some(cwd) = context.remove("cwd") else { return false };
+                let url = String::from_utf8_lossy(&stdout);
+                let outcome = self.runtime.repo_resolved(cwd, (exit_code == Some(0)).then_some(&*url));
+                self.handle_outcome(outcome)
+            }
+            Event::PaneAttentionChanged(PaneId::Terminal(id), attention) => {
+                let outcome = self.runtime.attention_changed(id, native_attention(attention));
+                self.handle_outcome(outcome)
             }
             _ => false,
         }
@@ -531,7 +502,6 @@ impl ZellijPlugin for State {
     fn pipe(&mut self, message: PipeMessage) -> bool {
         let Some(raw) = &message.payload else { return false };
         let outcome = match message.name.as_str() {
-            PIPE_NAME => self.runtime.status_pipe(raw),
             CONFIG_PIPE => self.runtime.config_pipe(raw),
             CMD_PIPE => self.runtime.control_pipe(raw),
             _ => return false,
@@ -549,33 +519,16 @@ impl ZellijPlugin for State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::payload::StatusPayload;
     use crate::status::Status;
-    use crate::test_fixtures::{pane, payload_for, tab};
-
-    /// The bash fallback producer can't import `payload::STATUS_PIPE_NAME`, so
-    /// its hand-typed literal is pinned here — one drifted character in a pipe
-    /// name is a silently dead producer, the least debuggable failure this
-    /// system has. (This crate isn't published to crates.io, so reaching
-    /// outside the crate dir is safe — same pattern as `reference_tests.rs`.)
-    #[test]
-    fn bash_producer_broadcasts_on_the_shared_pipe_name() {
-        let sh = include_str!("../../../plugins/zj-radar-claude/scripts/notify.sh");
-        let broadcast = format!("zellij pipe --name {} --", payload::STATUS_PIPE_NAME);
-        assert!(
-            sh.contains(&broadcast),
-            "notify.sh must broadcast via `{broadcast}`; if the pipe name is \
-             versioned, bump payload::STATUS_PIPE_NAME and notify.sh together"
-        );
-    }
+    use crate::test_fixtures::{pane, set_status, tab};
 
     /// The CLI's grant probe (`REQUIRED_PLUGIN_PERMISSIONS` in
     /// crates/cli/src/run.rs) must cover exactly the set this plugin requests:
     /// a permission added to the request list but not the probe makes every
     /// existing grant partial, and Zellij's re-prompt is illegible inside the
     /// rail (zellij#4749) — the failure presents as a silently blank rail.
-    /// Text-pinned like the pipe-name guard above, because the two lists live
-    /// on opposite sides of the wasm boundary and can't share a const.
+    /// Text-pinned because the two lists live on opposite sides of the wasm
+    /// boundary and can't share a const.
     #[test]
     fn cli_grant_probe_covers_the_exact_requested_permission_set() {
         let full_src = include_str!("lib.rs");
@@ -641,6 +594,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn e2e_workflow_builds_the_zellij_rev_the_plugin_pins() {
+        let manifest = include_str!("../Cargo.toml");
+        let pin_line = manifest.lines().find(|l| l.trim_start().starts_with("zellij-tile")).unwrap();
+        let rev =
+            pin_line.split("rev = \"").nth(1).and_then(|r| r.split('"').next()).expect("zellij-tile pins a git rev");
+        let workflow = include_str!("../../../.github/workflows/e2e.yml");
+        assert!(
+            workflow.contains(&format!("ZELLIJ_REV: {rev}")),
+            "e2e.yml's ZELLIJ_REV must match the zellij-tile rev `{rev}`"
+        );
+    }
+
     fn make_state_with_tabs(tab_specs: &[(usize, &str, bool)]) -> State {
         // tab_specs: (position, name, active)
         // Uses Compact density so existing click-mapping tests (which hard-code
@@ -657,11 +623,7 @@ mod tests {
     }
 
     fn apply_payload_with_msg(state: &mut State, pane_id: u32, status: Status, tick: u64, msg: &str) {
-        let _ = state.runtime.radar.status_mut().apply(
-            StatusPayload { msg: msg.into(), ..payload_for(pane_id, status) },
-            tick,
-            0,
-        );
+        set_status(&mut state.runtime.radar, pane_id, status, msg, tick);
     }
 
     // ── build_rows tests ──
@@ -1109,56 +1071,6 @@ mod tests {
         assert_eq!(state.tab_position_at_line(6), None, "beyond last tab");
     }
 
-    // ── Event-sequence walk: shell→idle, fg command→pending→Running, exit→Done ──
-
-    #[test]
-    fn command_pane_walks_idle_running_done() {
-        use crate::command::{EpochSecs, Tick, DEBOUNCE_TICKS};
-
-        let mut state = make_state_with_tabs(&[(0, "t", true)]);
-        state.runtime.radar.set_tab_panes_for_position(0, vec![pane(5)]);
-
-        // Tick counter managed locally, matching what PluginRuntime.tick would be.
-        let mut tick: u64 = 0;
-
-        // 1) shell prompt only → idle (zsh is in IGNORE_NAMES, no resolved state)
-        state.runtime.radar.command_mut().on_command_changed(5, &["zsh".to_string()], true, Some("/home/u/repo"), tick);
-        tick += 1;
-        state.runtime.radar.command_mut().on_timer(Tick(tick), EpochSecs(0));
-        assert!(state.runtime.radar.command_store().get(5).is_none(), "shell prompt must leave pane idle");
-
-        // 2) real fg command → pending (not yet Running); after DEBOUNCE_TICKS timer → Running
-        // pending since_tick = tick; a timer at (tick + DEBOUNCE_TICKS) satisfies
-        // (tick + DEBOUNCE_TICKS) - tick = DEBOUNCE_TICKS >= DEBOUNCE_TICKS.
-        let since = tick;
-        state.runtime.radar.command_mut().on_command_changed(
-            5,
-            &["cargo".to_string(), "test".to_string()],
-            true,
-            Some("/home/u/repo"),
-            tick,
-        );
-        // Still within debounce window: promote tick by exactly DEBOUNCE_TICKS.
-        tick += DEBOUNCE_TICKS;
-        state.runtime.radar.command_mut().on_timer(Tick(tick), EpochSecs(0));
-        assert_eq!(
-            state.runtime.radar.command_store().get(5).map(|s| s.status),
-            Some(Status::Running),
-            "must promote to Running after debounce (since={}, tick={})",
-            since,
-            tick
-        );
-
-        // 3) pane exits with code 0 → Done (and stays Done; focus no longer clears it)
-        tick += 1;
-        state.runtime.radar.command_mut().on_exit(5, Some(0), Tick(tick), EpochSecs(0));
-        assert_eq!(
-            state.runtime.radar.command_store().get(5).map(|s| s.status),
-            Some(Status::Done),
-            "exit 0 must set Done"
-        );
-    }
-
     // ── mouse_click → Effect end-to-end tests ──
 
     #[test]
@@ -1167,7 +1079,7 @@ mod tests {
         // 2 idle tabs, permission granted, render at width 80.
         // header=2 lines (Compact), tab 0 at line 2.
         let mut state = make_state_with_tabs(&[(0, "first", false), (1, "second", false)]);
-        state.runtime.permission = crate::permission::PermissionState::Resolved { granted: true };
+        state.runtime.permission = crate::runtime::PermissionState::Resolved { granted: true };
         let _ = state.runtime.render(100, 80);
         // line 2 is the first tab content row (lines 0-1 are the header)
         let outcome = state.runtime.mouse_click(2, 0);
@@ -1177,7 +1089,7 @@ mod tests {
     #[test]
     fn mouse_click_without_permission_is_inert() {
         let mut state = make_state_with_tabs(&[(0, "first", false), (1, "second", false)]);
-        state.runtime.permission = crate::permission::PermissionState::default();
+        state.runtime.permission = crate::runtime::PermissionState::default();
         let _ = state.runtime.render(100, 80);
         assert!(state.runtime.mouse_click(2, 0).effects.is_empty());
     }
@@ -1208,7 +1120,7 @@ mod tests {
                 state.runtime.radar.set_tab_panes_for_position(i, vec![pane(i as u32)]);
             }
             // Render through the production path at the given width; this populates last_rendered.
-            state.runtime.permission = crate::permission::PermissionState::Resolved { granted: true };
+            state.runtime.permission = crate::runtime::PermissionState::Resolved { granted: true };
             let ansi = state.runtime.render(200, width);
             let rail_lines = ansi.matches('\n').count();
             // For every drawn line, target_at_line must resolve to a real tab or None.

@@ -5,9 +5,9 @@ use crate::status::GlyphSet;
 
 /// Define `Kind` and everything that varies per variant from one table.
 ///
-/// Each row is `Variant => "wire-source", plain_mark, nerd_mark`. The macro
+/// Each row is `Variant => "source", plain_mark, nerd_mark`. The macro
 /// expands the table into the `Kind` enum plus `from_source` / `as_source` /
-/// `mark` / `ALL`, so the variant list, the wire vocabulary, and the two glyph
+/// `mark` / `ALL`, so the variant list, the source vocabulary, and the two glyph
 /// sets are a *single source of truth* — they cannot drift, and adding an agent
 /// or task type is one new row. The generated `as_source` / `mark` use
 /// exhaustive `match self`, so a row that omits a variant fails to compile
@@ -20,7 +20,7 @@ macro_rules! kinds {
         /// identically.
         ///
         /// Generated from the `kinds!` table below — see it for each variant's
-        /// wire token and marks.
+        /// source token and marks.
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
         pub enum Kind {
             $( $variant ),+
@@ -29,10 +29,11 @@ macro_rules! kinds {
         impl Kind {
             /// Every `Kind`, in table order. Lets callers and exhaustiveness
             /// tests iterate the variants without re-typing the list.
+            #[cfg(test)]
             pub const ALL: &'static [Kind] = &[ $( Kind::$variant ),+ ];
 
-            /// Derive a `Kind` from the payload `source` field. Expects the
-            /// lowercase wire token; matching is case-sensitive by design
+            /// Derive a `Kind` from an app/source token. Expects the
+            /// lowercase token; matching is case-sensitive by design
             /// (pinned by `from_source_unknown_is_other`), so an unknown,
             /// empty, or wrong-case source falls back to `Other`.
             pub fn from_source(s: &str) -> Kind {
@@ -42,7 +43,7 @@ macro_rules! kinds {
                 }
             }
 
-            /// The wire `source` token for this kind — the exact inverse of
+            /// The `source` token for this kind — the exact inverse of
             /// `from_source` for every known variant
             /// (`Kind::from_source(k.as_source()) == k`).
             pub fn as_source(self) -> &'static str {
@@ -85,10 +86,9 @@ kinds! {
 
 impl Kind {
     /// Whether this kind is an *agent* identity (a program that owns its pane
-    /// outright) rather than a task classification. The command observer uses
-    /// it to classify an exe by identity: `Kind::from_source(exe).is_agent()`
-    /// is THE test for "this exe is an agent", so the agent exe vocabulary
-    /// lives only in the `kinds!` table. Exhaustive on purpose — a new variant
+    /// outright) rather than a task classification:
+    /// `Kind::from_source(token).is_agent()` is THE test for "this `app` token
+    /// is an agent", so the agent vocabulary lives only in the `kinds!` table. Exhaustive on purpose — a new variant
     /// must declare which side it is here before it compiles.
     pub fn is_agent(self) -> bool {
         match self {
@@ -124,9 +124,8 @@ impl Kind {
     }
 
     /// Whether this kind is a live connection to another machine — the `Remote`
-    /// class in docs/activity-model.md §3. Its consumers are the tab marker, the
-    /// disconnect phrasing in `notify_rules`, and the intake kind override for
-    /// `remote_commands` extras.
+    /// class in docs/activity-model.md §3. Its consumers are the tab marker and
+    /// `is_steady`.
     pub fn is_remote(self) -> bool {
         match self {
             Kind::Remote => true,
@@ -154,14 +153,6 @@ impl Kind {
     }
 }
 
-// `Kind` crosses the persisted snapshot as its `source` wire token. Lenient,
-// like `Status`: an unknown or empty token folds to `Other` rather than erroring,
-// so an old or hand-edited snapshot still loads. Rides the shared `wire_serde!`
-// generator with its domain-specific accessor pair (`as_source`/`from_source` —
-// the wire field is literally `source`), so it can't drift from the lenient
-// policy `Status` uses rather than being a hand-copied impl.
-crate::wire::wire_serde!(lenient, Kind, as_source, from_source);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,17 +173,6 @@ mod tests {
         assert_eq!(Kind::from_source("deploy"), Kind::Deploy);
         assert_eq!(Kind::from_source("server"), Kind::Server);
         assert_eq!(Kind::from_source("remote"), Kind::Remote);
-    }
-
-    #[test]
-    fn serde_serializes_as_source_token_and_is_lenient() {
-        assert_eq!(serde_json::to_string(&Kind::Claude).unwrap(), r#""claude""#);
-        for &k in Kind::ALL {
-            let json = serde_json::to_string(&k).unwrap();
-            assert_eq!(serde_json::from_str::<Kind>(&json).unwrap(), k);
-        }
-        // Unknown or empty tokens fold to Other (lenient), never error.
-        assert_eq!(serde_json::from_str::<Kind>(r#""nonsense""#).unwrap(), Kind::Other);
     }
 
     #[test]

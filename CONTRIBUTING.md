@@ -1,31 +1,30 @@
 # Contributing to zj-radar
 
 zj-radar is a [Zellij](https://zellij.dev) sidebar (Rust → `wasm32-wasip1`)
-plus a host-side CLI and producer adapters for Claude Code, Codex, Opencode,
-and pi. This guide covers building, testing, and proposing changes.
+plus a host-side CLI. Zellij computes each pane's attention from the OSC 7501
+and OSC 133 sequences programs print, and the sidebar reads it, so any agent
+that emits OSC 7501 shows up with no adapter. This guide covers building,
+testing, and proposing changes.
 
 ## Project shape
 
-A three-crate Cargo workspace plus three non-Rust producers:
+A two-crate Cargo workspace:
 
 | Path | What it is |
 |------|------------|
-| `crates/core/` | `zj_radar_core`: the versioned wire payload, `Status`/`Kind`, observed-command classification, and the bounded pipe argv. No `clap`, no `zellij-tile`. Published to crates.io. |
-| `crates/cli/` | The `zj-radar` binary (`notify`, `setup`, `run`). `build.rs` embeds the wasm with `include_bytes!`. Published to crates.io. |
-| `crates/plugin/` | The wasm sidebar. `lib.rs`/`main.rs` are the only files that touch the Zellij host API and are wasm-only; everything else (runtime, stores, roll-up, renderer, naming, ledger, sessions) is host-testable. |
-| `plugins/zj-radar-claude/` | The Claude Code producer plugin: `hooks.json` plus the bundled `notify.sh` fallback. |
-| `crates/cli/src/setup/opencode_plugin.js` | The Opencode 1.x bridge (server plugin), vendored into opencode's plugins dir as `zj-radar.js` by `setup opencode` (harness: `crates/cli/tests/opencode_bridge.test.mjs`, `just test-js`). |
-| `crates/cli/src/setup/opencode_tui_plugin.js` | The Opencode 2.x bridge (TUI plugin), vendored as `zj-radar/tui.js` by `setup opencode` (harness: `crates/cli/tests/opencode_bridge.test.mjs`, `just test-js`). |
-| `crates/cli/src/setup/pi_extension.js` | The pi bridge extension, vendored into pi's extensions dir as `zj-radar.js` by `setup pi` (harness: `crates/cli/tests/pi_bridge.test.mjs`, `just test-js`). |
-| `crates/cli/src/setup/omp_extension.js` | The omp (oh-my-pi) bridge extension, vendored into omp's extensions dir as `zj-radar-omp.js` by `setup omp` (harness: `crates/cli/tests/omp_bridge.test.mjs`, `just test-js`). |
+| `crates/cli/` | The `zj-radar` binary (`setup`, `run`, `update`; a hidden `notify` no-op keeps hooks left by older releases exiting 0). `build.rs` embeds the wasm with `include_bytes!`. Published to crates.io. |
+| `crates/plugin/` | The wasm sidebar. `lib.rs`/`main.rs` are the only files that touch the Zellij host API and are wasm-only; everything else (native attention, runtime, roll-up, renderer, naming, ledger, sessions) is host-testable. |
 | `docs/` | User docs, the design doc, the executable rail spec. |
 
 Two rules are load-bearing. Read [`CONTEXT.md`](CONTEXT.md) before changing
-the core.
+the plugin.
 
-- **Push-driven, never poll-driven.** Status arrives over `zellij pipe`; the
-  plugin makes no blocking host queries on any per-event or per-tick path.
-  The one exception is a single `get_pane_cwd` per new pane, for tab naming.
+- **Push-driven, never poll-driven.** Zellij pushes each pane's attention
+  (`PaneUpdate`, `PaneAttentionChanged`, `GlobalAttentionUpdate`); the plugin
+  makes no blocking host queries on any per-event or per-tick path. Two
+  exceptions, both for tab naming: a single `get_pane_cwd` per new pane
+  (`Effect::ResolveCwd`), and one async `git remote get-url origin` per new
+  cwd (`Effect::ResolveRepo`).
   Polling melted the predecessor ([postmortem](docs/smart-tabs-postmortem.md));
   a PR that reintroduces it will not be accepted.
 - **Rail lockstep.** The emitted ANSI and the click-target map stay in 1:1
@@ -38,9 +37,9 @@ the core.
   target and `rustup` installs it on first build ([`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md)).
 - **MSRV is Rust 1.95** (`rust-version` in the root `Cargo.toml`). CI's `msrv`
   job builds with exactly that toolchain.
-- For the full suite: `just`, `bats`, `shellcheck`, `jq`, GNU `timeout`
-  (`brew install coreutils` on macOS; two bash cases skip without it), and
-  `zellij` ≥ 0.44.3 for the live E2E layer.
+- For the full suite: `just`, `bats`, `shellcheck`, and `zellij` ≥ 0.46.0 for
+  the live E2E layer (CI builds the Zellij rev the plugin pins, `ZELLIJ_REV`
+  in `e2e.yml`).
 - Optional: Nix. `nix develop` pins all of the above; `nix flake check` runs
   what the `hermetic` CI job runs.
 
@@ -55,10 +54,9 @@ cargo build --release --target wasm32-wasip1 -p zj-radar-plugin    # the wasm Ze
 
 ```sh
 just test        # L1–L4: unit, insta snapshots, proptest, vt100 (deterministic, host-only)
-just test-bash   # bats + shellcheck for notify.sh, install.sh, funnel.sh
-just test-js     # node --test for the pi, omp and opencode bridges (crates/cli/tests/*_bridge.test.mjs)
+just test-bash   # shellcheck + bats for install.sh, funnel.sh, and the demo/ scripts
 just test-e2e    # L5: builds the wasm and drives a real Zellij in a PTY
-just ci          # what every PR must pass: test + clippy + wasm build + test-bash + test-js
+just ci          # what every PR must pass: fmt check + test + clippy + wasm build + test-bash
 just review      # accept intentional insta snapshot changes
 ```
 
@@ -69,8 +67,9 @@ dependency on the native target.
 - **Snapshots** use [`insta`](https://insta.rs). After an intentional render
   change, accept with `just review`. CI fails on unreviewed drift.
 - **E2E is serial** (`--test-threads=1`); parallel Zellij sessions contend at
-  startup. It runs nightly on both OSes, on PRs that touch plugin/core/producer
-  paths (ubuntu only), as a release gate, and on `workflow_dispatch`.
+  startup. It runs nightly on both OSes, on PRs that touch `crates/plugin/`, the
+  lockfile, `justfile`, the flake, or `e2e.yml` (ubuntu only), as a release
+  gate, and on `workflow_dispatch`.
 
 ### Welded files
 
@@ -80,13 +79,9 @@ Some docs and assets are test inputs. Edit them through their test.
 |---|---|
 | `docs/rail-reference.md` (`rail-input`/`rail-expect` blocks) | `crates/plugin/src/reference_tests.rs` |
 | `docs/configuration.md` (both pipe names; every `cmd.v1` verb) | `config.rs`, `control.rs` |
-| `plugins/zj-radar-claude/hooks/hooks.json` (timeouts ≥ send cap + 2) | `hooks_manifest_tests.rs` |
-| `plugins/zj-radar-claude/scripts/notify.sh` (pipe name, deadlines) | `crates/plugin/src/lib.rs`, bats |
-| `plugins/zj-radar-claude/scripts/notify.sh` (Claude background-task rules: service phrases and jq service rules, waiting message, SubagentStop msg) | `plugins/zj-radar-claude/tests/parity.bats` against `crates/cli/src/agents.rs` |
-| Root `Cargo.toml` version + `=X.Y.Z` core pin, `plugins/zj-radar-claude/.claude-plugin/plugin.json` (version) | `workspace_core_pin_and_claude_plugin_versions_agree` in `hooks_manifest_tests.rs` (`release.yml` only checks the tag against `Cargo.toml`) |
 | `examples/radar-sidebar.kdl` | `crates/cli/src/layout.rs` |
-| Grant probe and Zellij version floor | text pins in `crates/plugin/src/lib.rs` |
-| `Notify::agent` docs | `crates/cli/src/agents.rs` |
+| Grant probe (`REQUIRED_PLUGIN_PERMISSIONS`) and Zellij version floor (`MIN_SUPPORTED_ZELLIJ`) | `cli_grant_probe_covers_the_exact_requested_permission_set` and `doctor_version_gate_matches_the_zellij_tile_pin`, text pins in `crates/plugin/src/lib.rs` |
+| `.github/workflows/e2e.yml` (`ZELLIJ_REV`, the Zellij the live suite builds) | `e2e_workflow_builds_the_zellij_rev_the_plugin_pins` in `crates/plugin/src/lib.rs`, against the `zellij-tile` rev |
 | `flake.nix` source filter | the inventory of every non-Rust file the hermetic build reads; a new `include_str!` outside crate sources needs an entry |
 
 The README quick start is run verbatim by `scripts/funnel.sh` on every release.
@@ -116,7 +111,7 @@ just dev          # build wasm + CLI, launch a fresh sandboxed zj-radar-dev-<hhm
 just dev-build    # build the dev artifacts without launching
 ```
 
-`just dev` drives the real `zj-radar run` flow, grant onboarding included,
+`just dev` drives the real `zj-radar run` flow, grant pre-seed included,
 under `target/dev/data` (`ZJ_RADAR_DATA_DIR` + `ZJ_RADAR_WASM`). Every run is
 a new uniquely named session: Zellij does not safely hot-reload layout-created
 plugins, and attaching to a leftover would keep running the old wasm. Exited
@@ -124,31 +119,13 @@ dev sessions are swept; live ones are never killed. Run it from a plain
 terminal; `zj-radar run` refuses to nest inside Zellij. In the Nix shell,
 `nix develop -c just dev`.
 
-## Measuring plugin cost
-
-Zellij runs plugins under an interpreter (wasmi), so the number that predicts
-server CPU is executed wasm instructions, not host-side nanoseconds.
-`tools/wasm-fuel` (a standalone crate, not a workspace member) loads the
-built wasm the way Zellij does and reports per-event *fuel* for each event
-class the rail sees — manifests, broadcasts, ticks, renders, hidden-tab
-frames. Every change to a per-event path should show its before/after here:
-
-```sh
-just bench-wasm                          # the current build
-just bench-wasm old.wasm new.wasm        # side by side, with a Δ column
-```
-
-The harness's protobuf schema is vendored from `zellij-utils` (see
-`tools/wasm-fuel/src/proto/mod.rs`); re-vendor when the `zellij-tile` pin
-moves.
-
 ## Pull requests
 
 1. Open an issue first for anything non-trivial.
 2. One logical change per PR.
 3. `just ci` must pass.
 4. Add tests at the right layer: render behavior → a snapshot or a
-   `rail-reference.md` scenario; wire/parse behavior → a unit or proptest.
+   `rail-reference.md` scenario; attention/parse behavior → a unit or proptest.
 5. Update the docs when behavior or interfaces change (see the ownership map
    below).
 6. Any new `include_str!`/`include_bytes!` of a non-Rust file needs an entry
@@ -163,9 +140,9 @@ Each topic has one home; everything else links to it.
 |---|---|
 | Pitch, quick start, doc index | `README.md` |
 | Install, permissions, layouts, removal | `docs/install.md` |
-| Reading the rail, mouse, badge, notifications | `docs/using.md` |
+| Reading the rail, mouse, badge | `docs/using.md` |
 | Options and pipes | `docs/configuration.md` |
-| Producers and the wire format | `docs/producers.md` |
+| Producers (OSC 7501) | `docs/producers.md` |
 | Symptom → fix | `docs/troubleshooting.md` |
 | Status × class semantics | `docs/activity-model.md` |
 | Architecture and mechanisms | `docs/design.md` |
@@ -178,12 +155,13 @@ sentence. Code identifiers only in contributor docs.
 
 ## Adding a producer or an agent
 
-The producer interface is the `zj_radar.status.v1` payload
+The producer interface is OSC 7501, the Program Status Protocol Zellij reads
 ([`docs/producers.md`](docs/producers.md#writing-your-own-producer)). A new
-instrumented agent is an `enum Agent` variant in `crates/cli/src/agents/`
-plus `Agent::derive`; the `source_round_trips_through_kind` guard test lists
-what else to wire. Observed commands like `cargo test` are classified in
-`crates/core/src/command.rs`, not in `agents/`.
+agent needs no code. The one optional entry is its `app` token: map it to a
+`Kind` in the `kinds!` table in `crates/plugin/src/kind.rs`
+(`attention::kind_for_app` routes the token); an unknown `app` renders as
+`Kind::Other`. Shell commands like `cargo test` come from Zellij's OSC 133
+tracking and show as `Kind::Command`; the plugin does not classify them.
 
 ## License
 

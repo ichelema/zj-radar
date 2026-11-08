@@ -1,10 +1,10 @@
 //! `zj-radar update` — move the CLI and the sidebar wasm to a newer release
 //! together.
 //!
-//! The two halves share the status contract and setup expectations, so they
-//! must move as one: the CLI is replaced in place, then the *new* binary is
-//! re-executed to run `setup zellij --download` (fetching the wasm built from
-//! its own version) and the idempotent producer setups. `--check` reports both
+//! The two halves share setup expectations, so they must move as one: the CLI
+//! is replaced in place, then the *new* binary is re-executed to run
+//! `setup zellij --download` (fetching the wasm built from its own version).
+//! `--check` reports both
 //! halves without writing — the wasm half by comparing the installed file's
 //! sha256 against the release's published sidecar, so a wasm that drifted from
 //! the CLI shows up even when the CLI itself is current.
@@ -118,23 +118,8 @@ pub fn run(options: UpdateOptions) {
             println!("{}", wasm_refresh_line(wasm_stale, before.as_deref(), after.as_deref(), &target));
         }
     }
-    if cli_behind {
-        // Re-wire only the producers already wired — a release may have changed
-        // the codex hook shape or the vendored opencode/pi/omp bridges — never one
-        // the user hasn't chosen (bare `setup` would install for every agent on
-        // PATH) — and each along the route it was wired by (a notify-only
-        // Codex re-runs with `--legacy-notify`, never gaining hooks).
-        for args in crate::producers::ProducerTexts::read().rewire_invocations() {
-            rerun(&exe, &target, &args);
-        }
-        println!(
-            "zj-radar: the Claude Code plugin updates from inside Claude — `/plugin update {}`",
-            crate::setup::claude_plugin_id()
-        );
-    }
-    // The doctor's exit code grades install completeness (a machine with no
-    // producer wired reads "missing"), not this update — its items are the
-    // report; only a failure to *run* it is ours.
+    // The doctor's exit code grades install completeness, not this update —
+    // its items are the report; only a failure to *run* it is ours.
     if let Err(e) =
         std::process::Command::new(&exe).args(["setup", "--check"]).env("ZJ_RADAR_VERSION", &target).status()
     {

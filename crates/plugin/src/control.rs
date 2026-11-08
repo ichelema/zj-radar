@@ -5,8 +5,7 @@
 //! as a silent no-op, matching the radar's "parsing never fails" stance.
 
 /// The imperative-command pipe. Payload is a single bare verb string;
-/// breaking the verb vocabulary means a new name (same versioning scheme as
-/// `payload::STATUS_PIPE_NAME`).
+/// breaking the verb vocabulary means a new name.
 pub(crate) const CMD_PIPE: &str = "zj_radar.cmd.v1";
 
 /// A parsed command verb.

@@ -1,26 +1,20 @@
 # Releasing zj-radar
 
 One tag produces three artifacts: the wasm plugin, the CLI binaries, and the
-crates.io crates. `release.yml` builds and publishes the GitHub release on tag
+crates.io crate. `release.yml` builds and publishes the GitHub release on tag
 push; **crates.io publishing is manual and must happen before the tag**. Each
 step below gates the next.
 
 ## Steps
 
-1. **Sync versions.** Three places must agree: `[workspace.package] version`,
-   the exact core pin (`zj-radar-core = { …, version = "=X.Y.Z" }`) in the
-   root `Cargo.toml`, and `plugins/zj-radar-claude/.claude-plugin/plugin.json`.
-   Commit the regenerated `Cargo.lock` with them (`cargo build`): the release
-   and MSRV builds run `--locked`, so a stale lockfile turns the tag red.
-   `workspace_core_pin_and_claude_plugin_versions_agree`
-   (`crates/plugin/src/hooks_manifest_tests.rs`, so `just ci`) fails unless all
-   three match; `release.yml` also rejects a tag that does not match
-   `Cargo.toml`.
+1. **Sync versions.** The version lives only in `[workspace.package] version`
+   in the root `Cargo.toml`. Commit the regenerated `Cargo.lock` with it
+   (`cargo build`): the release and MSRV builds run `--locked`, so a stale
+   lockfile turns the tag red. `release.yml` also rejects a tag that does not
+   match `Cargo.toml`.
 
    ```sh
    grep -m1 '^version' Cargo.toml
-   grep 'zj-radar-core' Cargo.toml
-   grep '"version"' plugins/zj-radar-claude/.claude-plugin/plugin.json
    ```
 
 2. **Green suite on the release commit:** `just ci`. Also confirm the MSRV
@@ -34,18 +28,12 @@ step below gates the next.
 3. **Push main.** Docs reference release URLs that 404 until the tag exists,
    so push, publish, and tag in one sitting.
 
-4. **Publish core, then the CLI.** The CLI's exact pin cannot resolve until
-   core is up:
+4. **Publish the CLI:**
 
    ```sh
-   cargo publish --dry-run -p zj-radar-core
-   cargo publish -p zj-radar-core
-   cargo publish --dry-run -p zj-radar   # verifies against the just-published core
+   cargo publish --dry-run -p zj-radar
    cargo publish -p zj-radar
    ```
-
-   Core's API may break between 0.x releases; the exact pin protects
-   previously published CLIs. Never loosen it to a caret or minor range.
 
    Between publish and tag, crates.io serves a version whose release assets do
    not exist yet. A `cargo install zj-radar` from crates.io embeds no wasm, so
@@ -64,15 +52,12 @@ step below gates the next.
 
    `release.yml` builds the wasm (nix) and portable CLI tarballs, checksums
    them, and creates the release. The builds run in parallel with the gates
-   (the deterministic, bash and pi-bridge JS suites, plus live E2E on both
-   OSes), but the
+   (the deterministic and bash suites, plus live E2E on both OSes), but the
    publish job waits on all of them. A red gate publishes nothing: fix, delete
    the tag, re-tag.
 
    The release body is GitHub's auto-generated PR list. Once it exists,
-   prepend a short human summary: highlights, then an **Upgrading** note. When
-   the Claude hooks changed, that note tells users to run
-   `/plugin update zj-radar-claude@zj-radar` in Claude Code.
+   prepend a short human summary: highlights, then an **Upgrading** note.
 
    To dry-run the pipeline, cut an RC. Any tag containing `-` (for example
    `v0.5.0-rc.1`) is marked a prerelease and never becomes `latest`.

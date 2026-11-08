@@ -4,7 +4,7 @@
 //! live `config.v1` override — a typo must not clobber set state back to
 //! default), and unknown keys are ignored (forward-compatible).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// The live-override pipe. Payload is a JSON object of config keys (see
 /// [`overrides_from_json`]); breaking the payload shape means a new name.
@@ -52,60 +52,8 @@ impl Density {
     }
 }
 
-/// Which face this plugin instance plays. A normal launch is all `Sidebar`
-/// instances (the pinned rail). The first-run onboarding *floating* pane sets
-/// `role "onboarding"` so it owns Zellij's permission prompt — legibly, because
-/// a floating pane is framed and sized (the prompt is illegible in the small
-/// borderless rail; Zellij #4749) — then closes itself once granted.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Role {
-    /// Default: the pinned left rail.
-    #[default]
-    Sidebar,
-    /// Transient floating pane that exists only to host the grant prompt.
-    Onboarding,
-}
-
-impl Role {
-    pub fn from_config(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "onboarding" => Some(Role::Onboarding),
-            "sidebar" => Some(Role::Sidebar),
-            _ => None,
-        }
-    }
-}
-
-/// Which escape hatch the `needs_permission` face may honestly advertise. The
-/// rail can't know how it was installed, and the two install flows differ in
-/// what's actually bound: `run`-owned configs bake a Ctrl-y keybind that
-/// summons the legible grant float, while a `setup`-injected rail lives in the
-/// user's own config where no such bind exists — telling those users to press
-/// Ctrl-y is a dead end. So the hint is config-driven: the `run` layouts pass
-/// `grant_hint "ctrl-y"`, and everything else falls back to the universally
-/// true generic wording (focus the rail, answer Zellij's prompt).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum GrantHint {
-    /// A Ctrl-y grant keybind is known to exist (run-owned configs only).
-    CtrlY,
-    /// Default: promise nothing about keybinds we didn't install.
-    #[default]
-    Generic,
-}
-
-impl GrantHint {
-    pub fn from_config(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "ctrl-y" => Some(GrantHint::CtrlY),
-            "generic" => Some(GrantHint::Generic),
-            _ => None,
-        }
-    }
-}
-
-/// Whether the footer may advertise the `alt-[n] jump` chord — the same
-/// honesty contract as [`GrantHint`]: Zellij owns keybinds, not the plugin,
-/// so only configs that actually bake the Alt-1..9 → GoToTab binds (the
+/// Whether the footer may advertise the `alt-[n] jump` chord. Zellij owns
+/// keybinds, not the plugin, so only configs that actually bake the Alt-1..9 → GoToTab binds (the
 /// `run`-owned config) may claim them. Everywhere else the footer omits the
 /// hint line entirely rather than promising a dead chord.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -163,47 +111,16 @@ pub struct Config {
     pub header: bool,
     pub glyphs: crate::status::GlyphSet,
     pub density: Density,
-    pub role: Role,
-    /// Which grant escape hatch the needs-permission face advertises.
-    pub grant_hint: GrantHint,
     /// Whether the footer advertises the `alt-[n] jump` chord.
     pub jump_hint: JumpHint,
     /// How background tasks show under an agent's pane row.
     pub task_lines: TaskLines,
     /// Whether the `─ earlier ─` completion ledger renders. Display-only: the
-    /// ring is recorded and persisted either way.
+    /// ring is recorded either way.
     pub ledger: bool,
-    /// Set on the onboarding layout's rail instances: never fire our own
-    /// permission request — wait for the floating onboarding pane to win the
-    /// grant, so Zellij binds its prompt to the float, not the rail.
-    pub defer_permission: bool,
-    /// The user's EXTRA interactive command names (editors/pagers/TUIs whose
-    /// panes never show a Running row — `docs/activity-model.md` §4). Extras
-    /// only, default empty: the effective set is composed as
-    /// `command::DEFAULT_INTERACTIVE ∪ extras` in `CommandStore` — holding the
-    /// seeded defaults here instead would let one configured entry silently
-    /// *replace* them (`config_fields!` assigns wholesale).
-    pub interactive_commands: BTreeSet<String>,
-    /// The user's EXTRA remote-session launcher names (`docs/activity-model.md`
-    /// §4). Extras only, default empty, exactly like `interactive_commands`:
-    /// the effective set composes as `command::DEFAULT_REMOTE ∪ extras` in
-    /// `CommandStore::set_remote_extras`.
-    pub remote_commands: BTreeSet<String>,
-    pub notify: bool,
-    pub notify_done: bool,
-    pub notify_error: bool,
-    pub notify_pending: bool,
-    /// Whether a remote session's disconnect (`Kind::is_remote`, Running →
-    /// Done/Error) notifies. The sole gate for that edge — `notify_done` /
-    /// `notify_error` neither add to nor veto it — so silencing routine
-    /// completions keeps disconnects, and turning this off silences exactly
-    /// disconnects (`notify_rules::enabled`).
-    pub notify_remote: bool,
-    pub notify_when_focused: bool,
     /// Expand the cross-session badge into a session tree: each peer's tabs
     /// and agent rows under its heading (`render::render_peer_children`).
-    /// Opt-in: off keeps the compact one-line-per-session badge and publishes
-    /// no tab tree in this session's presence file.
+    /// Opt-in: off keeps the compact one-line-per-session badge.
     pub session_tree: bool,
     /// Show the current Zellij input mode flush right on the footer tally
     /// line (`render::footer_tally`). Opt-in: off renders and repaints
@@ -228,20 +145,9 @@ impl Default for Config {
             header: true,
             glyphs: crate::status::GlyphSet::default(),
             density: Density::default(),
-            role: Role::default(),
-            grant_hint: GrantHint::default(),
             jump_hint: JumpHint::default(),
             task_lines: TaskLines::default(),
             ledger: true,
-            defer_permission: false,
-            interactive_commands: BTreeSet::new(),
-            remote_commands: BTreeSet::new(),
-            notify: true,
-            notify_done: true,
-            notify_error: true,
-            notify_pending: true,
-            notify_remote: true,
-            notify_when_focused: false,
             session_tree: false,
             show_mode: false,
             spinner_fps: DEFAULT_SPINNER_FPS,
@@ -261,20 +167,6 @@ fn parse_bool(v: &str) -> Option<bool> {
         "false" | "0" | "no" | "off" => Some(false),
         _ => None,
     }
-}
-
-/// Parse a comma/space-separated list of exe names into a set. Always `Some`
-/// (an empty value is a valid "no extras", so a live override can clear the
-/// list); entries are trimmed with any login-shell `-` prefix stripped, and
-/// empties dropped.
-fn parse_name_set(v: &str) -> Option<BTreeSet<String>> {
-    Some(
-        v.split([',', ' ', '\t'])
-            .map(|s| s.trim().trim_start_matches('-'))
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect(),
-    )
 }
 
 impl NamingMode {
@@ -329,21 +221,10 @@ config_fields! {
     naming:     "naming"     => NamingMode::from_config,
     density:    "density"    => Density::from_config,
     glyphs:     "glyphs"     => crate::status::GlyphSet::from_config,
-    role:       "role"       => Role::from_config,
-    grant_hint: "grant_hint" => GrantHint::from_config,
     jump_hint:  "jump_hint"  => JumpHint::from_config,
     task_lines: "task_lines" => TaskLines::from_config,
     header:              "header"              => parse_bool,
     ledger:              "ledger"              => parse_bool,
-    defer_permission:    "defer_permission"    => parse_bool,
-    interactive_commands: "interactive_commands" => parse_name_set,
-    remote_commands:      "remote_commands"      => parse_name_set,
-    notify:              "notify"              => parse_bool,
-    notify_done:         "notify_done"         => parse_bool,
-    notify_error:        "notify_error"        => parse_bool,
-    notify_pending:      "notify_pending"      => parse_bool,
-    notify_remote:       "notify_remote"       => parse_bool,
-    notify_when_focused: "notify_when_focused" => parse_bool,
     session_tree:        "session_tree"        => parse_bool,
     show_mode:           "show_mode"           => parse_bool,
     spinner_fps:         "spinner_fps"         => parse_fps,
@@ -406,24 +287,6 @@ mod tests {
         let over = format!(r#"{{"naming":"{}"}}"#, "x".repeat(crate::payload::MAX_PAYLOAD_BYTES));
         assert!(over.len() > crate::payload::MAX_PAYLOAD_BYTES, "sanity: fixture exceeds the cap");
         assert!(overrides_from_json(&over).is_none());
-    }
-
-    #[test]
-    fn role_parses_and_defaults_to_sidebar() {
-        assert_eq!(Config::default().role, Role::Sidebar);
-        assert_eq!(Config::from_map(&map(&[])).role, Role::Sidebar);
-        assert_eq!(Config::from_map(&map(&[("role", "onboarding")])).role, Role::Onboarding);
-        assert_eq!(Config::from_map(&map(&[("role", "ONBOARDING")])).role, Role::Onboarding);
-        // unknown → default Sidebar
-        assert_eq!(Config::from_map(&map(&[("role", "wat")])).role, Role::Sidebar);
-    }
-
-    #[test]
-    fn defer_permission_parses_and_defaults_false() {
-        assert!(!Config::default().defer_permission);
-        assert!(Config::from_map(&map(&[("defer_permission", "true")])).defer_permission);
-        // garbage → keeps default (false)
-        assert!(!Config::from_map(&map(&[("defer_permission", "maybe")])).defer_permission);
     }
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -535,20 +398,8 @@ mod tests {
     }
 
     #[test]
-    fn grant_hint_parses_and_defaults_to_generic() {
-        // Absent or unrecognized: promise nothing about keybinds we didn't
-        // install — only the run-owned layouts may claim Ctrl-y.
-        assert_eq!(Config::default().grant_hint, GrantHint::Generic);
-        assert_eq!(Config::from_map(&map(&[])).grant_hint, GrantHint::Generic);
-        assert_eq!(Config::from_map(&map(&[("grant_hint", "ctrl-y")])).grant_hint, GrantHint::CtrlY);
-        assert_eq!(Config::from_map(&map(&[("grant_hint", "CTRL-Y")])).grant_hint, GrantHint::CtrlY);
-        assert_eq!(Config::from_map(&map(&[("grant_hint", "banana")])).grant_hint, GrantHint::Generic);
-    }
-
-    #[test]
     fn jump_hint_parses_and_defaults_to_hidden() {
-        // Same honesty contract as grant_hint: absent or unrecognized promises
-        // nothing — only the run-owned config (which binds Alt-1..9) may claim
+        // Absent or unrecognized promises nothing — only the run-owned config (which binds Alt-1..9) may claim
         // the footer's alt-[n] jump hint.
         assert_eq!(Config::default().jump_hint, JumpHint::Hidden);
         assert!(!JumpHint::Hidden.shows());
@@ -624,35 +475,6 @@ mod tests {
     }
 
     #[test]
-    fn notify_defaults_are_opt_out_on() {
-        let c = Config::default();
-        assert!(c.notify);
-        assert!(c.notify_done);
-        assert!(c.notify_error);
-        assert!(c.notify_pending);
-        assert!(c.notify_remote);
-        assert!(!c.notify_when_focused);
-    }
-
-    #[test]
-    fn notify_keys_parse() {
-        let c = Config::from_map(&map(&[
-            ("notify", "off"),
-            ("notify_done", "false"),
-            ("notify_error", "0"),
-            ("notify_pending", "no"),
-            ("notify_remote", "off"),
-            ("notify_when_focused", "true"),
-        ]));
-        assert!(!c.notify);
-        assert!(!c.notify_done);
-        assert!(!c.notify_error);
-        assert!(!c.notify_pending);
-        assert!(!c.notify_remote);
-        assert!(c.notify_when_focused);
-    }
-
-    #[test]
     fn ledger_parses_on_off_and_defaults_on() {
         assert!(Config::default().ledger);
         for (v, want) in [("on", true), ("off", false), ("false", false), ("OFF", false)] {
@@ -704,62 +526,5 @@ mod tests {
         assert_eq!(fps("0"), 1, "0 clamps up, never 'no ticks'");
         assert_eq!(fps("999"), MAX_SPINNER_FPS);
         assert_eq!(fps("fast"), DEFAULT_SPINNER_FPS, "garbage keeps the default");
-    }
-
-    #[test]
-    fn notify_garbage_keeps_default() {
-        // opt parser leaves the default on unparseable input
-        let c = Config::from_map(&map(&[("notify_done", "maybe")]));
-        assert!(c.notify_done);
-    }
-
-    #[test]
-    fn interactive_commands_default_is_empty_extras() {
-        // Extras ONLY — the built-in set lives in core and is composed in
-        // `CommandStore::set_interactive_extras`. Seeding defaults here would
-        // let one configured entry wholesale-replace them (the macro assigns,
-        // never merges).
-        assert!(Config::default().interactive_commands.is_empty());
-        assert!(Config::from_map(&map(&[])).interactive_commands.is_empty());
-    }
-
-    #[test]
-    fn interactive_commands_parses_commas_spaces_and_dashes() {
-        let c = Config::from_map(&map(&[("interactive_commands", "gdb, ssh  -tig,")]));
-        let got: Vec<&str> = c.interactive_commands.iter().map(String::as_str).collect();
-        assert_eq!(got, ["gdb", "ssh", "tig"], "split on commas/spaces, dash-stripped, empties dropped");
-    }
-
-    #[test]
-    fn interactive_commands_live_override_can_clear() {
-        // An empty value is a valid "no extras" — the one list-shaped key
-        // wants clearability, unlike enum keys where garbage keeps state.
-        let mut c = Config::from_map(&map(&[("interactive_commands", "gdb")]));
-        assert!(!c.interactive_commands.is_empty());
-        c.apply_overrides(&map(&[("interactive_commands", "")]));
-        assert!(c.interactive_commands.is_empty());
-    }
-
-    #[test]
-    fn remote_commands_default_is_empty_extras() {
-        // Extras ONLY — the built-in set lives in core and is composed in
-        // `CommandStore::set_remote_extras`, exactly like `interactive_commands`.
-        assert!(Config::default().remote_commands.is_empty());
-        assert!(Config::from_map(&map(&[])).remote_commands.is_empty());
-    }
-
-    #[test]
-    fn remote_commands_parses_commas_spaces_and_dashes() {
-        let c = Config::from_map(&map(&[("remote_commands", "distrobox, rsh  -sshpass,")]));
-        let got: Vec<&str> = c.remote_commands.iter().map(String::as_str).collect();
-        assert_eq!(got, ["distrobox", "rsh", "sshpass"], "split on commas/spaces, dash-stripped, empties dropped");
-    }
-
-    #[test]
-    fn remote_commands_live_override_can_clear() {
-        let mut c = Config::from_map(&map(&[("remote_commands", "distrobox")]));
-        assert!(!c.remote_commands.is_empty());
-        c.apply_overrides(&map(&[("remote_commands", "")]));
-        assert!(c.remote_commands.is_empty());
     }
 }

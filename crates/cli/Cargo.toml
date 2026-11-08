@@ -1,13 +1,13 @@
 [package]
 name = "zj-radar"
-description = "Host CLI for the zj-radar Zellij sidebar: broadcast AI-agent status (working/waiting/done) and wire agents up."
+description = "Host CLI for the zj-radar Zellij sidebar: installs the sidebar into Zellij and launches Zellij sessions with it."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 readme = "../../README.md"
-keywords = ["zellij", "claude", "agent", "cli", "tui"]
+keywords = ["zellij", "sidebar", "agent", "cli", "tui"]
 categories = ["command-line-utilities", "development-tools"]
 build = "build.rs"
 
@@ -24,17 +24,9 @@ name = "zj-radar"
 path = "src/main.rs"
 
 [dependencies]
-zj-radar-core = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 clap = { workspace = true }
 kdl = { workspace = true }
-toml_edit = { workspace = true }
 dirs = { workspace = true }
-# `Child::wait_timeout` for the bounded status send: a SIGCHLD self-pipe
-# and `poll`, no polling loop, no hand-rolled signal code. Already in the
-# tree via assert_cmd's dev-dependency chain.
-wait-timeout = "0.2"
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

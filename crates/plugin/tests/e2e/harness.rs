@@ -69,10 +69,10 @@ pub struct ZellijSession {
 /// Who owns the on-disk lifetime of an isolated test environment.
 ///
 /// `start_sibling` needs a second Zellij session to use the SAME isolated root
-/// as an existing one (so both resolve to the same socket and Zellij cache dir
-/// — and thus the same plugin `/cache` mount — for presence files to actually
-/// cross), but exactly ONE of the two `ZellijSession`s must delete that root on
-/// Drop. `Owned` is the original `tempfile::TempDir` (deletes on drop);
+/// as an existing one (so both resolve to the same socket and Zellij cache
+/// dir, and attention can cross between them), but exactly ONE of the two
+/// `ZellijSession`s must delete that root on Drop. `Owned` is the original
+/// `tempfile::TempDir` (deletes on drop);
 /// `Shared` is just the path, borrowed from the owner and inert on drop.
 enum EnvironmentRoot {
     Owned(tempfile::TempDir),
@@ -105,7 +105,7 @@ pub struct IsolatedEnvironment {
 
 impl IsolatedEnvironment {
     fn new() -> Self {
-        Self {
+        let env = Self {
             root: EnvironmentRoot::Owned(
                 tempfile::TempDir::new().expect("failed to create isolated Zellij environment"),
             ),
@@ -115,7 +115,20 @@ impl IsolatedEnvironment {
                     .tempdir_in("/tmp")
                     .expect("failed to create isolated Zellij socket dir"),
             ),
-        }
+        };
+        // Zellij ≥ 0.46 opens its desktop-setup wizard over the terminal pane
+        // of a home where it is not the default terminal yet, swallowing every
+        // `write-chars` meant for the shell. Mark the setup as never-show.
+        let data_dir = env.zellij_data_dir();
+        std::fs::create_dir_all(&data_dir).expect("failed to create isolated Zellij data dir");
+        std::fs::write(data_dir.join("desktop_integration.json"), r#"{"flags":["SetupNeverShow"]}"#)
+            .expect("failed to write isolated Zellij desktop-integration state");
+        // Release notes and startup tips cover the pane the same way.
+        let config_dir = env.config_home().join("zellij");
+        std::fs::create_dir_all(&config_dir).expect("failed to create isolated Zellij config dir");
+        std::fs::write(config_dir.join("config.kdl"), "show_release_notes false\nshow_startup_tips false\n")
+            .expect("failed to write isolated Zellij config");
+        env
     }
 
     fn shared(&self) -> Self {
@@ -143,6 +156,15 @@ impl IsolatedEnvironment {
 
     fn socket_dir(&self) -> std::path::PathBuf {
         self.socket.path().to_path_buf()
+    }
+
+    // Zellij's `ProjectDirs::data_dir()`: macOS ignores `XDG_DATA_HOME`.
+    fn zellij_data_dir(&self) -> std::path::PathBuf {
+        if cfg!(target_os = "macos") {
+            self.home().join("Library/Application Support/org.Zellij-Contributors.Zellij")
+        } else {
+            self.data_home().join("zellij")
+        }
     }
 
     fn zellij_cache_dir(&self) -> std::path::PathBuf {
@@ -210,13 +232,13 @@ impl ZellijSession {
     }
 
     /// Second session on the SAME server socket dir + cache as `self`, so the
-    /// two servers exchange `SessionUpdate` and share the plugin cache root.
+    /// two servers exchange `GlobalAttentionUpdate` and share the plugin cache root.
     ///
     /// Reuses `self`'s isolated root (not `isolated_temp_home()`) — same socket,
     /// permissions.kdl (no re-prompt), and Zellij cache dir, which is where
     /// zellij maps each plugin's `/cache` mount. Two sessions on different
     /// roots are intentionally invisible to one another; siblings share the
-    /// private server and plugin cache so presence files actually cross.
+    /// private server and plugin cache so attention actually crosses.
     ///
     /// The returned session does NOT own the isolated root — `self` does, and
     /// must outlive it (drop `self` last).
@@ -248,6 +270,8 @@ impl ZellijSession {
         // --new-session-with-layout creates a new session even from inside another
         // zellij session (unlike plain --session which tries to attach).
         let mut cmd = CommandBuilder::new("zellij");
+        let config = isolated.config_home().join("zellij").join("config.kdl");
+        cmd.args(["--config", config.to_str().unwrap()]);
         cmd.args(["--session", name, "--new-session-with-layout", layout_path.to_str().unwrap()]);
         // Prevent inheriting the outer session's env vars.
         cmd.env_remove("ZELLIJ");
@@ -306,30 +330,29 @@ impl ZellijSession {
     /// Gives up after 30 seconds.
     fn wait_until_ready(&self) {
         let deadline = Instant::now() + Duration::from_secs(30);
-        let mut perm_sent = false;
 
         while Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(400));
             let text = self.pty_text();
 
-            // Handle permission prompt (fallback if permissions.kdl wasn't read).
-            if !perm_sent
-                && (text.contains("Grant") || text.contains("Allow") || text.contains("y/n") || text.contains("Deny"))
-            {
-                if let Ok(mut w) = self.pty_writer.lock() {
-                    let _ = w.write_all(b"y");
-                    let _ = w.flush();
-                }
-                perm_sent = true;
-                continue;
-            }
-
             // The plugin renders " RADAR" as its header line in all states
-            // (both the onboarding screen and the tab-row view).
+            // (both the onboarding screen and the tab-row view). Checked first:
+            // the PTY buffer accumulates, so prompt text lingers after a grant.
             if text.contains(" RADAR") {
                 // Extra beat so the plugin finishes its initial render cycle.
                 std::thread::sleep(Duration::from_millis(500));
                 return;
+            }
+
+            // Ungranted: Zellij shows its prompt in the rail pane instead of
+            // the plugin's render, but focus starts on the shell. Every harness
+            // layout puts the rail on the left, so focus it and answer.
+            if text.contains("Allow? (y/n)") {
+                self.run_action(&["move-focus", "left"]);
+                if let Ok(mut w) = self.pty_writer.lock() {
+                    let _ = w.write_all(b"y");
+                    let _ = w.flush();
+                }
             }
         }
         panic!(
@@ -363,6 +386,28 @@ impl ZellijSession {
         eprintln!("[e2e] warn: could not parse ZPID from dump-screen; defaulting to 0");
         eprintln!("[e2e] dump-screen was: {:?}", &screen[..screen.len().min(300)]);
         0
+    }
+
+    /// Emit an OSC 7501 program-status sequence from the focused terminal pane
+    /// (`printf` typed into the shell), so Zellij's own attention tracking
+    /// sees it. `body` is the `:`-separated pair list; `msg`/`title` values
+    /// must be base64.
+    pub fn emit_program_status(&self, body: &str) {
+        let cmd = format!(r"printf '\033]7501;%s\033\\' '{body}'");
+        let _ = self.isolated.command("zellij").args(["--session", &self.name, "action", "write-chars", &cmd]).output();
+        let _ = self.isolated.command("zellij").args(["--session", &self.name, "action", "write", "13"]).output();
+        // Allow Zellij to hand the new attention to the plugin and re-render.
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    /// `emit_program_status` from the next pane in the tab (focus-next, emit,
+    /// focus back) — the sibling of a two-terminal layout's focused pane.
+    pub fn emit_program_status_in_next_pane(&self, body: &str) {
+        let _ = self.action(&["focus-next-pane"]);
+        std::thread::sleep(Duration::from_millis(300));
+        self.emit_program_status(body);
+        let _ = self.action(&["focus-previous-pane"]);
+        std::thread::sleep(Duration::from_millis(200));
     }
 
     /// Move focus to the next pane in the tab, discover its pane ID via
@@ -402,63 +447,6 @@ impl ZellijSession {
             .args(args)
             .output()
             .expect("zellij action failed to spawn")
-    }
-
-    /// Send a `zj_radar.status.v1` pipe message to the plugin.
-    pub fn pipe_status(&self, json: &str) {
-        let out = self
-            .isolated
-            .command("zellij")
-            .args(["--session", &self.name, "pipe", "--name", "zj_radar.status.v1", "--", json])
-            .output()
-            .expect("zellij pipe failed to spawn");
-        if !out.status.success() {
-            eprintln!("[e2e] pipe failed (rc={}): {}", out.status, String::from_utf8_lossy(&out.stderr));
-        }
-        // Allow the plugin time to re-render.
-        std::thread::sleep(Duration::from_millis(500));
-    }
-
-    /// Fire the real notify.sh against this session (true hook->pipe->render).
-    ///
-    /// Gives notify.sh the session's full isolated environment so that the
-    /// `zellij pipe` inside it connects to the same private Zellij server.
-    /// `ZELLIJ_SESSION_NAME` is set so `zellij pipe` (which has no `--session`
-    /// flag) targets the right session even when invoked outside a live PTY.
-    ///
-    /// `pane_id` is the numeric terminal pane ID (from `discover_terminal_pane_id`);
-    /// it is formatted as `terminal_<pane_id>` for `$ZELLIJ_PANE_ID`.
-    pub fn run_notify_sh(&self, status: &str, pane_id: u32, hook_json: &str) {
-        // notify.sh lives at the workspace root, not under this crate.
-        // CARGO_MANIFEST_DIR is crates/plugin, so go up two levels — mirroring
-        // plugin_wasm_path. (Before the workspace split the manifest dir WAS the
-        // repo root, so the old `plugins/...` path silently broke this test.)
-        let script =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/zj-radar-claude/scripts/notify.sh");
-        use std::io::Write as _;
-        let mut command = self.isolated.command("bash");
-        command
-            .arg(&script)
-            .arg(status)
-            // Gate: notify.sh exits immediately if these are unset.
-            .env("ZELLIJ", "1")
-            .env("ZELLIJ_PANE_ID", format!("terminal_{pane_id}"))
-            // ZELLIJ_SESSION_NAME lets `zellij pipe` (no --session flag) target
-            // the correct session when called outside a live Zellij PTY.
-            .env("ZELLIJ_SESSION_NAME", &self.name)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit());
-        let mut child = command.spawn().expect("spawn notify.sh");
-        child.stdin.as_mut().unwrap().write_all(hook_json.as_bytes()).unwrap();
-        child.wait().unwrap();
-        // notify.sh's send is synchronous, so on the happy path the pipe has
-        // been consumed by the time `wait` returns (if the send deadline
-        // expired instead, the event was dropped — the caller's assertion
-        // will say so). A short pad covers server→plugin delivery; the render
-        // wait itself belongs to the caller's `wait_until` poll, not a flat
-        // sleep here.
-        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 
     /// Dump the focused terminal pane as plain text (may contain ANSI).
@@ -630,16 +618,16 @@ impl ZellijSession {
 }
 
 /// Fail fast (with a clear message) if `zellij` is missing, and warn loudly if it
-/// is not the 0.44.x series the harness layout KDL and permission-prompt handling
+/// is not the 0.46.x series the harness layout KDL and permission-prompt handling
 /// target. A version skew otherwise surfaces as an opaque `wait_until_ready`
 /// timeout — "the plugin never rendered" — instead of "your zellij is too new".
 fn assert_zellij_version() {
     match Command::new("zellij").arg("--version").output() {
         Ok(out) => {
             let v = String::from_utf8_lossy(&out.stdout);
-            if !v.contains("0.44") {
+            if !v.contains("0.46") {
                 eprintln!(
-                    "[e2e] WARNING: harness targets zellij 0.44.x but found `{}`. \
+                    "[e2e] WARNING: harness targets zellij 0.46.x but found `{}`. \
                      Layout/permission behavior may differ; a timeout below likely means \
                      a version skew, not a plugin regression.",
                     v.trim()
@@ -647,7 +635,7 @@ fn assert_zellij_version() {
             }
         }
         Err(e) => panic!(
-            "[e2e] `zellij` not found on PATH ({e}). Install zellij 0.44.x to run the \
+            "[e2e] `zellij` not found on PATH ({e}). Install zellij 0.46.x to run the \
              live E2E suite (see CONTRIBUTING.md)."
         ),
     }
@@ -815,8 +803,8 @@ pub fn plugin_wasm_path() -> std::path::PathBuf {
 /// requested permission is missing here, Zellij treats the grant as incomplete,
 /// re-prompts on load, and withholds `render()` until answered — so the plugin
 /// pane stays blank and `wait_until_ready` times out with an empty PTY. Keep this
-/// list in lockstep with `request_permission` in `src/lib.rs` (`RunCommands` was
-/// added by the notify feature and must stay listed here).
+/// list in lockstep with `request_permission` in `src/lib.rs` (`RunCommands` serves
+/// the repo lookup and must stay listed here).
 ///
 /// If the path is already present, the file is left unchanged.
 /// Returns the complete isolated environment for `ZellijSession::start`.
@@ -840,6 +828,7 @@ pub fn pre_grant_permissions(wasm: &Path) -> IsolatedEnvironment {
     ReadCliPipes
     ChangeApplicationState
     RunCommands
+    ReadPaneContents
 }}
 "#,
             wasm = wasm_str
@@ -858,30 +847,6 @@ pub fn pre_grant_permissions(wasm: &Path) -> IsolatedEnvironment {
 /// with it reproduces "attached but never granted" (nothing in `permissions.kdl`).
 pub fn isolated_temp_home() -> IsolatedEnvironment {
     IsolatedEnvironment::new()
-}
-
-/// A rail layout whose plugin DEFERS permission (`defer_permission "true"`) and
-/// carries NO onboarding float — reproducing an attached, ungranted session
-/// (attach applies no layout, so the float never auto-opens). The deferring rail
-/// renders `needs_permission` without ever calling `request_permission`, so it
-/// never triggers the harness's auto-grant; the ungranted state stays put until a
-/// test dispatches the grant float itself.
-pub fn deferring_rail_layout(plugin_wasm: &Path) -> String {
-    let wasm_abs = plugin_wasm.canonicalize().unwrap_or_else(|_| plugin_wasm.to_path_buf());
-    format!(
-        r#"layout {{
-    cwd "/tmp"
-    pane split_direction="vertical" {{
-        pane size=32 borderless=true {{
-            plugin location="file:{wasm}" {{
-                defer_permission "true"
-            }}
-        }}
-        pane
-    }}
-}}"#,
-        wasm = wasm_abs.display()
-    )
 }
 
 /// Build a KDL layout that pins the zj-radar plugin in a 32-column left sidebar.

@@ -11,284 +11,227 @@ in [`CONTEXT.md`](../CONTEXT.md); status and class semantics in
 
 Bring Cmux-style agent awareness into an existing Zellij setup without
 changing keybindings, swap layouts, or config: an always-on left sidebar that
-lists every tab and, for tabs running AI agents, shows per-pane state
-(working, waiting for you, done, error), the task, and the last message, and
-jumps to a tab on click.
+lists every tab and, for tabs running AI agents or commands, shows per-pane
+state (working, waiting for you, done, error) and the last message, and jumps
+to a tab on click.
 
-The hard constraint: **no polling, and no blocking host queries on any
-per-event or per-tick path.** Signals come from pushed events (`pipe`,
-`TabUpdate`, `PaneUpdate`, `CwdChanged`, `CommandChanged`) or the hook
-payload. The single exception is the once-per-pane `Effect::ResolveCwd`
-naming bootstrap: one `get_pane_cwd` per freshly opened pane, never repeated.
+The hard constraint: **push-driven, never poll-driven.** No polling, and no
+blocking host queries on any per-event or per-tick path. Signals come from
+pushed events (`TabUpdate`, `PaneUpdate`, `PaneAttentionChanged`,
+`GlobalAttentionUpdate`, `CwdChanged`, `ModeUpdate`). There are two
+exceptions, both for tab naming:
+
+- `Effect::ResolveCwd`: one blocking `get_pane_cwd` per freshly opened pane,
+  never repeated.
+- `Effect::ResolveRepo`: one async `git remote get-url origin` per cwd, never
+  repeated.
+
 The predecessor polled every pane on every output event and melted a
 many-agent session; the postmortem has the numbers.
 
-## 2. Why an explicit pipe, not OSC sniffing
+## 2. Why OSC 7501
 
-Cmux owns the terminal surface (it is the emulator), so it can combine OSC
-notification signals with per-agent hooks. Even there, the working → waiting →
-done status comes from hooks; OSC only says "something dinged".
+Zellij 0.46 computes per-pane attention itself. It owns the PTY, so it parses
+two terminal signals:
 
-A Zellij plugin does not own the PTY. It gets a structured event API, not the
-byte stream. Zellij forwards some notification OSCs (OSC-99 desktop
-notifications since 0.44.1), but those are transient attention events with no
-`running`/`pending`/`done` state, no repo or branch, and no pane attribution,
-and the plugin API exposes no event for them. The only output-side signal a
-plugin sees is the per-tab bell boolean.
+- **OSC 7501, the Program Status Protocol.** A program reports its own state
+  (`state`, `app`, `kind`, `progress`, `title`, `msg`, child records by `id`).
+  The body is `key=value` pairs separated by `:`; `msg` and `title` are
+  base64. Claude Code, Codex, pi, Opencode and omp emit it with no setup
+  ([`producers.md`](producers.md)).
+- **OSC 133 shell-command tracking.** A shell that marks its prompts lets
+  Zellij see each command start, run, and exit with a code.
 
-So the reliable seam is an explicit, adapter-owned `zellij pipe` payload
-delivered to the plugin's `pipe()` entrypoint. That mirrors Cmux's real status
-path while fitting Zellij's architecture.
+Zellij picks the signal that wins for each pane and hands the plugin the
+result as structured data: `PaneInfo.attention` and `PaneInfo.program_status`
+in the manifest, plus events for single-pane changes and for other sessions.
+Its attention text already carries the kind label and progress
+(`needs approval: …`, `working 40%: …`).
+
+The rejected alternative is a private status pipe fed by per-agent adapters
+(hooks, plugins, JS bridges). It needed one adapter per agent, a
+backpressure-bound `zellij pipe` send on every hook, and shared files to
+rehydrate new tabs and reach other sessions. Native attention removes all
+three: the plugin is a pure view of what Zellij reports.
+
+What it costs:
+
+- Zellij ≥ 0.46.0 (`MIN_SUPPORTED_ZELLIJ`).
+- OSC 7501 has no git branch or task label, so rows show neither.
+- Opencode emits only `working` and `blocked`, never `done` or `error`
+  ([anomalyco/opencode#60411](https://github.com/anomalyco/opencode/issues/60411)):
+  a finished Opencode turn reads idle.
+- omp needs a release that contains
+  [can1357/oh-my-pi#17147](https://github.com/can1357/oh-my-pi/pull/17147);
+  before it, omp's OSC 133 cleared its own `working`.
+
+**Remote sessions come for free.** A remote Zellij with `attention.host_status`
+(default `true`) emits an aggregated OSC 7501 for its session to its terminal.
+A local pane running `ssh host` + `zellij attach` therefore carries
+`app=zellij` attention like a local agent, and the plugin shows it as a remote
+row (`Kind::Remote`).
 
 ## 3. Architecture
 
-Thin Zellij-host glue around a deep, pure runtime plus pure stores and
+Thin Zellij-host glue around a deep, pure runtime plus pure state and
 rendering. The plugin's domain modules have no `zellij-tile` dependency
-(`zellij-tile` is `cfg(target_arch = "wasm32")`-scoped): `lib.rs` translates
-raw events into repo-owned inputs and applies the ordered effects the runtime
+(`zellij-tile` is `cfg(target_arch = "wasm32")`-scoped): `lib.rs` copies raw
+events into repo-owned types and applies the ordered effects the runtime
 returns.
 
-The repo is a three-crate workspace: `crates/core` (wire payload, command
-classification, `Kind`, the bounded pipe argv; shared by producer and plugin),
-`crates/cli` (the host-side binary: `notify`, `setup`, `run`), and
-`crates/plugin` (the wasm sidebar). Filenames below live under
+The repo is a two-crate workspace: `crates/plugin` (the wasm sidebar) and
+`crates/cli` (the host binary: `setup`, `run`, `update`, plus a hidden no-op
+`notify` so hooks left by older releases exit 0). Filenames below live under
 `crates/plugin/src/`.
 
 ```
-┌ Agent adapters (outside the wasm) ──────────────────────────────────────┐
-│ Claude Code → plugin hook / native CLI          (running/pending/done)  │
-│ Codex       → native CLI via hooks.json         (running/pending/done)  │
-│ Opencode    → JS bridge → native CLI            (running/pending/done/error) │
-│ pi          → extension → native CLI            (running/pending/done/error) │
-│ omp         → extension → native CLI            (running/pending/done/error) │
-│ any script  → zj-radar notify generic                                   │
+┌ Zellij 0.46 (owns the PTY) ─────────────────────────────────────────────┐
+│ agent  ─OSC 7501─┐                                                      │
+│ shell  ─OSC 133──┼─► attention tracker ─► PaneUpdate / TabUpdate        │
+│                  │                        (active tab's plugins only)   │
+│                  │                     ─► PaneAttentionChanged          │
+│                  │                        (every subscribed instance)   │
+│ other sessions ──┘                     ─► GlobalAttentionUpdate         │
 └───────────────────────────┬─────────────────────────────────────────────┘
-   zellij pipe --name zj_radar.status.v1 -- {v,source,pane,status,repo,branch,msg,task,ack,tasks}
-   broadcast by name, through the bounded self-limiting argv (§5).
-   The plugin is a caller too: the ✓ gesture echoes an ack:true payload here.
-                            │
                             ▼
 ┌ zj-radar plugin (Rust → wasm32-wasip1) ────────────────────────────────┐
 │  lib.rs: Zellij adapter                                                │
-│    raw Event/PaneInfo/TabInfo ⇄ repo-owned inputs/effects; owns        │
-│    SessionFiles and applies returned effects                           │
+│    Event/PaneInfo/TabInfo/PaneAttention ⇄ repo-owned inputs/effects    │
 │                                                                        │
 │  runtime.rs: PluginRuntime                                             │
-│    lifecycle, permissions, timers, snapshot decisions, naming,         │
-│    command activity, config pipes, mouse intent                        │
-│    input: tab/pane updates, permission result, status/config/cmd       │
-│           pipes, timer, mouse                                          │
+│    lifecycle, permissions, timers, naming, config/cmd pipes, mouse     │
 │    output: Outcome { render, effects: Vec<Effect> }                    │
 │                                                                        │
-│  session_files.rs: SessionFiles                                        │
-│    per-session filesystem coordination across instances: snapshots,    │
-│    permission marker/lock, root fallback, pruning, presence files,     │
-│    notification claims, shared focus                                   │
+│  attention.rs: mirrors Zellij's attention types; builds the            │
+│    TrackedObservation per pane, and the badge's SessionSummary per     │
+│    peer                                                                │
 │                                                                        │
 │  radar_state.rs / rollup.rs / tab_namer.rs: state + tab model          │
-│    StatusStore + CommandStore (over core's ObservationStore),          │
-│    roll_up(tab), TabNamer                                              │
+│    native observations, roll_up(tab), TabNamer                         │
 │                                                                        │
-│  ledger.rs / sessions.rs / presence.rs: completion ring;               │
-│    cross-session peer state and the presence record (§13)              │
-│                                                                        │
+│  ledger.rs / sessions.rs: completion ring; cross-session peers         │
+│  status.rs / kind.rs / observation.rs / task.rs / payload.rs:          │
+│    shared vocabulary and sanitizing                                    │
 │  control.rs / config.rs / theme.rs: cmd + config pipes, colors         │
-│  permission.rs / clock.rs / notify_rules.rs: grant state machine,      │
-│    timer-chain bookkeeping, notification edge rules                    │
 │                                                                        │
 │  render.rs: pure rail renderer                                         │
 │    render_rail(rows, ledger, opts) -> RenderedRail                     │
-│    (target_at_line / hotspot_at; onboarding + needs_permission faces)  │
+│    (onboarding + needs_permission faces)                               │
 │    owns layout, overflow, ANSI, click-target + hotspot lockstep        │
 └────────────────────────────────────────────────────────────────────────┘
-        │ Effects: SwitchTab, ShowPane, RenameTab, RequestPermission,
-        │ SetTimeout(Fast|Slow), SetSelectable, PersistSnapshot,
-        │ PersistPermissionMarker, HeartbeatPermissionLock, ResolveCwd,
-        │ Notify, PublishFocus, PersistPresence, ClaimPresenceWriter,
-        │ ReadPresences, DismissPresence, SwitchSession, BroadcastStatus,
-        │ CloseSelf
+        │ Effects: RequestPermission, SetSelectable, SetTimeout,
+        │ RenameTab, SwitchTab, ShowPane, ResolveCwd, ResolveRepo,
+        │ SwitchSession, MarkSeen
         ▼
 ```
 
 Host-coupled code stays thin. Lifecycle decisions live in `PluginRuntime`,
-filesystem coordination in `SessionFiles`, layout and click decisions in
+attention policy in `attention.rs`, layout and click decisions in
 `RenderedRail`, so the core is unit-testable with `cargo test`. The external
-seam is the versioned pipe payload.
+seams are Zellij's attention data and the `zj_radar.cmd.v1` /
+`zj_radar.config.v1` pipes ([`configuration.md`](configuration.md)).
 
 ## 4. Lifecycle
 
-### 4.1 Event → status
+### 4.1 Attention → status
 
-| Source event | Status |
+`lib.rs` maps Zellij's `AttentionStatus` (its effective status, so a muted
+pane reads idle) into the rail's `Status`:
+
+| Zellij | Rail |
 |---|---|
-| Claude `UserPromptSubmit` / `PreToolUse` / `PostToolUse` | `running`. A `PostToolUse` that backgrounded work and a `<task-notification>` wake carry a background-task batch and are never deduped. Otherwise `PostToolUse` usually duplicates `PreToolUse`: the CLI drops the identical repeat before spending anything (§5, *Last-sent dedup*) and the plugin no-ops any that still arrive. It stays registered because it is the Pending → Running recovery edge after a mid-turn permission answer — that one differs from the last-sent `pending`, so it is never dropped. |
-| Claude `Notification` (`permission_prompt` / `elicitation_dialog`) | `pending` |
-| Claude `SubagentStop` | `running` (the main turn is still going); its `last_assistant_message` (the subagent's report) is never the message, only a `Stop`'s is. One with an empty or missing `agent_type` sends nothing: Claude Code's internal helpers (prompt suggestion, session recap, idle compaction, background-agent progress summaries) fire those, often after `Stop`, with no `SubagentStart`, and as `running` they left a finished row stuck on `working` (#81). Agent-tool subagents always carry one. |
-| A **background** subagent's own `PreToolUse` / `PostToolUse` / `SubagentStop` | nothing: the CLI records the `agentId` the parent's launch returns (one marker file per id beside the dedup records) and drops that agent's hooks, which would otherwise overwrite the parent's `waiting on …` or `pending` row. Foreground subagents report as above. Limit: a permission prompt a background subagent raises keeps the row `pending` until the parent's next hook or that subagent's completion wake. The bash fallback keeps no state and reports them. |
-| Claude `Stop` | `done`, except: a Stop whose last assistant message ends in a question maps to `pending` (the question becomes the message); otherwise a Stop whose `background_tasks` still lists bounded work (a running shell that isn't a service, a subagent, a workflow) maps to `running` with a `waiting on …` message. Each finished task wakes the model, so the next Stop carries the refreshed list and the real `done`. Monitors, crons, service shells and unknown task types don't hold the row. A shell's command alone decides whether it is a service, read only at command positions: it splits on `&`, `|`, `;`, newline, CR, `(`, `)` and backticks; each segment's *head* is its first word past env assignments, wrappers (`env`, `nohup`, `sudo`, `bash -c`, …) and flags, and its *command word* follows past package runners (`npx`, `pnpm exec`, `bun x`, `bundle exec`, …) and their flags (`-p`/`--package`-style flags skip their value). A segment is a service when a phrase (`npm start`, `run dev`, `serve`, `rails s`, `python -m http.server`, `uvicorn`, `cargo watch`, `kubectl port-forward`, `tail -f`, …) starts at either position, its command word is `vite` with no `build` argument, `docker compose up` starts there without `-d`/`--detach`/`--abort-on-container-exit`/`--exit-code-from`, or it has a `--watch`/`--watchall` flag not switched off (`=false`/`=0`/a following `false`/`0`) and its command word isn't `gh` or `kubectl … rollout status` (whose watches end). Words anywhere else never count, so `cd serve && cargo test`, `pytest tests/test_serve.py` and `make dev-deps` hold. The shared case corpus is `crates/cli/src/agents/service_cases.rs`. Limit: a snapshot shell entry without a `command` is judged by its description alone (multi-word phrases such as "dev server" or "watch mode"), and core only ever lowers a task's hold, so a task the launch classified as a service but the snapshot can't may show `waiting on …` with a working spinner until the next Stop. Every Stop also carries the running set as a `tasks` snapshot; a `PostToolUse` that backgrounds work carries its start, and a `<task-notification>` `UserPromptSubmit` carries each outcome (see `crates/core/src/task.rs`). |
-| Claude `SessionStart` (`source: "clear"`) | `idle` (resets the row on `/clear`) |
-| Claude `SessionEnd` | `idle` |
-| Codex `UserPromptSubmit` / tool hooks / subagents | `running`; `SubagentStart` / `SubagentStop` say `delegating` (a SubagentStop's `last_assistant_message` is the subagent's report, never the message, as with Claude) |
-| Codex `PermissionRequest` | `pending` |
-| Codex `Stop` / legacy `agent-turn-complete` | `done`, or `pending` when the last assistant message ends in a question (same rule as Claude's `Stop`) |
-| Codex ephemeral-fork hooks (`transcript_path: null`) | ignored |
-| Opencode events | [`producers.md`](producers.md#opencode) |
-| pi events | [`producers.md`](producers.md#pi) |
-| Observed command exiting nonzero | `error` |
-| Observed remote session (`ssh`/`mosh`/…) ending | `done`, notified as a disconnect (`error` if the exit code is nonzero, notified as "connection lost") — `activity-model.md` §3 |
-| Agent pane returns to its shell prompt | terminal statuses clear at once; a `Running` arms the stale grace clock (§10) |
-| Agent pane's root process exits (manifest `exited`) | `idle` immediately, no grace (§10) |
+| `Working` | `Running` |
+| `NeedsYou` | `Pending` |
+| `Done` | `Done` |
+| `Failed` | `Error` |
+| `Idle`, `Quiet`, `NewOutput` | `Idle` |
 
-Claude's map has no `error` on purpose: its hook vocabulary carries no
-reliable turn-level failure signal (`PostToolUse`'s per-tool `is_error` is
-normal, recoverable behavior), so mapping it to `Error` would paint healthy
-turns red. The two `error` sources are a nonzero command exit and opencode's
-`session.error`.
+`NativePane::observation` turns one pane's attention and records into a
+`TrackedObservation`:
+
+- **Origin and kind.** A shell command, command pane, or foreground process
+  is `ObservationOrigin::Command` with `Kind::Command`; every observed command
+  gets that kind. Anything else is `ObservationOrigin::Program`, with the kind
+  from the OSC 7501 `app` (`attention::kind_for_app`): `claude-code` is
+  Claude, `zellij` is Remote, and any other token goes through
+  `Kind::from_source` (`codex`, `pi`, `server`, `build`, …; unknown is
+  `Other`).
+- **Message.** Zellij's attention text. With no text, the root record's
+  `title`, else `msg`, else `id`.
+- **Child-only panes.** Zellij raises a pane from a child record only for
+  `blocked` or `error` (`deciding_record`), so a pane whose only records are
+  `working` children (Opencode) reads idle in Zellij. When the attention
+  source is not OSC 7501 and there is no root record, the observation takes
+  the most severe record instead.
+- **Background tasks.** Child records with an `id` (except one that decided
+  the status) become `BgTask`s, rendered as `┊` sub-lines under the pane
+  line. They never feed the roll-up or the counts.
+- **Nothing to show.** An idle pane with no records has no observation.
+
+An unchanged status keeps its `last_change_tick`, so the spinner's ease and
+the rows memo hold across manifests. The pending wait tag and completion
+stamp come from Zellij's `since_ms`. Free text is sanitized before it reaches
+the grid (`TrackedObservation::sanitized`).
 
 ### 4.2 Per-pane to per-tab aggregation
 
 Multi-agent tabs exist (four Claude panes in one tab), so tab state cannot come
-from names. The stores key by `PaneId`; `PaneUpdate`'s manifest gives the
-pane → tab map.
+from names. Observations key by pane id; `PaneUpdate`'s manifest gives the
+pane → tab map. `rollup::roll_up` aggregates:
 
 - **Severity:** `error > pending > running > done > idle`. Error is highest so
   failures never hide behind "working".
-- **Counts:** `total` is the panes in the tab that have ever reported a
-  non-idle state and still exist; `done` is those currently `done`.
+- **Counts:** `total` is the panes in the tab with an observation; `done` is
+  those currently `done`; `pending` those currently `pending`.
 - **Primary detail:** the highest-severity pane. On ties a bounded job
-  outranks a steady row — a service or a remote session (a spinning build
-  beats a merely-up dev server or ssh session, `activity-model.md` §3), then
-  the most recent change wins.
-- **Prune grace.** A pane absent from a manifest is not pruned on its first
-  absence (`absent_once`). Zellij's break-pane family reports session state
-  while a moved pane is extracted and in no tab, so one absence cannot
-  distinguish a close from a mid-move flash. A pane still absent on the next
-  manifest prunes then, ledgered under the tab captured at first absence. The
-  grace set is recomputed from every manifest, so a reappearing pane simply
-  drops out.
+  outranks a steady row (`Kind::is_steady`: a `server` or a remote session),
+  then the most recent change wins.
+- **Focused pane:** `TabDisplay::focused_pane` is render-only. It paints the
+  active tab's focused pane line on a brighter surface and feeds nothing else.
+
+A pane gone from the manifest loses its observation at once. If it showed a
+completion, the ledger files it under the tab it was last seen in (§9).
 
 ### 4.3 Focus never drives state
 
-An earlier design cleared a completion when you focused the pane. Focus is
-per-client and is not delivered to background plugin instances, so that
-cleared the row only on the tab you were viewing. A finished status now clears
-only via shared signals: a new broadcast, the return-to-shell exit-clear, or a
-prune. Every tab's instance receives those, so all tabs converge. The former
-`on_focus` wire field is dropped unread like any unknown key.
+The plugin never derives state from focus: focus is per client, and only the
+active tab's instances see it. A pane's status is whatever Zellij reports, and
+`PaneAttentionChanged` reaches every instance, hidden tabs included, so all
+tabs converge.
 
-Focus still gates one thing: the notifier stays quiet about the focused pane
-(unless `notify_when_focused`). Each rail notes focus from its own
-`PaneUpdate`s, which reach only the active tab's plugins, so a hidden rail's
-idea of focus is frozen at whenever its tab was last active. Left alone, a
-hidden rail would notify for the pane the user is looking at and win the
-notification claim over the active rail that suppressed it. So every
-`PaneUpdate` also publishes the rail's focused pane
-(`Effect::PublishFocus`) to `zj-radar.<pid>.focus` in the shared root,
-written only when it changes, and each `Effect::Notify` carries its pane
-(`unless_focused`). Before claiming, the glue reads that file and drops a
-notification for the shared focus. The last-active rail wrote it, so it is
-the focus every rail agrees on. After a detach it keeps the at-detach focus,
-which is what a single rail did before. With two clients, the most recent
-active view wins. Like the presence-writer token, the file is pid-scoped and
-aged by its session's presence file in the sweep.
+Zellij itself uses focus: it marks a focused pane's `Done` or `Error` seen
+almost at once, so that status never shows as the pane's. Zellij keeps the
+deciding record as `PaneAttention::remembered`, and the ledger files the
+completion from there.
 
-## 5. The pipe contract
+**Acknowledge is a Zellij call.** The `✓` hotspot (on a tab header or pane
+line with a program-origin `Pending`) and a right-click on a pane or tab row
+(blocked upstream for now, §5 *Click targeting*) emit `Effect::MarkSeen` for each pending pane, which calls
+`mark_session_pane_seen`. The plugin mutates nothing: every instance
+converges on the attention change Zellij sends back. `MarkSeen` addresses
+panes by session, so it is inert until `ModeUpdate` has supplied the session
+name.
 
-Producers broadcast `zj_radar.status.v1` by name. Each sidebar instance filters
-on the name and keeps its own copy of the state.
+## 5. Plugin ↔ Zellij wiring
 
-```json
-{ "v": 1,
-  "source": "claude",                 // Kind vocabulary: claude | codex | opencode | pi | omp |
-                                      //   gemini | command | test | build | deploy |
-                                      //   server | remote | other
-  "pane": { "type": "terminal", "id": 12 },
-  "status": "running",                // running | pending | done | error | idle
-  "repo": "pinky",
-  "branch": "fix/x",
-  "msg": "running tests…",
-  "task": "fix the flaky auth test",  // optional sticky label
-  "ack": false,                       // optional: "user already saw this", notifier stays silent
-  "tasks": {                          // optional background-task batch (upserts by id)
-    "snapshot": true,                 //   true = the complete running set
-    "items": [ { "id": "b1", "state": "running",   // running | completed | failed | killed | ended
-                 "label": "Run tests", "holds": true } ] } }
-```
+**Permissions.** `load()` requests them directly:
 
-Field rules for producers are in
-[`producers.md`](producers.md#writing-your-own-producer). Plugin-side handling
-is defensive: match `pane` to `PaneId::Terminal`; ignore unknown fields
-(including a legacy `seq` and the former `on_focus`); fold an unknown `status`
-to `idle`; strip ANSI, control, and bidi characters; fold newlines; truncate
-`repo`/`branch` to 40, `msg`/`task` to 60, `source` to 16; drop payloads over
-64 KB; evict the oldest pane past 256 ids. Ordering is latest-wins.
+- `ReadApplicationState`: every state event.
+- `ReadCliPipes`: the `cmd.v1` and `config.v1` pipes.
+- `ChangeApplicationState`: switch tab, pane, and session; rename tabs; mark
+  panes seen.
+- `RunCommands`: the git remote read behind tab names. Without it,
+  `run_command` is a silent no-op.
+- `ReadPaneContents`: without it Zellij strips the command text from
+  attention, and command rows show only their status.
 
-**The plugin is a producer too.** The `✓` acknowledge gesture does not mutate
-local state. It broadcasts a synthetic payload (the pane's Pending re-sent as
-`done` with `ack: true`) onto the same pipe (`Effect::BroadcastStatus`), so
-every instance, including the sender, converges through the normal
-`status_pipe` intake, and `ack` keeps every notifier silent.
-
-**Bounded sends.** `zellij pipe` is a backpressure channel: the client blocks
-until every loaded plugin instance consumes the message, and an instance
-wedged at Zellij's permission prompt holds it forever. Unbounded sends at hook
-rate once turned one wedged rail into an EMFILE crash of the whole session.
-Every caller, the plugin's ack echo included, sends through the self-limiting
-`sh` subtree from `crates/core/src/pipe.rs` (`self_limiting_pipe_argv`): a
-detached `sleep; kill` watchdog inside the spawned subtree reaps its own hung
-client even if the caller is killed mid-send. Deadlines are status-keyed:
-`DEFAULT_PIPE_TIMEOUT_SECS` (5 s) for once-per-turn edges,
-`RUNNING_PIPE_TIMEOUT_SECS` (2 s) for `running` heartbeats — except a
-`running` that carries background tasks, which is an edge and keeps 5 s. The
-bundled hooks' `timeout` values must clear the worst-case cap plus 2 s
-(welded by `hooks_manifest_tests.rs`). The subtree exits with the client's status, so a
-caller can tell a delivered send from one killed at the deadline; the CLI
-producer blocks on that exit, with a cap + 1 s backstop thread for the corner
-where the watchdog's own fork failed.
-
-**Last-sent dedup.** Claude's PreToolUse and PostToolUse derive identical
-payloads, so half of tool-loop traffic would be a duplicate every rail
-instance pays to receive. The CLI drops an identical `running` re-sent within
-`DEDUP_TTL_SECS` at the `broadcast` choke point, before any git work or spawn;
-edges always send, which is what keeps PostToolUse the Pending→Running
-recovery edge (the `pending` overwrites the record), and so does any payload
-carrying background tasks (a start or outcome can't be recovered later). The TTL is pinned below
-the plugin's stale-Running grace, which any payload cancels, and only a
-confirmed delivery is recorded — hence the wrapper's exit status above. The
-rule, its key, and its bounds: `crates/cli/src/dedup.rs`.
-
-**Newcomer rehydration.** The plugin runs one instance per tab, and a
-broadcast reaches only the instances alive when it is sent. A tab opened after
-agents are already running would otherwise start blank. Each instance mirrors
-its stores into a snapshot on every state edge and seeds itself from it in
-`load()`. Writes are edge-gated: a label-only Running → Running update defers
-its write to the next Fast tick (`SnapshotWrite::Deferred`) instead of hitting
-disk per tool hook. `SessionFiles` picks the root: `/cache` first (Zellij
-mounts it as the plugin-URL-scoped folder shared across instances), then
-`/tmp/zj-radar` (a WASI mount of the host's `$TMPDIR/zellij-<uid>`), then
-persistence off. `/data` is not used: it is scoped per
-`<plugin_id>-<client_id>` and removed on unload. Snapshot names are scoped by
-the Zellij server pid; writes are temp-file plus atomic rename. Every live
-instance holds the same converged stores after a broadcast, so one write per
-edge is the whole snapshot. For a pushed edge the instance whose tab holds
-the edge's pane writes, and edges with no nameable owner are written by
-everyone (`RadarState::persists_edges_for`). Ownership rather than visibility,
-because Zellij spawns fresh plugin instances — seeded from this file — for
-every client that attaches, while the detached client's hidden instances are
-what kept it current meanwhile. Timer edges (debounced promotion, Done
-confirm, TTL recede, stale-Running expiry) are the exception: every instance
-writes them. Instances tick on unaligned phases, so a lagging sibling's
-own-pane write can briefly put pre-confirm state back in the file; its own
-timer write repairs it (`RadarState::timer`). With persistence off, late
-sidebars start empty until the next broadcast.
-
-## 6. Plugin ↔ Zellij wiring
-
-**Permissions.** `ReadApplicationState`, `ReadCliPipes`,
-`ChangeApplicationState` (switch tab/pane/session, rename tabs, close the grant
-float), and `RunCommands` (desktop notifications via `osascript` /
-`notify-send`, and the ack re-broadcast). Without `RunCommands`, `run_command`
-is a silent no-op.
+`zj-radar setup zellij` and `zj-radar run` pre-write the full grant into
+`permissions.kdl` (`setup/preseed.rs`), so Zellij answers `Granted` from its
+cache and no prompt appears ([`install.md`](install.md#permissions)). Without
+the grant, each tab's rail shows Zellij's prompt. The CLI's
+`REQUIRED_PLUGIN_PERMISSIONS` must equal the plugin's request list; a text-pin
+test in `lib.rs` keeps them together, because a partial grant re-prompts
+illegibly inside the rail.
 
 **Selectability.** One level rule, `PluginRuntime::desired_selectable`: the
 rail pane is selectable while its own permission request is in flight
@@ -309,21 +252,28 @@ back to selectable on "no terminals left" would beat the render and keep a dead
 tab — and the session — alive. With the latch, `exit` in a tab's last shell
 closes the tab exactly as before.
 
-**Per-tab prompt coordination.** On an uncached first run, `SessionFiles` uses
-a session-scoped lock to elect one instance to call `request_permission()`;
-peers wait on a marker and then request after Zellij has cached the answer.
-One prompt instead of one per tab. Without writable session files it degrades
-to every instance prompting. `setup zellij` normally pre-seeds the grant into
-`permissions.kdl` so no prompt appears at all ([`install.md`](install.md#permissions)).
+**Subscriptions.**
 
-**Subscriptions.** `TabUpdate`, `PaneUpdate`, `CwdChanged`, `CommandChanged`,
-`Timer`, `Mouse`, `PermissionRequestResult`, `ModeUpdate` (carries
-`ModeInfo.session_name`, the session-name source §13 depends on, and
-`ModeInfo.mode` for the `show_mode` footer label; Zellij re-sends it to the
-newly active tab on every tab switch, so a revealed rail's label is current), and
-`InitialKeybinds`, which is never handled: subscribing to it is Zellij's
-opt-out that strips the full keybinding table from every `ModeUpdate`, so the
-per-instance protobuf decode of each mode change stays small.
+- `TabUpdate`, `PaneUpdate`: tabs, the pane manifest, and each pane's
+  `attention` and `program_status`.
+- `PaneAttentionChanged`: one pane's attention.
+- `GlobalAttentionUpdate`: every session on the server (§10).
+- `CwdChanged`, `RunCommandResult`: tab naming (§8).
+- `Timer`, `Mouse`, `PermissionRequestResult`, `Visible`.
+- `ModeUpdate`: `ModeInfo.session_name` (the source §10 depends on),
+  `ModeInfo.mode` for the `show_mode` footer label, and the theme palette.
+  Zellij re-sends it to the newly active tab on every tab switch, so a
+  revealed rail's label is current.
+- `InitialKeybinds`, which is never handled. Subscribing to it is Zellij's
+  opt-out that strips the full keybinding table from every `ModeUpdate`, so
+  the per-instance protobuf decode of each mode change stays small.
+
+**Event routing.** Zellij delivers `TabUpdate`, `PaneUpdate`, and `ModeUpdate`
+only to the plugins in each client's *active* tab. `PaneAttentionChanged`,
+`GlobalAttentionUpdate`, `CwdChanged`, and pipe messages reach every
+subscribed instance. A hidden rail therefore keeps each pane's attention
+current, but its tabs, topology, and child records wait for the manifest its
+reveal brings.
 
 **Tab index footgun.** `TabInfo.position` is 0-indexed; `switch_tab_to` is
 1-indexed. `display_tab_number = position + 1` is used for both rendering and
@@ -332,21 +282,26 @@ clicks.
 **Click targeting.** `render_rail()` emits ANSI plus same-height target and
 hotspot maps (`CONTEXT.md` → *Lockstep*). Header, folded-idle strip, and gap
 rows map to nothing; a tab's header line maps to `SwitchTab`; pane lines map
-to `ShowPane`. The runtime caches the latest `RenderedRail` and resolves
-clicks against it rather than replaying layout math in the host glue.
+to `ShowPane`; peer-session lines map to `SwitchSession`. The runtime caches
+the latest `RenderedRail` and resolves clicks against it rather than replaying
+layout math in the host glue. Hotspots ride the same `Line` records that
+derive ANSI and targets, so they cannot desynchronize; only the glyph's own
+cells trigger. Right-click is blocked upstream
+([zellij#5350](https://github.com/zellij-org/zellij/issues/5350)).
 
-**Broadcast, not `--plugin`.** Broadcasting by name means adapters never create
-UI panes, never need the plugin's URL, and reach every running instance. A
-`--plugin` destination can also load the plugin if it is not running, and
-routing across same-plugin instances is fiddly.
+**Command verbs.** `cmd.v1` verbs (`PluginRuntime::control`) are inert on a
+hidden rail. A keybind's `MessagePlugin` reaches every tab's rail, and a
+hidden rail's frozen tabs still mark its own tab active, so letting it act
+would race the visible rail's `SwitchTab` with a wrong one
+([#89](https://github.com/marktoda/zj-radar/issues/89)).
 
 **Layout is the integration seam.** The sidebar is a borderless left column
 inside a vertical split, outside `children`, so `swap_tiled_layout` cycling
-never disturbs it (0.44.3 has the pop-out fix). The tab templates are the only
-native place Zellij pins a pane into every tab, so radar integrates like
-zjstatus: the user adds one pane to their templates. `setup zellij` installs
-the wasm at a stable path and manages a `radar` alias in `config.kdl`, so the
-per-layout snippet is path-free.
+never disturbs it. The tab templates are the only native place Zellij pins a
+pane into every tab, so radar integrates like zjstatus: the user adds one pane
+to their templates. `setup zellij` installs the wasm at a stable path and
+manages a `radar` alias in `config.kdl`, so the per-layout snippet is
+path-free.
 
 ```kdl
 default_tab_template {                       // layout-defined tabs fill `children`
@@ -383,300 +338,190 @@ with nothing, so Zellij spawns no terminal for it
 ([zellij#5618](https://github.com/zellij-org/zellij/issues/5618)) — the tab
 opens with the rail alone (*Selectability* above is what keeps such a tab,
 and the session, alive). `layout::empty_tab_bodies` names those tabs for the
-doctor and `--inject`. Plugin nodes stay on their own lines: Zellij 0.44's KDL
-parser rejects a one-line `{ plugin location="radar" }` without a trailing `;`.
+doctor and `--inject`. Plugin nodes stay on their own lines: Zellij's KDL
+parser rejected a one-line `{ plugin location="radar" }` without a trailing
+`;` (seen on 0.44).
 
-## 7. Agent adapters
-
-- **Claude Code**: a Claude plugin (`plugins/zj-radar-claude/`) whose hooks
-  call `scripts/notify.sh`, which prefers `zj-radar notify claude` when the
-  binary is on `PATH` and otherwise runs its own `bash`+`jq` path. The hooks
-  register with the plugin; no `settings.json` editing.
-- **Codex**: `zj-radar setup codex` installs marker-owned command hooks in
-  `hooks.json`; Codex sends hook JSON on stdin and `zj-radar notify codex`
-  maps it. The legacy single-slot `config.toml` `notify` path stays behind
-  `--legacy-notify` and can only emit `done`.
-- **Opencode**: `zj-radar setup opencode` drops two marker-owned JS bridges
-  into opencode's auto-loaded plugins dir: a 1.x server plugin file
-  (`zj-radar.js`) and a 2.x TUI plugin directory (`zj-radar/tui.js`). Each
-  line ignores the other's shape. Both pick the status class (they know which
-  event fired) and spawn `zj-radar notify opencode --status <s>` with the
-  payload on stdin, using one shared `event` vocabulary; the Rust adapter owns
-  every refinement (tool activity, task capture, the trailing-question remap,
-  the blank-permission backstop), so the JS never grows a second classifier
-  and an opencode API change lands in JS only. Bridge behavior: events from
-  subagent (task-tool) sessions are ignored; the user's own prompt text is
-  never mistaken for assistant text; sends are async only (the bridge runs in
-  opencode's process and must not freeze the TUI), one child at a time, with
-  a hard ~10 s kill timer per child; status edges are strictly FIFO while
-  `running` refreshes coalesce to the latest unsent one. The 2.x bridge is a
-  *TUI* plugin on purpose: 2.x runs one shared, detached background server per
-  machine whose environment is the first launching pane's, so a server plugin
-  would pin every session to one stale `$ZELLIJ_PANE_ID`; the TUI process is
-  the pane, knows which sessions it shows (router + tabs), and dies with it.
-  The `ZJ_RADAR_OPENCODE_PLUGIN=<v>` header marker family is what
-  idempotency, `--uninstall`, and `--check` key on; a foreign plugin file is
-  refused unless `--force`. Because opencode is an instrumented agent
-  (`AGENT_NAMES`), its panes are never command-tracked; without the bridge
-  they show nothing.
-- **pi**: `zj-radar setup pi` vendors a marker-owned bridge extension to pi's
-  auto-loaded extensions directory (`~/.pi/agent/extensions/zj-radar.js`, or
-  `$PI_CODING_AGENT_DIR/extensions/`); pi auto-loads it, so a restart or
-  `/reload` picks it up. The extension spawns `zj-radar notify pi --status <s>`
-  off pi's own hook events and reports only in the interactive TUI
-  (`ctx.mode === "tui"`); the `ZJ_RADAR_PI_EXTENSION=<v>` marker is what
-  idempotency, `--uninstall`, and `--check` key on. Because pi is an
-  instrumented agent (`AGENT_NAMES`), its panes are never command-tracked;
-  without the extension they show nothing. The command observer's node/bun
-  peel (`command::classify`, matching a hosted script's basename against
-  `AGENT_NAMES`) is what recognizes a globally-installed `pi` (`node
-  .../bin/pi`) — or an npm-installed Codex (`node .../codex.js`) — as the
-  agent rather than an anonymous `node` command.
-- **omp**: `zj-radar setup omp` vendors a sibling of the pi bridge to omp's
-  user extensions directory (`~/.omp/agent/extensions/zj-radar-omp.js`,
-  resolved like omp's own profile / `$PI_CONFIG_DIR` / `$PI_CODING_AGENT_DIR`
-  rules). It speaks the pi bridge's wire vocabulary (`agents/omp.rs` reuses
-  pi's event table), translating omp's different event surface: `agent_end`
-  without `willContinue` is the settle, the `ask` tool and `tool_approval_*`
-  become `ui_prompt.*`, and `session_switch{new}` is the reset. omp rebinds
-  every extension into each subagent session (`ctx.agent.kind === "sub"`), so
-  the bridge forwards only the main session's lifecycle plus any session's
-  blocking dialogs; its queue lives on `globalThis` because module globals are
-  shared across those bindings. The `ZJ_RADAR_OMP_EXTENSION=<v>` marker is
-  what idempotency, `--uninstall`, and `--check` key on.
-
-**Two install surfaces, two answers.** Claude Code has a plugin system that
-bundles hooks, so a plugin is the right shape: one install command, clean
-uninstall, no user-file surgery. Codex, Opencode, pi, and omp have hook or plugin
-surfaces but no marketplace, so `zj-radar setup` edits their native config.
-The rules the installer keeps (`crates/cli/src/setup/`): strip-own-then-re-add
-keyed on a marker string, so re-runs are idempotent and `--uninstall` removes
-only ours; refuse to write a file that exists but does not parse; atomic
-writes; diff preview with `--yes` and `--dry-run`.
-
-Adding an agent: an `enum Agent` variant in `crates/cli/src/agents/` plus
-`Agent::derive`; its `source()` string is shared by the CLI argument, the wire,
-and `Kind::from_source`, pinned by `source_round_trips_through_kind`.
-
-## 8. Timer and cadence
+## 6. Timer and cadence
 
 Zellij's timer is one-shot, so the plugin re-arms it each fire at one of three
 speeds or not at all (`PluginRuntime::desired_cadence`):
 
-- **Fast (1 Hz)** while there is tick-windowed work: the permission flow still
-  live; a spinning glyph (`TrackedObservation::animating`, Running and not a
-  service); an un-carried completion edge (a status-pipe notify deferred to
-  the timer because its own focus cannot be trusted, see *Settle* in
-  CONTEXT.md); a command `Done` awaiting its TTL recede; an active flash; a
-  pending cross-session cycle selection awaiting its idle-commit; and the
-  scheduled one-shots (promotable pendings awaiting debounce, tentative Dones
-  awaiting confirm, stale-Running grace clocks).
+- **Fast (1 Hz)** while there is tick-windowed work: the permission request
+  still in flight; a spinning glyph (`TrackedObservation::animating`: Running
+  and not steady); an active ping flash (two ticks after a pane flips to
+  Pending); and a pending cross-session cycle selection awaiting its
+  idle-commit.
 - **Frame (`spinner_fps`, default 4 Hz)** is Fast subdivided for the
   spinner, used instead of Fast only while this rail is visible, granted, and
   something spins at full speed (animating and not yet eased,
   `RadarState::has_full_speed_spinner`). Each fire advances the render-only
   `frame` clock and repaints; the full tick runs only once the fires'
-  reported elapsed adds up to a second, so `tick` keeps meaning seconds for
-  every grace/TTL/interval clock. Only a Slow arm is ever topped up (to Fast
-  or Frame): two sub-second fires in flight could not be told apart by
-  elapsed, so a Fast↔Frame switch waits for the in-flight fire. Hidden rails,
-  eased long-runners, and `spinner_fps 1` stay on plain Fast.
+  reported elapsed adds up to a second, so `tick` keeps meaning seconds.
+  Only a Slow arm is ever topped up (to Fast or Frame): two sub-second fires
+  in flight could not be told apart by elapsed, so a Fast↔Frame switch waits
+  for the in-flight fire. Hidden rails, eased long-runners, and
+  `spinner_fps 1` stay on plain Fast.
 - **Slow (once a minute)** once none of that holds but a minute-granular age
-  is still changing (an unsaturated ledger entry or pending wait tag), and
-  unconditionally while `own_session_name` is known, because the Slow tick's
-  heartbeat is what keeps the presence file's mtime fresh for peers (§13).
-- **Disarmed** in two shapes: pre-name (no `ModeUpdate` has delivered a
-  session name and every age has saturated) and denied (a permission-denied
-  rail disarms unconditionally, since no clearing event will ever arrive).
+  is still changing (an unsaturated ledger entry or pending wait tag).
+- **Disarmed** in two shapes: idle (every age has saturated) and denied (a
+  permission-denied rail disarms unconditionally, since no clearing event will
+  ever arrive).
 
-Service, remote, and interactive rows never pin Fast. A dev server, an ssh
-session, or an editor left open overnight costs zero ticks. A backgrounded `done`/`error`/`pending` row
-is terminal: once its one-shot settle has run it does not keep Fast alive.
+Steady rows never pin Fast: a `server` row or a remote session costs zero
+ticks. A long-running shell command is `Kind::Command`, not steady, so it
+spins and keeps Fast armed while it runs. A `done`, `error`, or `pending` row
+is terminal and does not keep Fast alive.
 
-## 9. Render gate
+## 7. Render gate
 
-Zellij delivers every broadcast, `CommandChanged`, and `CwdChanged` to every
-tab's instance, each running under a wasm interpreter, so one chatty producer
-multiplies across N tabs at interpreter prices. (`TabUpdate`, `PaneUpdate`,
-and `ModeUpdate` are different: Zellij 0.44 routes them to the plugins in
-each client's *active* tab only, so a hidden rail sees no manifest until its
-tab is revealed, at which point it converges from the fresh one.) Four layers
-keep repaints proportional to change:
+Zellij delivers every `PaneAttentionChanged`, `CwdChanged`, and pipe message
+to every tab's instance, each running under a wasm interpreter, so one busy
+pane multiplies across N tabs at interpreter prices. Three layers keep
+repaints proportional to change:
 
 1. **Intake no-ops.** An intake that changed nothing rows-visible reports a
-   default `RadarChange`: an identical status re-broadcast (producers
-   re-assert on every tool hook), an identical `TabUpdate`, a `CommandChanged`
-   that only touched the debounce maps, a `CwdChanged` (naming rides the
+   default `RadarChange`: an identical `TabUpdate`, a `PaneAttentionChanged`
+   that leaves the observation unchanged, a `CwdChanged` (naming rides the
    `RenameTab` effect's own `TabUpdate` echo).
-2. **Label-only deferral.** A Running → Running relabel on an animating row
-   neither renders nor persists inline: the Fast tick is armed and repaints
-   unconditionally, so the label lands within a second and the snapshot write
-   rides the tick's flush. Only while animating: a rewritten Pending question
-   renders now, and so does a running service's label, since neither pins
-   Fast.
-3. **Rows-diff gate.** `project` drops a requested render whose content key
-   (rows, ledger lines, badge, theme) equals what the last `render()` drew
-   (`last_render_key`). `force_render` bypasses it for timer frames and config
-   overrides, which change the drawing without changing the key.
-4. **Visibility gate.** `Event::Visible(false)` (tab switch, tab close, layout
+2. **Rows-diff gate.** `project` drops a requested render whose content key
+   (rows, ledger lines, badge, theme, shown mode) equals what the last
+   `render()` drew (`last_render_key`). Every `PaneUpdate` requests a render;
+   this gate drops the identical ones. `force_render` bypasses it for timer
+   frames and config overrides, which change the drawing without changing the
+   key.
+3. **Visibility gate.** `Event::Visible(false)` (tab switch, tab close, layout
    apply, client detach) marks the instance hidden: it paints nothing, ticks
-   included. Nothing else changes — state keeps ticking at full cadence (the
-   stores' grace clocks count ticks, so a slowed hidden instance would drift
-   from its siblings until reveal) and snapshot writes follow pane
-   ownership (§5), not visibility. `Visible(true)` force-renders the skipped
-   frame. Zellij never sends `Visible` at load, so an
-   instance starts visible, and any manifest it receives (which only reach
+   included. Nothing else changes: state keeps ticking at full cadence, so a
+   hidden instance never drifts from its siblings. `Visible(true)`
+   force-renders the skipped frame. Zellij never sends `Visible` at load, so
+   an instance starts visible, and any manifest it receives (which only reach
    active-tab plugins) also clears the flag — the bias is toward painting,
    since a wrongly hidden rail would be a stale screen. Under the interpreter
    the paint is over 95 % of a tick's cost, so this is what makes N tabs cost
    about one.
 
-Underneath all four: `RadarState::generation` (bumped by every mutator of
+Underneath all three: `RadarState::generation` (bumped by every mutator of
 anything `rows()` reads) and the `rows()` memo keyed on `(generation, the
 tabs mid-flash)` — the tick reaches a row only through the ping flash.
-One roll-up per event, shared by the presence derive, the gate compare, and
+One roll-up per event, shared by the own-counts derive, the gate compare, and
 the render. A missed `touch()` is a stale-rail bug, not a slow one.
-`tools/wasm-fuel` measures every layer in the interpreter's own unit
-(`CONTRIBUTING.md` → *Measuring plugin cost*).
 
-## 10. Running exit grace (producer death)
+## 8. Tab naming
 
-A pushed producer fires no hook when it quits, so its last status would linger
-forever. The model: (agent argv present, manifest `exited` = false) means
-alive; `exited` means dead. Three paths converge:
+zj-radar names tabs, push-sourced. `TabNamer` takes the top of one ordered
+candidate list (`name_candidates`):
 
-- **Prompt return.** When the observed layer sees the pane at a shell prompt
-  (`command::is_shell_prompt`: no foreground command, or a shell program),
-  `RadarState` clears a terminal status (`done`/`pending`/`error`) to idle.
-  A `Running` is not cleared at once, because a live turn's foreground can
-  flicker through the shell; it arms a grace clock
-  (`RUNNING_SUSPECT_GRACE_TICKS`, about 15 Fast ticks). If the clock expires,
-  `expire_stale_running` clears the row. Zellij reports a childless pane-root
-  shell with `is_foreground: false`, so that shell-name form is the real
-  prompt-return edge; a non-shell wrapper argv with `is_foreground: false` is
-  weak evidence and never starts the clock.
-- **Live-again evidence.** The agent's exe reappearing as the foreground
-  command cancels the clock (`cancel_running_suspect`). Other commands do not
-  vouch: a command run in the shell an agent died in must not keep its ghost.
-- **Definitive death.** The manifest's `exited` flag is death, full stop. An
-  agent-rooted pane (`zellij run -- claude`) never shows a shell prompt, so
-  `StatusStore::clear_on_exit` clears even a `Running` immediately.
+1. The focused pane's project name, then any pane's.
+2. The focused pane's cwd basename, then any pane's. A cwd inside an agent
+   worktree (`/.claude/worktrees/`, `/.Codex/worktrees/`) resolves to the
+   parent repo's basename.
+3. The focused pane's title, then any pane's (`PaneInfo.title`, with a
+   leading braille spinner and Zellij's `Pane #N` placeholder dropped).
 
-All three ride shared signals, so every instance clears: the broadcast and
-`CommandChanged` reach every rail at once, and the manifest-borne `exited`
-flag reaches a hidden rail with the manifest its reveal brings.
+**Manual names win.** Under `naming managed` (the default) the namer
+overwrites only a default `Tab #N` or a name it applied itself; `force`
+overwrites manual names too; `off` renames nothing. An applied name sticks
+while any pane still justifies it, so moving focus between panes in different
+repos does not flip the name.
 
-## 11. Tab naming
+**Project name.** `RadarState::rename_tabs` queues each new cwd of the
+instance's own tab once (`repo_names`), and the runtime emits
+`Effect::ResolveRepo` for it: an async `run_command` of
+`git -C <cwd> remote get-url origin`. The `RunCommandResult` comes back as
+`repo_resolved`; `repo_from_remote` takes the URL's last path segment without
+`.git`. A found name makes the tab re-pick once (`TabNamer::repick`), so a cwd
+basename already applied does not stick over it. A cwd with no remote, or
+whose path does not exist locally, keeps the basename. For a remote pane
+that is the basename of the remote cwd the pane reports.
 
-zj-radar owns tab naming, push-sourced. The candidate list, in order: the
-focused pane's repo (from the hook payload), any pane's repo, the focused or
-any pane's worktree-resolved cwd (from `CwdChanged` and the once-per-pane
-bootstrap), the focused or any pane's title (from `PaneInfo.title` in the
-manifest we already consume). `computed_name` takes the top; an applied name
-sticks while any pane still justifies it. `Managed` overwrites only a default
-`Tab #N` or a name the namer itself applied; `Force` overwrites manual names
-too.
+**Cwd.** Cwds arrive from `CwdChanged`. A freshly opened pane that has not
+sent one yet gets one `Effect::ResolveCwd` read (`get_pane_cwd`), focused
+panes first, at most `MAX_CWD_BOOTSTRAP_PER_UPDATE` (8) per manifest, never
+repeated for the same pane id. The bootstrap is skipped under `naming off`.
 
-Renames are `rename_tab_with_id` (stable `TabId`, never position) and fire
-only on change. Write authority is per tab: each instance learns its own
+**Write authority is per tab.** Renames are `rename_tab_with_id` (stable
+`TabId`, never position) and fire only on change. Each instance learns its own
 plugin pane's position from `PaneUpdate`, correlates it once with `TabUpdate`,
-and retains the `TabId`; it emits no renames until that resolves, and an
-onboarding instance never owns a tab. This stops a stale background instance
-from applying its private history to another tab after navigation, and keeps
-close/reorder events from redirecting ownership. The cwd bootstrap stays
-session-wide because the cwd also stamps `repo` on observed commands, which
-every instance must agree on for the notification claim key.
+and retains the `TabId`; it emits no renames until that resolves. This stops a
+stale background instance from applying its private history to another tab
+after navigation, and keeps close/reorder events from redirecting ownership.
 
-## 12. Ledger
+**In-flight guard.** `TabNamer` remembers the name a tab showed when a rename
+was sent (`in_flight`). Until that name changes (the echo, a manual rename),
+it does not send the same rename again: a duplicate sent before the echo could
+land after a manual rename and overwrite it.
+
+## 9. Ledger
 
 The completion history: a fixed-cap ring (`LEDGER_CAP` = 32, newest first)
 rendered as the rail's `─ earlier ─` region, at most ten entries shown.
-`ledger.rs` is pure data and policy; `RadarState` wires the edges; the
-renderer consumes prepared `LedgerLine`s.
+`ledger.rs` is pure data and policy; `RadarState::ledger_native` files
+entries; the renderer consumes prepared `LedgerLine`s.
 
-**Entry rule.** An observation enters when it stops being a card fact, never
-before: TTL recede of a command `Done`, the prompt-return clear, an overwrite
-by a new broadcast (including the `/clear` idle), or a prune (captured against
-the pre-close topology so it ledgers under the tab it was shown on).
-`Pending` and `Running` never enter. A command completion shadowed by a status
-observation for the same pane never enters either: `resolve`'s
-status-over-command precedence means it was never on the card, and the status
-source's own completion will ledger instead. The shadow is read at recede
-time, not onset.
+**Entry rule.** A completion enters when it leaves the card, never before
+(`RadarState::native_changed`):
 
-**Convergence.** Every entry edge is a signal every instance receives. Snapshot
-v3 carries the ledger; on load, `Ledger::merge` unions two rings by
-nearest-neighbor match on `(pane, outcome, label)` within 4 s, keeping the
-later stamp, so two instances that saw the same completion a beat apart
-collapse to one row.
+- a `Done` or `Error` observation whose status changes (including Zellij
+  marking it seen, which reads idle);
+- a pane that leaves the manifest while showing one, filed under the tab it
+  was last seen in;
+- a `remembered` completion that never showed as the status (a focused pane,
+  §4.3).
 
-**Timestamps.** Entries stamp completion-time epoch seconds, not ticks (ticks
-are per-instance). Rendered age is relative and freezes at `1h+`. That
-saturation is what lets the idle timer fully disarm instead of ticking once a
-minute forever to redraw an age that will never change. A line's tab position
-is a live lookup, so a closed tab's line is click-inert rather than forgotten.
+`Pending` and `Running` never enter. The label is Zellij's text without its
+`done: ` / `failed: ` head. `Ledger::push` drops an entry equal to one
+already present (same pane, outcome, and label within `MERGE_WINDOW_S`, 4 s),
+which is what merges two edges reporting the same completion.
+
+**Unfiled completions.** A hidden rail can hear `PaneAttentionChanged`
+before it has any manifest, so it cannot name the pane's tab. Such entries
+wait in `RadarState::unfiled` and are filed once a manifest and the tabs seat
+the pane.
+
+**Memory only, per instance.** Nothing is persisted or shared. Every instance
+receives the same `PaneAttentionChanged` edges, so their ledgers converge in
+practice. A new tab's instance starts empty, apart from the completions
+Zellij still reports as `remembered`.
+
+**Timestamps.** Entries stamp the completion's epoch seconds from Zellij's
+`since_ms`, not ticks (ticks are per-instance). Rendered age is relative and
+freezes at `1h+`. That saturation is what lets the idle timer fully disarm
+instead of ticking once a minute forever to redraw an age that will never
+change. A line's tab position is a live lookup, so a closed tab's line is
+click-inert rather than forgotten.
 
 **Display toggle (`ledger`, display-only).** `ledger false` empties what
-`PluginRuntime::shown_ledger` hands the render key, `render_rail`, and
-`natural_height`; recording, merging, and persisting are untouched, so `true`
-brings the history back. Hidden history is not content: with no tabs either,
-the rail shows the onboarding face.
+`PluginRuntime::shown_ledger` hands the render key and `render_rail`;
+recording is untouched, so `true` brings the history back. Hidden history is
+not content: with no tabs either, the rail shows the onboarding face.
 
-## 13. Cross-session badge
+## 10. Cross-session badge
 
-One session's rail shows counts for every other zj-radar session on the host,
-with click or cycle to switch, without ever calling Zellij's session list.
-Pure state in `sessions.rs`, file IO in `session_files.rs`, wiring in
-`runtime.rs`, render in `render.rs::render_session_badge` (headings) and
-`render_peer_children` (the `session_tree` tree).
+One session's rail shows counts for every other session on the Zellij server,
+with click or cycle to switch. Peers are pushed by Zellij's
+`GlobalAttentionUpdate`; Zellij also sends the current set when a plugin
+subscribes. `lib.rs` drops the current session and copies each peer into an
+`attention::PeerSession`:
 
-**Presence files.** Each plugin writes `zj-radar.presence.<zellij_pid>.json`
-(`v`, `session_name`, `running`, `attention`, `attention_tab_position`,
-`updated_epoch_s`, `tabs`) into the shared `/cache` root, temp-file plus atomic
-rename; the wire format is in [`producers.md`](producers.md#presence-file-and-state---json),
-the types in `crates/core/src/presence.rs`. Writes are content-edge-gated and
-withheld while `own_session_name` is empty. The gate compares a fingerprint
-over the published fields (`own_presence_fingerprint`, pinned by a lockstep
-test); the counts come from one `presence_counts` helper. `running` and
-`attention` count live status-origin panes only; command activity is excluded.
-The local rail's rows, header badge, and footer stay tab-level summaries.
+- `working` is Zellij's working count; `needs_you` is its needs-you plus
+  failed counts.
+- Items are the terminal panes with attention, with their tab id, tab name,
+  and attention.
 
-**Tabs are always published.** `tabs` is `[{position, name, panes: [{pane_id,
-origin, kind, status, label}]}]` over tracked panes (agents and observed
-commands), status-origin first so the 16-pane cap drops commands before
-agents. Caps are 64 tabs, 16 panes per tab, 96-char labels. `Presence::parse`
-truncates over-cap content and rejects the whole file if any field fails to
-survive `payload::sanitize` unchanged. `zj-radar state` is why the tree is
-unconditional: it is a public read surface, and `session_tree` is display-only.
+`PeerSession::summary` folds that into the badge's `SessionSummary` (tabs in
+first-seen item order, bounded by `MAX_TABS` and `MAX_PANES_PER_TAB`, labels
+sanitized), and `PluginRuntime::global_attention_changed` hands the set to
+`Sessions::update_global`. Zellij owns liveness: a session it reports is live,
+one it stops reporting is gone, so there is no file IO and no staleness
+grading.
 
-**Single writer: the presence-writer token.** Content must come from the rail
-with the freshest topology, and that is the most recently active one: Zellij
-sends `TabUpdate`/`PaneUpdate` only to the active tab's plugins, so a hidden
-rail's tab/pane view is frozen (a pane opened elsewhere after the user left is
-invisible to it). The token `zj-radar.<pid>.presence-writer` sits next to the
-presence file in the shared root and holds the writer's plugin id. A rail
-claims it (`Effect::ClaimPresenceWriter`) whenever it is the active view and
-knows its session name: when the name is first learned (`ModeUpdate`, which
-also reaches only the active tab), on `Visible(true)`, and on every manifest.
-A nameless rail never claims: presence writes are withheld without a name, so
-a rail loaded in a background tab (no `ModeUpdate` yet) holding the token
-would drop the active rail's edges. A claim of a token already held is one
-small read; a takeover rewrites the token and republishes the new holder's
-view (`PluginRuntime::presence_writer_acquired`), since the file holds another
-rail's, and the glue skips the batch's own content write after it. Every rail
-whose content fingerprint moved emits the content edge, and
-`SessionFiles::persist_presence` writes it only for the holder (one token read
-per edge). After a detach the last-active rail keeps the token, so a detached
-session keeps publishing status edges against its at-detach topology. Two
-clients on different tabs are both fresh, so either may hold it: a manifest
-claim leaves a foreign token younger than 5 s alone
-(`PRESENCE_WRITER_TAKEOVER_FLOOR`), which stops them trading it on every
-manifest, while a reveal or first naming preempts. The token is pid-scoped
-like the snapshot, so the snapshot sweep owns it and no presence read path
-ever sees it; because a stable holder never rewrites it, the sweep ages it by
-its session's presence file (heartbeated), not its own mtime. The cost is
-about +230k wasm fuel per real status edge on the writing rail (the tree
-serialize); non-holders pay the fingerprint and one token read.
+This session's own row is `Sessions::set_own`, fed with counts derived from
+the rail rows (`summary_counts`: program-origin panes only, command rows
+excluded) whenever the radar generation moves. The local rail's rows, header
+badge, and footer stay tab-level summaries. Pure state in `sessions.rs`,
+wiring in `runtime.rs`, render in `render.rs::render_session_badge`
+(headings) and `render_peer_children` (the `session_tree` tree).
 
 **Session tree (`session_tree`, display-only).** The option only decides
 whether this rail draws peers' trees. Off, `Sessions::set_show_trees` drops
@@ -688,108 +533,77 @@ they get only the height left after the planned cards and the bottom region
 (footer, plus the ledger when present), so a large peer can never fold a local
 tab or push the ledger off.
 
-**Liveness is the mtime, graded fresh → stale → dead.** A live session
-rewrites its file about every 60 s (`PRESENCE_HEARTBEAT_S`, a level trigger
-in `project` that bypasses the content gate and, unlike the snapshot, the
-visibility gate: a detached session is alive). Every tab's instance runs that
-clock against the one pid-keyed file, so the heartbeat is a
-`PersistPresence` with an `unless_fresher_than` window the host honors by
-stat. The token holder leaves a file younger than a quarter of the interval
-alone, which keeps its worst-case write gap (one period plus one window, 75 s)
-under the 90 s stale threshold; its content edges write unconditionally.
-Followers do heartbeat, but only as a rescue: a non-holder's heartbeat or
-content edge writes only when the file is older than `PRESENCE_RESCUE_AFTER`
-(75 s, the holder's worst-case gap), so a stale hidden view never overwrites a
-live holder, yet a session whose holder vanished (instance died, or a closed
-tab's rail with no tab activated since) still refreshes within 135 s: it may
-dim briefly but is never reaped. Peers read the directory on every
-Slow (60 s) tick, and on every fifth Fast tick except mid-cycle; the Slow read
-is what lets an idle rail grade a peer at all, since ages are captured at read
-time. `Sessions::update_presences` grades each file's age: fresh (≤ 90 s),
-stale (90–300 s: dimmed, unreachable
-by cycling since switching onto a dead session would have Zellij resurrect it
-as an empty zombie), dead (≥ 300 s, five missed heartbeats: reaped and the
-file unlinked via `Effect::DismissPresence`). Dimming stays twitchy because it
-is reversible; the reap waits for overwhelming evidence because it deletes a
-file. A false reap after a machine-sleep wake is harmless: the live session's
-next heartbeat republishes. The `✕` glyph is the manual dismiss for a
-stale-not-yet-dead entry. A 6 h sweep at `load()` deletes unparseable debris
-the reap cannot name.
-
-**Why not `SessionUpdate`.** E2E against Zellij 0.44.3 showed `SessionUpdate`
-only delivers peers after some plugin has called the blocking
-`get_session_list()`, which nothing here does and which would violate §1.
-Presence is peer-published and liveness is mtime-based; there is no roster to
-keep in sync. The session's own name arrives push-style via
+**Why not `SessionUpdate`.** At the pinned Zellij rev, `SessionUpdate`'s peer
+list is refreshed only on request: a plugin calling the blocking
+`get_session_list()`, or a client asking for the session list
+(`Screen::update_session_infos`). Nothing here asks, and asking would break
+§1. `GlobalAttentionUpdate` is pushed and already carries each peer's counts
+and attention panes. The session's own name arrives push-style via
 `Event::ModeUpdate`, and may legitimately be `None` before Zellij assigns one.
 
 **Badge.** `Sessions::badge()` is re-derived on every call. It renders zero
 lines while only the current session is known; from two entries on, one line
-per session in the order shared with cycling: current first, then fresh peers
-with attention by name, then the rest of the fresh peers, then stale peers (a
-stale attention count is not actionable, so staleness outranks attention).
-Each line shows the name plus running and attention counts when nonzero. The
-current line carries an accent `•` and no click target. A pending cycle
-selection renders bold; a stale entry renders dimmer with a `✕` hotspot.
+per session in the order shared with cycling: current first, then peers with
+attention by name, then the rest by name. Each line shows the name plus
+running and attention counts when nonzero. The current line carries an accent
+`•` and no click target. A pending cycle selection renders bold.
 
-**Hotspots.** The renderer attaches glyph metadata to the same `Line` records
-that derive ANSI and targets, so they cannot desynchronize. `✕` on a stale
-badge line; `✓` on a tab header or pane line with an unacknowledged
-status-origin Pending. Only the glyph's own cells trigger. Right-click keeps
-the same whole-row actions for parity but is blocked upstream
-([zellij#5350](https://github.com/zellij-org/zellij/issues/5350)).
+**Switching.** A click on a peer line, or a cycle commit, emits
+`Effect::SwitchSession`. Peer tab positions are ordinals, not Zellij
+positions, so the arrival focus is the first pane waiting on the user, by
+pane id (`switch_session_with_focus`).
 
 **Cycling.** `session-next` / `session-prev` on the `cmd.v1` pipe advance a
-highlight through the shared order, wrapping, with stale peers excluded. A tap
+highlight through the shared order, wrapping. A tap
 only moves the highlight and sets a "tap landed" flag; `Sessions::tick` runs
 on every timer fire while a selection is pending, and a fire whose interval
 saw a tap clears the flag and skips. Only a fire whose whole interval was
 tap-free commits, so the commit lands at least one quiet interval after the
 last tap. The target is re-resolved by session name, never list position, so
-peers joining or leaving mid-cycle cannot retarget it; a selection that went
-stale is dropped. Landing back on the current session cancels. A commit emits
-`Effect::SwitchSession { name, tab_position }`.
+peers joining or leaving mid-cycle cannot retarget it; a selection whose
+session vanished is dropped. Landing back on the current session cancels.
 
-**Degradation.** No writable shared root means no presence file, no peer
-reads, and no badge. Everything else is unaffected, the same way persistence
-being unavailable degrades only rehydration.
+## 11. Setup analysis (CLI)
 
-## 14. Setup analysis (CLI)
+`zj-radar setup` learns the world through a pure
+`analyze_zellij(&ZellijEnv) -> ZellijFacts` in
+`crates/cli/src/setup/analyze.rs`, fed already-read values by the IO shell.
+`ZellijFacts` is the single home for derived facts: alias present (managed vs
+unmanaged, store path), wasm present, rail injected, body-less tabs, grant
+present, config managed, and the Zellij version checked against
+`MIN_SUPPORTED_ZELLIJ`. Both consumers project from it: `zellij_check_items`
+renders `--check`, and the install orchestrator gates on it. The pure mutator
+(`edit_zellij` → `Outcome`) shares only the low-level detectors in
+`setup/detect.rs`.
 
-`zj-radar setup` learns the world through pure `analyze_*(&Env) -> *Facts`
-functions in `crates/cli/src/setup/analyze.rs`, each fed a thin `Env` of
-already-read values by the IO shell. `Facts` is the single home for derived
-facts: alias present (managed vs unmanaged), rail injected, grant present,
-producer wired, Codex hooks/notify state, opencode plugin ownership, pi
-and omp extension ownership. Both
-consumers project from it: `*_check_items` renders `--check`, and the install
-orchestrators gate on it. The pure mutators (`edit_*` → `Outcome`) share only
-the low-level detectors in `setup/detect.rs`. The legacy-notify vs hooks
-choice is a flag the consumer projects on, never a fact.
+`zellij` is the only target. Agents need no setup, and naming a former agent
+target (`claude`, `codex`, `opencode`, `pi`, `omp`) fails with a hint on how
+to remove an old adapter.
 
-## 15. Build and packaging
+## 12. Build and packaging
 
-- Rust, `zellij-tile = "0.44"`, target `wasm32-wasip1`. The artifact is a
-  binary crate, not `cdylib`: Zellij loads plugins as WASI command modules and
-  calls `_start`, which `register_plugin!`'s generated `main` provides.
+- Rust, `zellij-tile` pinned to a Zellij git rev at `=0.46.0` (0.46 is not on
+  crates.io yet), target `wasm32-wasip1`. Text-pin tests in `lib.rs` keep
+  `MIN_SUPPORTED_ZELLIJ` and the e2e workflow's `ZELLIJ_REV` on that pin. The
+  artifact is a binary crate, not `cdylib`: Zellij loads plugins as WASI
+  command modules and calls `_start`, which `register_plugin!`'s generated
+  `main` provides.
 - Zellij runs one instance per tab per attached client (a detached client's
   instances linger hidden), each under the wasmi interpreter with its own
   linear memory, so per-instance fixed cost is paid N times. The
   release profile optimizes for size, `crates/plugin/build.rs` shrinks the
   WASI shadow stack (the bulk of initial memory) to 256 KiB, and the flake
   runs binaryen's `wasm-opt -Oz` over the release wasm, which executes
-  measurably fewer instructions than rustc's output alone. Per-event
-  interpreter cost is measured in fuel by `tools/wasm-fuel`
-  ([`CONTRIBUTING.md`](../CONTRIBUTING.md#measuring-plugin-cost)).
+  measurably fewer instructions than rustc's output alone.
 - The dev loop never reloads in place (Zellij does not safely hot-reload
   layout-created plugins); every `just dev` is a fresh sandboxed session
   ([`CONTRIBUTING.md`](../CONTRIBUTING.md#dev-loop)).
 - The flake builds the wasm hermetically with `crane`; `nix flake check` runs
   in CI. Consuming from Nix: [`install.md`](install.md#nix--home-manager).
-- Releases: one tag ships the wasm, static CLI tarballs, and the crates
-  ([`RELEASING.md`](../RELEASING.md)).
+- Releases: one tag ships the wasm and static CLI tarballs; the CLI crate is
+  published to crates.io by hand ([`RELEASING.md`](../RELEASING.md)).
 - `zj-radar update` moves the CLI and the wasm as one, because they share the
-  status contract and the setup expectations, and a hand-run upgrade of only
+  permission set and the setup expectations, and a hand-run upgrade of only
   one half is the drift that broke installs before. It replaces the binary
   first, then re-executes the *new* binary for `setup zellij --download`, so
   the wasm it fetches is its own version; the resolved tag travels with the
@@ -800,16 +614,14 @@ choice is a flag the consumer projects on, never a fact.
   forward only: refreshing the wasm to an older pin while the binary stays
   put would recreate the split.
 
-## 16. Non-goals and follow-ups
+## 13. Non-goals and follow-ups
 
-- **Floating dashboard overlay.** The inline badge (§13) is a few rail lines,
+- **Floating dashboard overlay.** The inline badge (§10) is a few rail lines,
   not a panel; the floating dashboard stays a non-goal.
 - **Launchable floating mode** (`LaunchOrFocusPlugin`). A different product:
   an on-demand peek, not an ambient column, and it would turn the passive
   renderer into an interactive panel with `Key` handling and focus grabs.
 - **Horizontal bar mode.** Would need a from-scratch compact renderer.
 - **Collapse-to-strip toggle.**
-- **Aider and other adapters.**
-- **Terminal-signal detection** (`is_alternate_screen` / `is_raw_mode` on
-  `PaneInfo`), the general interactive-program detector; see
-  `activity-model.md` §4.
+- **Agent-specific adapters.** An agent that does not emit OSC 7501 shows only
+  as a shell command; the fix belongs in the agent.

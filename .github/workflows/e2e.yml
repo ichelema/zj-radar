@@ -4,8 +4,8 @@ name: E2E
 #  - nightly, on both OSes — the broad regression net;
 #  - on every PR, ubuntu-only, so the required `e2e (ubuntu-latest)` check
 #    always reports. The suite itself runs only when the PR touches what E2E
-#    exercises (plugin + core + the notify.sh producer the harness drives, the
-#    toolchain/lockfiles, this workflow); otherwise the job passes after the
+#    exercises (the plugin, the toolchain/lockfiles,
+#    this workflow); otherwise the job passes after the
 #    `scope` step. A path filter on the trigger would skip the workflow, and a
 #    required check that never reports blocks the merge;
 #  - as a release gate: release.yml `uses:` this workflow via workflow_call,
@@ -21,6 +21,13 @@ on:
 
 permissions:
   contents: read
+
+env:
+  # Zellij 0.46 (the attention API the rail reads) is not released yet and
+  # nixpkgs has no build of it, so the suite runs against Zellij built from
+  # the same rev the plugin's zellij-tile pin uses (crates/plugin/Cargo.toml).
+  # Drop the build steps and this var once 0.46 ships in nixpkgs.
+  ZELLIJ_REV: 43c8710b3a9845f60d5a567c7410fc1197fabb66
 
 # A force-push to a PR shouldn't stack serial PTY suites; never cancel the
 # scheduled/release runs.
@@ -58,7 +65,7 @@ jobs:
           fi
           changed="$(git diff --name-only HEAD^1 HEAD)"
           printf '%s\n' "$changed"
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/plugin/|crates/core/|plugins/zj-radar-claude/scripts/|Cargo\.lock$|justfile$|flake\.nix$|flake\.lock$|\.github/workflows/e2e\.yml$)'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/plugin/|Cargo\.lock$|justfile$|flake\.nix$|flake\.lock$|\.github/workflows/e2e\.yml$)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -74,9 +81,21 @@ jobs:
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'Cargo.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
+      - uses: actions/cache@v4
+        id: zellij-cache
+        if: steps.scope.outputs.run == 'true'
+        with:
+          path: ~/zellij-git
+          key: zellij-git-${{ runner.os }}-${{ env.ZELLIJ_REV }}
+      - name: build zellij ${{ env.ZELLIJ_REV }}
+        if: steps.scope.outputs.run == 'true' && steps.zellij-cache.outputs.cache-hit != 'true'
+        run: cargo install --locked --git https://github.com/zellij-org/zellij --rev "$ZELLIJ_REV" zellij --root ~/zellij-git
       - name: live e2e (L5)
         if: steps.scope.outputs.run == 'true'
-        run: nix develop -c just test-e2e
+        # The git build goes ahead of the devshell's nixpkgs zellij on PATH.
+        # Set inside the devshell: an outer "$PATH" would expand to the
+        # runner's PATH and drop the devshell's (just, bats, …).
+        run: nix develop -c sh -c 'PATH="$HOME/zellij-git/bin:$PATH"; zellij --version && just test-e2e'
       - name: file a failure issue (nightly visibility)
         if: failure() && github.event_name == 'schedule'
         uses: ./.github/actions/nightly-failure-issue
