@@ -41,14 +41,10 @@ const BOLD: &str = "\x1b[1m";
 /// spinner eases from full speed to a slow two-frame blink (see
 /// `spin_glyph`). 600 ticks — the tick-driven render clock isn't wall-clock
 /// 1:1, but at typical UI tick rates this reads as "on the order of minutes".
-/// Honest only because `since_tick` is honest: `StatusStore::apply` preserves
-/// `last_change_tick` across a same-status re-broadcast
-/// (`status_store.rs::apply_sets_last_change_tick_only_on_status_change`) and
-/// `CommandStore` preserves it across a same-command re-promotion
-/// (`promotion_preserves_running_since_for_same_command`,
-/// `crates/core/src/command.rs`) — so a long-runner's `since_tick` reflects
-/// when the work truly started, not the last time it happened to re-announce
-/// itself.
+/// Honest only because `since_tick` is honest: `NativePane::observation`
+/// preserves `last_change_tick` across a same-status manifest — so a
+/// long-runner's `since_tick` reflects when the work truly started, not the
+/// last time Zellij happened to re-report it.
 pub const EASE_AFTER_TICKS: u64 = 600;
 
 /// Most pane lines a multi-pane tab renders before folding the remainder into

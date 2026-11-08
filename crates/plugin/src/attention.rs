@@ -163,9 +163,9 @@ impl NativePane {
                 exit_code: if origin == ObservationOrigin::Command { a.exit_code } else { None },
                 completed_epoch_s: status.is_completion().then_some(since_s),
                 pending_epoch_s: (status == Status::Pending).then_some(since_s),
-                // The `✓` gesture still speaks the status pipe (`Effect::BroadcastStatus`),
-                // which a native pane ignores: keep the hotspot off until it marks the pane seen.
-                acknowledged: true,
+                // The `✓` gesture marks the pane seen in Zellij (`Effect::MarkSeen`),
+                // which then stops reporting it Pending: the hotspot shows while it does.
+                acknowledged: false,
                 tasks: BgTasks { items, waiting: false },
             }
             .sanitized(),

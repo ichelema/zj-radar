@@ -131,17 +131,6 @@ but sends no tasks.
 **Fix:** install the CLI ([install](install.md)) and make sure it is on the
 `PATH` Claude Code starts with. The next hook picks it up.
 
-## An editor, pager, or TUI shows a spinning "Running" row
-
-**Symptom:** opening an interactive program makes its pane spin forever.
-
-**Why:** interactive programs are recognized by name, and this one is not in
-the built-in set.
-
-**Fix:** add its exe name to the `interactive_commands` option
-([configuration](configuration.md)). It applies live; the spinning row demotes
-to a muted label at once.
-
 ## An ssh/mosh session's disconnect notification fires for a clean logout too
 
 **Symptom:** a plain `exit`/`logout` from a remote session notifies

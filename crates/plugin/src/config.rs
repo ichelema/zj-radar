@@ -4,7 +4,7 @@
 //! live `config.v1` override — a typo must not clobber set state back to
 //! default), and unknown keys are ignored (forward-compatible).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// The live-override pipe. Payload is a JSON object of config keys (see
 /// [`overrides_from_json`]); breaking the payload shape means a new name.
@@ -171,24 +171,12 @@ pub struct Config {
     /// How background tasks show under an agent's pane row.
     pub task_lines: TaskLines,
     /// Whether the `─ earlier ─` completion ledger renders. Display-only: the
-    /// ring is recorded and persisted either way.
+    /// ring is recorded either way.
     pub ledger: bool,
     /// Set on the onboarding layout's rail instances: never fire our own
     /// permission request — wait for the floating onboarding pane to win the
     /// grant, so Zellij binds its prompt to the float, not the rail.
     pub defer_permission: bool,
-    /// The user's EXTRA interactive command names (editors/pagers/TUIs whose
-    /// panes never show a Running row — `docs/activity-model.md` §4). Extras
-    /// only, default empty: the effective set is composed as
-    /// `command::DEFAULT_INTERACTIVE ∪ extras` in `CommandStore` — holding the
-    /// seeded defaults here instead would let one configured entry silently
-    /// *replace* them (`config_fields!` assigns wholesale).
-    pub interactive_commands: BTreeSet<String>,
-    /// The user's EXTRA remote-session launcher names (`docs/activity-model.md`
-    /// §4). Extras only, default empty, exactly like `interactive_commands`:
-    /// the effective set composes as `command::DEFAULT_REMOTE ∪ extras` in
-    /// `CommandStore::set_remote_extras`.
-    pub remote_commands: BTreeSet<String>,
     /// Expand the cross-session badge into a session tree: each peer's tabs
     /// and agent rows under its heading (`render::render_peer_children`).
     /// Opt-in: off keeps the compact one-line-per-session badge.
@@ -222,8 +210,6 @@ impl Default for Config {
             task_lines: TaskLines::default(),
             ledger: true,
             defer_permission: false,
-            interactive_commands: BTreeSet::new(),
-            remote_commands: BTreeSet::new(),
             session_tree: false,
             show_mode: false,
             spinner_fps: DEFAULT_SPINNER_FPS,
@@ -243,20 +229,6 @@ fn parse_bool(v: &str) -> Option<bool> {
         "false" | "0" | "no" | "off" => Some(false),
         _ => None,
     }
-}
-
-/// Parse a comma/space-separated list of exe names into a set. Always `Some`
-/// (an empty value is a valid "no extras", so a live override can clear the
-/// list); entries are trimmed with any login-shell `-` prefix stripped, and
-/// empties dropped.
-fn parse_name_set(v: &str) -> Option<BTreeSet<String>> {
-    Some(
-        v.split([',', ' ', '\t'])
-            .map(|s| s.trim().trim_start_matches('-'))
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect(),
-    )
 }
 
 impl NamingMode {
@@ -318,8 +290,6 @@ config_fields! {
     header:              "header"              => parse_bool,
     ledger:              "ledger"              => parse_bool,
     defer_permission:    "defer_permission"    => parse_bool,
-    interactive_commands: "interactive_commands" => parse_name_set,
-    remote_commands:      "remote_commands"      => parse_name_set,
     session_tree:        "session_tree"        => parse_bool,
     show_mode:           "show_mode"           => parse_bool,
     spinner_fps:         "spinner_fps"         => parse_fps,
@@ -651,55 +621,5 @@ mod tests {
         assert_eq!(fps("0"), 1, "0 clamps up, never 'no ticks'");
         assert_eq!(fps("999"), MAX_SPINNER_FPS);
         assert_eq!(fps("fast"), DEFAULT_SPINNER_FPS, "garbage keeps the default");
-    }
-
-    #[test]
-    fn interactive_commands_default_is_empty_extras() {
-        // Extras ONLY — the built-in set lives in core and is composed in
-        // `CommandStore::set_interactive_extras`. Seeding defaults here would
-        // let one configured entry wholesale-replace them (the macro assigns,
-        // never merges).
-        assert!(Config::default().interactive_commands.is_empty());
-        assert!(Config::from_map(&map(&[])).interactive_commands.is_empty());
-    }
-
-    #[test]
-    fn interactive_commands_parses_commas_spaces_and_dashes() {
-        let c = Config::from_map(&map(&[("interactive_commands", "gdb, ssh  -tig,")]));
-        let got: Vec<&str> = c.interactive_commands.iter().map(String::as_str).collect();
-        assert_eq!(got, ["gdb", "ssh", "tig"], "split on commas/spaces, dash-stripped, empties dropped");
-    }
-
-    #[test]
-    fn interactive_commands_live_override_can_clear() {
-        // An empty value is a valid "no extras" — the one list-shaped key
-        // wants clearability, unlike enum keys where garbage keeps state.
-        let mut c = Config::from_map(&map(&[("interactive_commands", "gdb")]));
-        assert!(!c.interactive_commands.is_empty());
-        c.apply_overrides(&map(&[("interactive_commands", "")]));
-        assert!(c.interactive_commands.is_empty());
-    }
-
-    #[test]
-    fn remote_commands_default_is_empty_extras() {
-        // Extras ONLY — the built-in set lives in core and is composed in
-        // `CommandStore::set_remote_extras`, exactly like `interactive_commands`.
-        assert!(Config::default().remote_commands.is_empty());
-        assert!(Config::from_map(&map(&[])).remote_commands.is_empty());
-    }
-
-    #[test]
-    fn remote_commands_parses_commas_spaces_and_dashes() {
-        let c = Config::from_map(&map(&[("remote_commands", "distrobox, rsh  -sshpass,")]));
-        let got: Vec<&str> = c.remote_commands.iter().map(String::as_str).collect();
-        assert_eq!(got, ["distrobox", "rsh", "sshpass"], "split on commas/spaces, dash-stripped, empties dropped");
-    }
-
-    #[test]
-    fn remote_commands_live_override_can_clear() {
-        let mut c = Config::from_map(&map(&[("remote_commands", "distrobox")]));
-        assert!(!c.remote_commands.is_empty());
-        c.apply_overrides(&map(&[("remote_commands", "")]));
-        assert!(c.remote_commands.is_empty());
     }
 }

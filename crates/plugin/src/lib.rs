@@ -3,16 +3,15 @@
 //! # Shape
 //! - [`State`] is the per-tab plugin instance Zellij loads. It owns a
 //!   [`runtime::PluginRuntime`] (the host-testable state machine — pure apart
-//!   from wall-clock reads via `clock::now_epoch_s`; the stores it drives take
-//!   epochs as arguments, which is where determinism matters) and a
-//!   [`session_files::SessionFiles`] (snapshot + permission-marker persistence).
+//!   from wall-clock reads via `clock::now_epoch_s`) and a
+//!   [`session_files::SessionFiles`] (permission-marker persistence).
 //! - The `#[cfg(target_arch = "wasm32")] impl ZellijPlugin for State` block is the
 //!   only code that touches the Zellij host API; everything it calls is pure logic
 //!   in the modules below. Host tests exercise that logic without a wasm build.
 //! - The `#[cfg(test)] impl State` block holds test-only fixtures (`build_rows`,
 //!   …) that are never linked into the shipped wasm.
 //!
-//! The shared wire/classification types are re-exported from [`zj_radar_core`]
+//! The shared vocabulary types are re-exported from [`zj_radar_core`]
 //! (see below) so the modules here address them as `crate::status`,
 //! `crate::payload`, … with no per-reference churn at the crate boundary.
 
@@ -26,11 +25,7 @@
 
 // Re-export the shared core so the plugin glue and modules keep addressing these
 // as `crate::status`, `crate::payload`, … with no per-reference churn.
-pub(crate) use zj_radar_core::{command, kind, observation, payload, status, task};
-// `pipe` is consumed only by the wasm glue (`Effect::BroadcastStatus`), which
-// is cfg'd off host builds — an unconditional import would warn there.
-#[cfg(target_arch = "wasm32")]
-pub(crate) use zj_radar_core::pipe;
+pub(crate) use zj_radar_core::{kind, observation, payload, status, task};
 
 mod attention;
 mod clock;
@@ -50,7 +45,6 @@ mod rollup;
 mod runtime;
 mod session_files;
 mod sessions;
-mod status_store;
 mod tab_namer;
 #[cfg(test)]
 mod test_fixtures;
@@ -76,10 +70,8 @@ use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
 // Pipe names live with their vocabularies (host-testable, so the guard tests
-// in control.rs/lib.rs can pin them against docs and the bash producer);
-// these aliases just keep the match arms below short.
-#[cfg(target_arch = "wasm32")]
-const PIPE_NAME: &str = payload::STATUS_PIPE_NAME;
+// in control.rs/config.rs can pin them against the docs); these aliases just
+// keep the match arms below short.
 #[cfg(target_arch = "wasm32")]
 const CONFIG_PIPE: &str = config::CONFIG_PIPE;
 #[cfg(target_arch = "wasm32")]
@@ -232,9 +224,6 @@ impl State {
                 ]),
                 Effect::SetSelectable(selectable) => set_selectable(selectable),
                 Effect::SetTimeout(cadence) => set_timeout(cadence.seconds()),
-                Effect::PersistSnapshot => {
-                    self.session_files.persist_snapshot(|existing| self.runtime.snapshot_json(existing))
-                }
                 Effect::PersistPermissionMarker(marker) => self.session_files.persist_permission_marker(marker),
                 Effect::HeartbeatPermissionLock => self.session_files.heartbeat_permission_lock(),
                 Effect::RenameTab { tab_id, name } => rename_tab_with_id(tab_id.raw() as u64, &name),
@@ -255,37 +244,8 @@ impl State {
                     (None, None) => switch_session(Some(&name)),
                     _ => switch_session_with_focus(&name, tab_position, pane_id.map(|id| (id, false))),
                 },
-                Effect::BroadcastStatus { payload } => {
-                    // Same delivery every CLI producer already uses
-                    // (`crates/cli/src/notify.rs`'s `broadcast`): `zellij
-                    // pipe --name zj_radar.status.v1 -- <payload>`, spawned
-                    // via `run_command` (the `RunCommands` grant this plugin
-                    // already requests). The alternative considered —
-                    // zellij-tile's `pipe_message_to_plugin` — was rejected:
-                    // its `MessageToPlugin` addresses ONE destination plugin
-                    // (`destination_plugin_id`/`plugin_url`; see
-                    // zellij-utils 0.44.3's `data.rs`), not every instance
-                    // subscribed to a named pipe, so it can't fan out to
-                    // every tab's rail the way this gesture's convergence
-                    // requires. `zellij pipe` already does exactly that —
-                    // it's the same host route every producer's broadcast
-                    // takes, proven in production — and reaches THIS
-                    // instance too, which is the whole point: the click
-                    // itself mutates nothing (`Effect::BroadcastStatus`'s
-                    // doc), so this instance's own convergence rides the
-                    // echo like everyone else's.
-                    //
-                    // The spawned `zellij pipe` blocks until every rail
-                    // instance consumes the message, and the plugin's
-                    // `run_command` returns no handle — so the deadline rides
-                    // INSIDE the spawned subtree instead: the shared argv's
-                    // sleep+kill watchdog (`core::pipe`) reaps a client hung
-                    // on a wedged receiver (e.g. stuck at a permission
-                    // prompt), closing the orphaned-process leak this arm
-                    // previously documented as an accepted risk.
-                    let argv = crate::pipe::self_limiting_pipe_argv(&payload, crate::pipe::DEFAULT_PIPE_TIMEOUT_SECS);
-                    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-                    run_command(&args, std::collections::BTreeMap::new());
+                Effect::MarkSeen { session, pane_id } => {
+                    mark_session_pane_seen(&session, PaneId::Terminal(pane_id));
                 }
             }
         }
@@ -355,7 +315,6 @@ impl ZellijPlugin for State {
             EventType::TabUpdate,
             EventType::PaneUpdate,
             EventType::CwdChanged,
-            EventType::CommandChanged,
             EventType::Timer,
             EventType::Mouse,
             EventType::PermissionRequestResult,
@@ -392,18 +351,15 @@ impl ZellijPlugin for State {
             EventType::InitialKeybinds,
             // Tab shown / hidden (tab switch, close, layout apply, client
             // detach; never at load). A hidden rail skips its paints only;
-            // state, ticks, and snapshot writes carry on —
+            // state and ticks carry on —
             // `PluginRuntime::hidden` has the contract.
             EventType::Visible,
         ]);
-        // Seed from the shared snapshot so a tab opened after agents were already
-        // running shows their real status instead of a blank (all-idle) rail.
         let ids = get_plugin_ids();
         self.plugin_id = Some(ids.plugin_id);
         let session = SessionFiles::open(SessionFileIds { plugin_id: ids.plugin_id, zellij_pid: ids.zellij_pid });
         self.session_files = session.files;
-        let outcome =
-            self.runtime.load(config::Config::from_map(&config), session.snapshot.as_deref(), session.permission);
+        let outcome = self.runtime.load(config::Config::from_map(&config), session.permission);
         self.handle_outcome(outcome);
     }
 
@@ -447,8 +403,6 @@ impl ZellijPlugin for State {
                             is_floating: p.is_floating,
                             default_bg: p.default_bg,
                             default_fg: p.default_fg,
-                            exited: p.exited,
-                            exit_status: p.exit_status,
                             attention: Some(attention::NativePane {
                                 records: p
                                     .program_status
@@ -569,13 +523,6 @@ impl ZellijPlugin for State {
                 let outcome = self.runtime.attention_changed(id, native_attention(attention));
                 self.handle_outcome(outcome)
             }
-            Event::CommandChanged(pane_id, command, is_foreground, _clients) => {
-                if let PaneId::Terminal(id) = pane_id {
-                    let outcome = self.runtime.command_changed(id, &command, is_foreground);
-                    return self.handle_outcome(outcome);
-                }
-                false // plugin panes: nothing observed, nothing to repaint
-            }
             _ => false,
         }
     }
@@ -583,7 +530,6 @@ impl ZellijPlugin for State {
     fn pipe(&mut self, message: PipeMessage) -> bool {
         let Some(raw) = &message.payload else { return false };
         let outcome = match message.name.as_str() {
-            PIPE_NAME => self.runtime.status_pipe(raw),
             CONFIG_PIPE => self.runtime.config_pipe(raw),
             CMD_PIPE => self.runtime.control_pipe(raw),
             _ => return false,
@@ -601,25 +547,8 @@ impl ZellijPlugin for State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::payload::StatusPayload;
     use crate::status::Status;
-    use crate::test_fixtures::{pane, payload_for, tab};
-
-    /// The bash fallback producer can't import `payload::STATUS_PIPE_NAME`, so
-    /// its hand-typed literal is pinned here — one drifted character in a pipe
-    /// name is a silently dead producer, the least debuggable failure this
-    /// system has. (This crate isn't published to crates.io, so reaching
-    /// outside the crate dir is safe — same pattern as `reference_tests.rs`.)
-    #[test]
-    fn bash_producer_broadcasts_on_the_shared_pipe_name() {
-        let sh = include_str!("../../../plugins/zj-radar-claude/scripts/notify.sh");
-        let broadcast = format!("zellij pipe --name {} --", payload::STATUS_PIPE_NAME);
-        assert!(
-            sh.contains(&broadcast),
-            "notify.sh must broadcast via `{broadcast}`; if the pipe name is \
-             versioned, bump payload::STATUS_PIPE_NAME and notify.sh together"
-        );
-    }
+    use crate::test_fixtures::{pane, set_status, tab};
 
     /// The CLI's grant probe (`REQUIRED_PLUGIN_PERMISSIONS` in
     /// crates/cli/src/run.rs) must cover exactly the set this plugin requests:
@@ -722,11 +651,7 @@ mod tests {
     }
 
     fn apply_payload_with_msg(state: &mut State, pane_id: u32, status: Status, tick: u64, msg: &str) {
-        let _ = state.runtime.radar.status_mut().apply(
-            StatusPayload { msg: msg.into(), ..payload_for(pane_id, status) },
-            tick,
-            0,
-        );
+        set_status(&mut state.runtime.radar, pane_id, status, msg, tick);
     }
 
     // ── build_rows tests ──
@@ -1172,56 +1097,6 @@ mod tests {
         assert_eq!(state.tab_position_at_line(4), Some(1), "tab 1 content");
         assert_eq!(state.tab_position_at_line(5), None, "tab 1 gap row → None");
         assert_eq!(state.tab_position_at_line(6), None, "beyond last tab");
-    }
-
-    // ── Event-sequence walk: shell→idle, fg command→pending→Running, exit→Done ──
-
-    #[test]
-    fn command_pane_walks_idle_running_done() {
-        use crate::command::{EpochSecs, Tick, DEBOUNCE_TICKS};
-
-        let mut state = make_state_with_tabs(&[(0, "t", true)]);
-        state.runtime.radar.set_tab_panes_for_position(0, vec![pane(5)]);
-
-        // Tick counter managed locally, matching what PluginRuntime.tick would be.
-        let mut tick: u64 = 0;
-
-        // 1) shell prompt only → idle (zsh is in IGNORE_NAMES, no resolved state)
-        state.runtime.radar.command_mut().on_command_changed(5, &["zsh".to_string()], true, Some("/home/u/repo"), tick);
-        tick += 1;
-        state.runtime.radar.command_mut().on_timer(Tick(tick), EpochSecs(0));
-        assert!(state.runtime.radar.command_store().get(5).is_none(), "shell prompt must leave pane idle");
-
-        // 2) real fg command → pending (not yet Running); after DEBOUNCE_TICKS timer → Running
-        // pending since_tick = tick; a timer at (tick + DEBOUNCE_TICKS) satisfies
-        // (tick + DEBOUNCE_TICKS) - tick = DEBOUNCE_TICKS >= DEBOUNCE_TICKS.
-        let since = tick;
-        state.runtime.radar.command_mut().on_command_changed(
-            5,
-            &["cargo".to_string(), "test".to_string()],
-            true,
-            Some("/home/u/repo"),
-            tick,
-        );
-        // Still within debounce window: promote tick by exactly DEBOUNCE_TICKS.
-        tick += DEBOUNCE_TICKS;
-        state.runtime.radar.command_mut().on_timer(Tick(tick), EpochSecs(0));
-        assert_eq!(
-            state.runtime.radar.command_store().get(5).map(|s| s.status),
-            Some(Status::Running),
-            "must promote to Running after debounce (since={}, tick={})",
-            since,
-            tick
-        );
-
-        // 3) pane exits with code 0 → Done (and stays Done; focus no longer clears it)
-        tick += 1;
-        state.runtime.radar.command_mut().on_exit(5, Some(0), Tick(tick), EpochSecs(0));
-        assert_eq!(
-            state.runtime.radar.command_store().get(5).map(|s| s.status),
-            Some(Status::Done),
-            "exit 0 must set Done"
-        );
     }
 
     // ── mouse_click → Effect end-to-end tests ──

@@ -1,11 +1,10 @@
 use super::*;
-use crate::command::{EpochSecs, Tick, DEBOUNCE_TICKS};
+use crate::attention::{PaneAttention, Source};
 use crate::config::{Density, NamingMode};
-use crate::payload::{self, StatusPayload};
 use crate::radar_state::TabId;
 use crate::rollup::TerminalPane;
 use crate::status::{GlyphSet, Status};
-use crate::test_fixtures::{pane, payload_for, tab};
+use crate::test_fixtures::{pane, program_attention, set_status, tab};
 use std::collections::{HashMap, HashSet};
 
 /// The shared test config pins `spinner_fps` to 1: the cadence/timer-chain
@@ -63,19 +62,18 @@ impl PluginRuntime {
     fn timer_slow(&mut self, permission: PermissionProbe) -> Outcome {
         self.timer_now(permission, Cadence::Slow.seconds())
     }
+
+    /// Test shorthand: `pane_id`'s native attention moved to `status`.
+    fn push(&mut self, pane_id: u32, status: Status) -> Outcome {
+        self.attention_changed(pane_id, program_attention(status, "working"))
+    }
 }
 
 #[test]
-fn load_rehydrates_snapshot_and_requests_permission_for_owner() {
-    let mut seeded = RadarState::default();
-    seeded.status_mut().apply(payload_for(9, Status::Running), 7, 0);
-    let snapshot = seeded.snapshot_json(None, 7);
-
+fn load_requests_permission_for_owner() {
     let mut runtime = PluginRuntime::default();
-    let outcome = runtime.load(config(), Some(&snapshot), PermissionProbe { marker: None, lock_acquired: true });
+    let outcome = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: true });
 
-    assert_eq!(runtime.tick, 7);
-    assert_eq!(runtime.radar.status_store().get(9).unwrap().status, Status::Running);
     assert_eq!(runtime.permission, PermissionState::Requesting);
     assert_eq!(
         outcome,
@@ -90,66 +88,10 @@ fn load_rehydrates_snapshot_and_requests_permission_for_owner() {
 }
 
 #[test]
-fn load_sweeps_a_rehydrated_running_interactive_row() {
-    // The primary user journey of `interactive_commands`/the built-in set:
-    // hit the perpetual-nvim bug, upgrade/reload — the snapshot rehydrates
-    // the Running row and nvim fires no further CommandChanged until it
-    // exits, so the post-`load_snapshot` sweep is the ONLY edge that can
-    // demote it. Pins the load ordering (config → snapshot → sweep): a
-    // reorder breaks this silently.
-    let mut seeded = RadarState::default();
-    seeded.command_mut().insert_snapshot_observation(
-        9,
-        crate::observation::TrackedObservation::command(
-            Status::Running,
-            "proj".into(),
-            "nvim README.md".into(),
-            crate::kind::Kind::Command,
-            7,
-        ),
-    );
-    let snapshot = seeded.snapshot_json(None, 7);
-
-    let mut runtime = PluginRuntime::default();
-    runtime.load(config(), Some(&snapshot), PermissionProbe { marker: None, lock_acquired: true });
-
-    let obs = runtime.radar.command_store().get(9).unwrap();
-    assert_eq!(obs.status, Status::Idle, "rehydrated spinner demoted at load");
-    assert_eq!(
-        runtime.radar.command_store().quiet_identity(9),
-        Some(("nvim README.md", crate::kind::Kind::Command)),
-        "identity survives as the quiet pending (muted label / labeled exit)"
-    );
-}
-
-#[test]
-fn config_pipe_interactive_override_demotes_live_rows_and_persists() {
-    // Mid-session `config.v1` override: adding a name must demote an
-    // already-promoted Running row NOW (it will never fire another
-    // CommandChanged) and persist the sweep so instances spawned later
-    // rehydrate the demotion instead of the stale spinner.
-    let mut runtime = runtime_with_config(config());
-    runtime.permission = PermissionState::Resolved { granted: true };
-    runtime.command_changed(4, &["gdb".to_string()], true);
-    runtime.tick += crate::command::DEBOUNCE_TICKS;
-    runtime.radar.timer(runtime.tick, 0);
-    assert_eq!(runtime.radar.command_store().get(4).unwrap().status, Status::Running);
-
-    let outcome = runtime.config_pipe(r#"{"interactive_commands":"gdb"}"#);
-
-    assert_eq!(runtime.radar.command_store().get(4).unwrap().status, Status::Idle);
-    assert!(
-        outcome.effects.iter().any(|e| matches!(e, Effect::PersistSnapshot)),
-        "the sweep is a persisted edge: {:?}",
-        outcome.effects
-    );
-}
-
-#[test]
 fn load_denied_marker_records_denial_without_requesting_permission() {
     let mut runtime = PluginRuntime::default();
     let outcome =
-        runtime.load(config(), None, PermissionProbe { marker: Some(PermissionMarker::Denied), lock_acquired: false });
+        runtime.load(config(), PermissionProbe { marker: Some(PermissionMarker::Denied), lock_acquired: false });
 
     assert!(!runtime.permission.granted());
     assert!(matches!(runtime.permission, PermissionState::Resolved { .. }));
@@ -159,21 +101,15 @@ fn load_denied_marker_records_denial_without_requesting_permission() {
 }
 
 #[test]
-fn denied_rail_with_running_snapshot_never_arms_the_timer() {
+fn denied_rail_with_running_work_never_arms_the_timer() {
     // A denied rail receives none of the state events that clear domain work
-    // (they need ReadApplicationState), so a stale `Running` rehydrated from a
-    // snapshot can never finish — arming Fast for it would pin 1 Hz ticks and
-    // repaints forever behind the static needs-permission face.
-    let mut seeded = RadarState::default();
-    seeded.status_mut().apply(payload_for(9, Status::Running), 7, 0);
-    let snapshot = seeded.snapshot_json(None, 7);
-
+    // (they need ReadApplicationState), so a `Running` row can never finish —
+    // arming Fast for it would pin 1 Hz ticks and repaints forever behind the
+    // static needs-permission face.
     let mut runtime = PluginRuntime::default();
-    let outcome = runtime.load(
-        config(),
-        Some(&snapshot),
-        PermissionProbe { marker: Some(PermissionMarker::Denied), lock_acquired: false },
-    );
+    set_status(&mut runtime.radar, 9, Status::Running, "working", 7);
+    let outcome =
+        runtime.load(config(), PermissionProbe { marker: Some(PermissionMarker::Denied), lock_acquired: false });
 
     assert!(runtime.permission.denied());
     assert!(runtime.radar.needs_fast_ticks());
@@ -194,7 +130,7 @@ fn onboarding_pane_requests_even_without_lock_and_closes_on_grant() {
     // may hold it), so Zellij renders its grant prompt on the focused float.
     let onboarding = config::Config { role: config::Role::Onboarding, ..config() };
     let mut runtime = PluginRuntime::default();
-    let load = runtime.load(onboarding, None, PermissionProbe { marker: None, lock_acquired: false });
+    let load = runtime.load(onboarding, PermissionProbe { marker: None, lock_acquired: false });
     assert_eq!(runtime.permission, PermissionState::Requesting);
     assert!(load.effects.contains(&Effect::RequestPermission));
 
@@ -220,7 +156,6 @@ fn deferring_rail_never_requests_until_marker_lands() {
     let mut runtime = PluginRuntime::default();
     let load = runtime.load(
         deferring,
-        None,
         // Even WITH the lock available, a deferring rail must wait.
         PermissionProbe { marker: None, lock_acquired: true },
     );
@@ -241,7 +176,7 @@ fn deferring_rail_never_requests_until_marker_lands() {
 #[test]
 fn peer_waits_then_requests_after_granted_marker() {
     let mut runtime = PluginRuntime::default();
-    let load = runtime.load(config(), None, PermissionProbe { marker: None, lock_acquired: false });
+    let load = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: false });
     assert_eq!(runtime.permission, PermissionState::WaitingForPeer { ticks: 0 });
     // Selectable, not passive: no manifest has shown a terminal neighbor yet.
     assert_eq!(load.effects, vec![Effect::SetTimeout(Cadence::Fast), Effect::SetSelectable(true)]);
@@ -267,7 +202,7 @@ fn requesting_instance_heartbeats_the_lock_each_tick_and_stops_when_answered() {
     // In-flight request: every tick refreshes the shared lock so waiting
     // peers can't reclaim it from under the live prompt.
     let mut runtime = PluginRuntime::default();
-    let load = runtime.load(config(), None, PermissionProbe { marker: None, lock_acquired: true });
+    let load = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: true });
     assert!(load.effects.contains(&Effect::RequestPermission));
     let tick = runtime.timer_fast(PermissionProbe { marker: None, lock_acquired: false });
     assert!(
@@ -280,7 +215,7 @@ fn requesting_instance_heartbeats_the_lock_each_tick_and_stops_when_answered() {
     // signal its patience escalation relies on.
     let mut waiting = PluginRuntime::default();
     let deferring = config::Config { defer_permission: true, ..config() };
-    let _ = waiting.load(deferring, None, PermissionProbe { marker: None, lock_acquired: false });
+    let _ = waiting.load(deferring, PermissionProbe { marker: None, lock_acquired: false });
     let waiting_tick = waiting.timer_fast(PermissionProbe { marker: None, lock_acquired: false });
     assert!(!waiting_tick.effects.contains(&Effect::HeartbeatPermissionLock));
 
@@ -298,7 +233,7 @@ fn stranded_deferring_rail_escalates_and_requests_after_patience() {
     // rail must fire its own request instead of waiting forever.
     let deferring = config::Config { defer_permission: true, ..config() };
     let mut runtime = PluginRuntime::default();
-    let _ = runtime.load(deferring, None, PermissionProbe { marker: None, lock_acquired: true });
+    let _ = runtime.load(deferring, PermissionProbe { marker: None, lock_acquired: true });
     runtime.permission = PermissionState::WaitingForPeer { ticks: crate::permission::DEFER_PATIENCE_TICKS - 1 };
     let tick = runtime.timer_fast(PermissionProbe { marker: None, lock_acquired: true });
     assert!(
@@ -317,7 +252,7 @@ fn owner_paints_needs_permission_while_request_in_flight() {
     // needs_permission screen never gets a render trigger and the rail sits
     // blank — the bug this guards.
     let mut runtime = PluginRuntime::default();
-    let load = runtime.load(config(), None, PermissionProbe { marker: None, lock_acquired: true });
+    let load = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: true });
     assert!(
         load.effects.contains(&Effect::SetTimeout(Cadence::Fast)),
         "owner must arm a timer so the needs_permission screen gets a paint trigger",
@@ -344,7 +279,7 @@ fn waiting_peer_self_promotes_when_it_reclaims_the_lock() {
     // probe reports lock_acquired with no marker — the peer must take over
     // the prompt rather than wait forever.
     let mut runtime = PluginRuntime::default();
-    let _ = runtime.load(config(), None, PermissionProbe { marker: None, lock_acquired: false });
+    let _ = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: false });
     assert_eq!(runtime.permission, PermissionState::WaitingForPeer { ticks: 0 });
 
     let timer = runtime.timer_fast(PermissionProbe { marker: None, lock_acquired: true });
@@ -361,7 +296,7 @@ fn probe_is_wanted_only_while_waiting_on_a_peer() {
     // is in-flight or the state resolves, `on_timer` ignores it — so the
     // per-tick disk probe must stop (N tabs were reading N files/sec forever).
     let mut runtime = PluginRuntime::default();
-    let _ = runtime.load(config(), None, PermissionProbe { marker: None, lock_acquired: false });
+    let _ = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: false });
     assert_eq!(runtime.permission, PermissionState::WaitingForPeer { ticks: 0 });
     assert!(runtime.wants_permission_probe(), "a waiting peer must keep probing");
 
@@ -387,7 +322,7 @@ fn probe_stays_wanted_for_a_deferring_rail_past_its_patience() {
     // probe must not starve that escalation path.
     let deferring = config::Config { defer_permission: true, ..config() };
     let mut runtime = PluginRuntime::default();
-    let _ = runtime.load(deferring, None, PermissionProbe { marker: None, lock_acquired: false });
+    let _ = runtime.load(deferring, PermissionProbe { marker: None, lock_acquired: false });
     runtime.permission = PermissionState::WaitingForPeer { ticks: crate::permission::DEFER_PATIENCE_TICKS + 5 };
     assert!(runtime.wants_permission_probe(), "an impatient deferring waiter still needs fresh probes to escalate",);
 }
@@ -414,111 +349,6 @@ fn permission_result_persists_marker_and_updates_selectability() {
 }
 
 #[test]
-fn timer_promotion_persists_snapshot_for_late_spawned_instances() {
-    // A tick that promotes a debounced command to Running (or confirms a
-    // Done) MUTATES the command store, so it must persist the shared
-    // snapshot exactly like `status_pipe` does — otherwise a tab opened in
-    // that window seeds a rail missing the command and diverges until the
-    // command's next lifecycle event.
-    let mut runtime = runtime_with_config(config());
-    let argv: Vec<String> = vec!["cargo".into(), "test".into()];
-    runtime.command_changed(7, &argv, true);
-
-    // Ticks short of the debounce window are quiet (no store mutation yet).
-    for _ in 1..DEBOUNCE_TICKS {
-        let quiet = runtime.timer_fast(PermissionProbe::default());
-        assert!(
-            !quiet.effects.iter().any(|e| matches!(e, Effect::PersistSnapshot)),
-            "a tick short of the debounce window must not persist, got {:?}",
-            quiet.effects
-        );
-    }
-
-    // The tick that reaches the debounce window promotes → must persist.
-    let promoted = runtime.timer_fast(PermissionProbe::default());
-    assert!(
-        promoted.effects.iter().any(|e| matches!(e, Effect::PersistSnapshot)),
-        "promotion tick must persist the snapshot, got {:?}",
-        promoted.effects
-    );
-    let json = runtime.snapshot_json(None);
-    let mut restored = RadarState::default();
-    restored.load_snapshot(&json).expect("valid snapshot");
-    assert_eq!(
-        restored.command_store().get(7).unwrap().status,
-        Status::Running,
-        "a late-spawned instance must see the promoted command"
-    );
-
-    // A quiet tick (no store mutation) must NOT persist.
-    let quiet = runtime.timer_fast(PermissionProbe::default());
-    assert!(
-        !quiet.effects.iter().any(|e| matches!(e, Effect::PersistSnapshot)),
-        "a no-change tick must not churn the snapshot, got {:?}",
-        quiet.effects
-    );
-}
-
-#[test]
-fn status_pipe_mutates_store_arms_timer_and_persists_snapshot() {
-    let mut runtime = runtime_with_config(config());
-    let raw = payload::to_wire(&StatusPayload { msg: "cargo test".into(), ..payload_for(5, Status::Running) });
-
-    let outcome = runtime.status_pipe(&raw);
-
-    assert!(outcome.render);
-    assert!(runtime.radar.status_store().needs_ticks());
-    // Canonical `project` order is renames → snapshot → cwd → SetTimeout,
-    // so PersistSnapshot precedes SetTimeout. Assert membership,
-    // not position — the order contract has its own dedicated test.
-    assert_eq!(outcome.effects.len(), 2);
-    assert!(outcome.effects.contains(&Effect::SetTimeout(Cadence::Fast)));
-    assert!(outcome.effects.iter().any(|effect| matches!(effect, Effect::PersistSnapshot)));
-    let json = runtime.snapshot_json(None);
-    let mut restored = RadarState::default();
-    let tick = restored.load_snapshot(&json).expect("valid snapshot");
-    assert_eq!(tick, 0);
-    assert_eq!(restored.status_store().get(5).unwrap().status, Status::Running);
-}
-
-#[test]
-fn panes_changed_prunes_focuses_and_persists_snapshot() {
-    let mut runtime = runtime_with_config(config());
-    runtime.tabs_changed(vec![tab(0, "work", true)]);
-    runtime.radar.status_mut().apply(payload_for(10, Status::Running), 1, 0);
-    runtime.radar.status_mut().apply(payload_for(11, Status::Running), 1, 0);
-    runtime.radar.command_mut().on_exit(12, Some(0), Tick(1), EpochSecs(0));
-
-    let mut live = HashSet::new();
-    live.insert(10);
-    let mut tab_panes = HashMap::new();
-    tab_panes.insert(0, vec![TerminalPane { focused_in_tab: true, ..pane(10) }]);
-
-    let first = runtime.panes_changed(PaneUpdate {
-        tab_panes: tab_panes.clone(),
-        live: live.clone(),
-        theme: Some(theme::DerivedColors::default()),
-        exits: vec![(10, Some(0))],
-        native: HashMap::new(),
-    });
-    assert!(first.render);
-    // Panes 11/12 are absent for the first time — the break-pane grace keeps
-    // their observations for one manifest; the second absence prunes.
-    let outcome = runtime.panes_changed(PaneUpdate {
-        tab_panes,
-        live,
-        theme: Some(theme::DerivedColors::default()),
-        exits: Vec::new(),
-        native: HashMap::new(),
-    });
-
-    assert!(outcome.render);
-    assert!(runtime.radar.status_store().get(11).is_none());
-    assert!(runtime.radar.command_store().get(12).is_none());
-    assert!(outcome.effects.iter().any(|effect| matches!(effect, Effect::PersistSnapshot)));
-}
-
-#[test]
 fn panes_changed_emits_resolve_cwd_effect_for_new_panes() {
     let mut runtime = runtime_with_config(config::Config {
         naming: NamingMode::Managed,
@@ -534,7 +364,6 @@ fn panes_changed_emits_resolve_cwd_effect_for_new_panes() {
         tab_panes: HashMap::from([(0, vec![focused])]),
         live: HashSet::from([7]),
         theme: None,
-        exits: Vec::new(),
         native: HashMap::new(),
     });
 
@@ -566,7 +395,7 @@ fn the_git_remote_names_the_tab_once_per_cwd() {
 }
 
 #[test]
-fn cwd_change_renames_default_named_tab_and_command_uses_cwd() {
+fn cwd_change_renames_default_named_tab() {
     let mut runtime = runtime_with_config(config::Config {
         naming: NamingMode::Managed,
         density: Density::Compact,
@@ -586,28 +415,6 @@ fn cwd_change_renames_default_named_tab_and_command_uses_cwd() {
         ]
     );
     assert_eq!(runtime.radar.applied_name(TabId::new(1)), Some("myrepo"));
-
-    let command = vec!["cargo".to_string(), "test".to_string()];
-    let command_outcome = runtime.command_changed(7, &command, true);
-    assert_eq!(command_outcome.effects, vec![Effect::SetTimeout(Cadence::Fast)]);
-
-    for _ in 1..DEBOUNCE_TICKS {
-        let quiet = runtime.timer_fast(PermissionProbe::default());
-        assert_eq!(
-            quiet.effects,
-            vec![Effect::SetTimeout(Cadence::Fast)],
-            "still pending short of the debounce window"
-        );
-    }
-
-    let timer = runtime.timer_fast(PermissionProbe::default());
-    assert!(timer.render);
-    // The promotion mutates the command store, so this tick persists the
-    // snapshot too (late-spawned instances must see the Running command).
-    assert_eq!(timer.effects, vec![Effect::PersistSnapshot, Effect::SetTimeout(Cadence::Fast)]);
-    let state = runtime.radar.command_store().get(7).expect("promoted command");
-    assert_eq!(state.status, Status::Running);
-    assert_eq!(state.repo, "myrepo");
 }
 
 #[test]
@@ -623,7 +430,6 @@ fn sidebar_instance_never_renames_a_foreign_tab() {
         tab_panes: HashMap::from([(0, vec![pane(10)]), (1, vec![pane(11)])]),
         live: HashSet::from([10, 11]),
         theme: None,
-        exits: Vec::new(),
         native: HashMap::new(),
     });
     // The cwd bootstrap is deliberately NOT ownership-scoped (the cwd also
@@ -669,9 +475,9 @@ fn render_records_targets_and_mouse_click_returns_host_effect() {
     let mut runtime = granted_runtime();
     runtime.tabs_changed(vec![tab(0, "team", false), tab(1, "plain", false)]);
     runtime.radar.set_tab_panes_for_position(0, vec![pane(20), pane(21), pane(22)]);
-    runtime.radar.status_mut().apply(payload_for(20, Status::Pending), 1, 0);
-    runtime.radar.status_mut().apply(payload_for(21, Status::Running), 1, 0);
-    runtime.radar.status_mut().apply(payload_for(22, Status::Running), 1, 0);
+    set_status(&mut runtime.radar, 20, Status::Pending, "working", 1);
+    set_status(&mut runtime.radar, 21, Status::Running, "working", 1);
+    set_status(&mut runtime.radar, 22, Status::Running, "working", 1);
 
     let ansi = runtime.render(100, 80);
     assert!(ansi.contains("team"));
@@ -694,7 +500,7 @@ fn single_pane_detail_line_click_shows_the_pane() {
     let mut runtime = granted_runtime();
     runtime.tabs_changed(vec![tab(0, "team", false)]);
     runtime.radar.set_tab_panes_for_position(0, vec![pane(30)]);
-    runtime.radar.status_mut().apply(payload_for(30, Status::Running), 1, 0);
+    set_status(&mut runtime.radar, 30, Status::Running, "working", 1);
 
     let ansi = runtime.render(100, 80);
     assert!(ansi.contains("team"));
@@ -732,20 +538,16 @@ fn no_tabs_with_history_renders_ledger_not_scanning() {
     };
     runtime.tabs_changed(vec![tab(0, "web", true)]);
     runtime.radar.set_tab_panes_for_position(0, vec![pane(5)]);
-    runtime.radar.status_mut().apply(payload_for(5, Status::Done), 1, 1_000);
+    set_status(&mut runtime.radar, 5, Status::Done, "working", 1);
 
-    // The pane closes with a still-lit Done: the second absence confirms the
-    // close (the first is the break-pane grace) and pruning hands it to the
-    // ledger (spec §4.2).
-    for _ in 0..2 {
-        runtime.panes_changed(PaneUpdate {
-            tab_panes: HashMap::new(),
-            live: HashSet::new(),
-            theme: None,
-            exits: Vec::new(),
-            native: HashMap::new(),
-        });
-    }
+    // The pane closes with a still-lit Done: the manifest dropping it hands
+    // it to the ledger (spec §4.2).
+    runtime.panes_changed(PaneUpdate {
+        tab_panes: HashMap::new(),
+        live: HashSet::new(),
+        theme: None,
+        native: HashMap::new(),
+    });
     assert!(!runtime.radar.ledger_is_empty(), "setup: ledger must be seeded");
 
     // The tab itself closes too — zero tabs, but history remains.
@@ -786,8 +588,8 @@ fn command_attention_next_emits_switch_tab() {
     runtime.tabs_changed(vec![tab(0, "a", true), tab(1, "b", false)]);
     runtime.radar.set_tab_panes_for_position(0, vec![pane(10)]);
     runtime.radar.set_tab_panes_for_position(1, vec![pane(11)]);
-    runtime.radar.status_mut().apply(payload_for(10, Status::Running), 1, 0);
-    runtime.radar.status_mut().apply(payload_for(11, Status::Pending), 1, 0);
+    set_status(&mut runtime.radar, 10, Status::Running, "working", 1);
+    set_status(&mut runtime.radar, 11, Status::Pending, "working", 1);
 
     let out = runtime.control(Verb::AttentionNext);
     assert_eq!(out.effects, vec![Effect::SwitchTab { position: 1 }]);
@@ -806,7 +608,7 @@ fn attention_verbs_are_answered_by_the_visible_rail_only() {
     for (own, rail) in rails.iter_mut().enumerate() {
         for p in 0..TABS {
             rail.radar.set_tab_panes_for_position(p, vec![pane(10 + p as u32)]);
-            rail.radar.status_mut().apply(payload_for(10 + p as u32, Status::Pending), 1, 0);
+            set_status(&mut rail.radar, 10 + p as u32, Status::Pending, "working", 1);
         }
         // Visit every tab in order: a rail sees manifests only while its
         // own tab is active, then goes dark when the user moves on.
@@ -847,7 +649,7 @@ fn command_is_inert_without_permission() {
     let mut runtime = PluginRuntime { config: config(), ..Default::default() };
     runtime.tabs_changed(vec![tab(0, "a", true), tab(1, "b", false)]);
     runtime.radar.set_tab_panes_for_position(1, vec![pane(11)]);
-    runtime.radar.status_mut().apply(payload_for(11, Status::Pending), 1, 0);
+    set_status(&mut runtime.radar, 11, Status::Pending, "working", 1);
 
     assert_eq!(runtime.control(Verb::AttentionNext), Outcome::default());
 }
@@ -884,13 +686,6 @@ fn drive_tabs_and_panes(rt: &mut PluginRuntime) {
     rt.radar.set_tab_panes_for_position(0, vec![pane(7)]);
 }
 
-/// A `zj_radar.status.v1` wire payload for `pane_id` at `status` ("running" /
-/// "pending" / etc.) — `payload_for` takes the typed `Status`, so this bridges
-/// from the wire vocabulary the way a real producer would send it.
-fn payload_json(pane_id: u32, status: &str) -> String {
-    payload::to_wire(&payload_for(pane_id, Status::from_wire(status)))
-}
-
 /// A peer from a JSON literal, in the `Presence` shape `GlobalAttentionUpdate`
 /// peers reach the runtime in (`attention::PeerSession::presence`).
 fn fresh(json: &str) -> Presence {
@@ -914,11 +709,11 @@ fn own_counts_live_status_panes_not_tab_rollups_or_unseated_payloads() {
     let mut rt = runtime_with_granted_permission();
     rt.tabs_changed(vec![tab(0, "pair", true)]);
     rt.radar.set_tab_panes_for_position(0, vec![pane(10), pane(11)]);
-    rt.status_pipe(&payload_json(10, "running"));
-    rt.status_pipe(&payload_json(11, "running"));
+    rt.push(10, Status::from_wire("running"));
+    rt.push(11, Status::from_wire("running"));
     // Status intake legitimately accepts a payload before topology arrives;
     // the counts must not include that stale/unseated id.
-    rt.status_pipe(&payload_json(99, "pending"));
+    rt.push(99, Status::from_wire("pending"));
 
     let own = rt.own_counts();
     assert_eq!(own.running, 2, "two agent panes in one tab count as two");
@@ -935,10 +730,16 @@ fn own_counts_exclude_command_attention_and_use_the_first_status_tab() {
 
     // A command-origin Error is urgent in the rail but intentionally absent
     // from the cross-session agent tally.
-    let cmd = vec!["cargo".to_string(), "test".to_string()];
-    rt.radar.command_mut().on_command_changed(10, &cmd, true, None, rt.tick);
-    let _ = rt.radar.command_mut().on_exit(10, Some(1), Tick(rt.tick), EpochSecs(0));
-    rt.status_pipe(&payload_json(20, "pending"));
+    let failed = PaneAttention {
+        status: Status::Error,
+        source: Source::Command,
+        text: "cargo test".into(),
+        exit_code: Some(1),
+        since_ms: 100_000,
+        ..PaneAttention::default()
+    };
+    rt.attention_changed(10, failed);
+    rt.push(20, Status::from_wire("pending"));
 
     let own = rt.own_counts();
     assert_eq!(own.running, 0);
@@ -1106,7 +907,7 @@ fn raced_away_acknowledge_glyph_consumes_the_click_instead_of_showing_the_pane()
     let (start_col, _) =
         rt.last_rendered.hotspot_at_line(3).expect("pending pane 10 must carry its acknowledge hotspot");
 
-    rt.status_pipe(&payload_json(10, "done"));
+    rt.push(10, Status::from_wire("done"));
 
     let out = rt.mouse_click(3, start_col);
     assert_eq!(out, Outcome::default(), "a raced-away acknowledge must consume the click, not ShowPane");
@@ -1172,40 +973,38 @@ fn right_click_without_permission_is_inert_on_a_session_line() {
 ///   6   tab1 header line   → (1, None)
 ///   7   tab1 pane 20 line  → (1, Some(20)) — Pending
 fn runtime_with_pending_panes() -> PluginRuntime {
-    let mut rt = granted_runtime();
+    let mut rt = runtime_with_granted_permission(); // own session "work"
+
     rt.tabs_changed(vec![tab(0, "a", false), tab(1, "b", false)]);
     rt.radar.set_tab_panes_for_position(0, vec![pane(10), pane(11), pane(12)]);
     rt.radar.set_tab_panes_for_position(1, vec![pane(20)]);
-    rt.status_pipe(&payload_json(10, "pending"));
-    rt.status_pipe(&payload_json(11, "running"));
-    rt.status_pipe(&payload_json(12, "pending"));
-    rt.status_pipe(&payload_json(20, "pending"));
+    rt.push(10, Status::from_wire("pending"));
+    rt.push(11, Status::from_wire("running"));
+    rt.push(12, Status::from_wire("pending"));
+    rt.push(20, Status::from_wire("pending"));
     let _ = rt.render(100, 80);
     rt
 }
 
 #[test]
-fn right_click_on_pending_pane_broadcasts_and_leaves_local_state_untouched_until_the_echo_lands() {
+fn right_click_on_pending_pane_marks_it_seen_and_leaves_local_state_untouched() {
     let mut rt = runtime_with_pending_panes();
 
     let out = rt.mouse_right_click(3, 0); // tab0 pane 10, Pending
-    assert!(!out.render, "the click itself must not mutate local state — see Effect::BroadcastStatus's doc");
-    assert_eq!(out.effects.len(), 1, "exactly one pending pane on this line, got {:?}", out.effects);
-    let Effect::BroadcastStatus { payload } = &out.effects[0] else {
-        panic!("expected BroadcastStatus, got {:?}", out.effects);
-    };
+    assert!(!out.render, "the click itself must not mutate local state — see Effect::MarkSeen's doc");
+    assert_eq!(out.effects, vec![Effect::MarkSeen { session: "work".into(), pane_id: 10 }]);
 
-    // Pending survives the click alone — convergence rides the pipe, not a
-    // local write (the design constraint issue #5 leads with: a local clear
-    // would repeat the removed focus-clear mistake).
-    assert_eq!(rt.radar.status(10).unwrap().status, Status::Pending, "no local mutation from the click alone");
+    // Pending survives the click alone: the seen mark is Zellij's, and it
+    // comes back as the next manifest.
+    assert_eq!(rt.radar.observation(10).unwrap().status, Status::Pending, "no local mutation from the click alone");
+}
 
-    // Only once the payload is driven back through `status_pipe` — exactly
-    // how every instance, including this one, receives the broadcast it
-    // just emitted — does the row actually converge.
-    let payload = payload.clone();
-    rt.status_pipe(&payload);
-    assert_eq!(rt.radar.status(10).unwrap().status, Status::Done, "the echo converges Pending -> Done");
+#[test]
+fn acknowledge_waits_for_the_session_name() {
+    let mut rt = runtime_with_pending_panes();
+    rt.own_session_name.clear();
+
+    assert!(rt.mouse_right_click(3, 0).effects.is_empty(), "no session to address yet");
 }
 
 #[test]
@@ -1229,7 +1028,7 @@ fn left_click_requires_the_pending_glyph_cells_but_right_click_keeps_row_wide_pa
 }
 
 #[test]
-fn right_click_on_tab_row_broadcasts_every_pending_pane_in_that_tab_only() {
+fn right_click_on_tab_row_marks_every_pending_pane_in_that_tab_only() {
     let mut rt = runtime_with_pending_panes();
 
     let out = rt.mouse_right_click(2, 0); // tab0 header line, pane_id: None
@@ -1238,10 +1037,11 @@ fn right_click_on_tab_row_broadcasts_every_pending_pane_in_that_tab_only() {
         .effects
         .iter()
         .map(|e| {
-            let Effect::BroadcastStatus { payload } = e else {
-                panic!("expected BroadcastStatus, got {e:?}");
+            let Effect::MarkSeen { session, pane_id } = e else {
+                panic!("expected MarkSeen, got {e:?}");
             };
-            payload::parse(payload).expect("synthetic payload must parse").pane_id
+            assert_eq!(session, "work");
+            *pane_id
         })
         .collect();
     assert_eq!(acked.len(), 2, "tab0 has exactly 2 pending panes (10 and 12), got {acked:?}");
@@ -1265,49 +1065,6 @@ fn right_click_on_a_tab_row_with_no_tracked_panes_is_a_strict_no_op() {
 }
 
 #[test]
-fn acknowledge_payload_round_trips_and_carries_the_original_source_and_kind() {
-    let mut rt = runtime_with_pending_panes();
-    let out = rt.mouse_right_click(3, 0); // pane 10, Pending, source "claude" via payload_for
-    let Effect::BroadcastStatus { payload } = &out.effects[0] else {
-        panic!("expected BroadcastStatus, got {:?}", out.effects);
-    };
-
-    let parsed = payload::parse(payload).expect("synthetic payload must parse (wire-compat)");
-    assert_eq!(parsed.pane_id, 10);
-    assert_eq!(parsed.status, Status::Done);
-    assert_eq!(parsed.repo, "repo");
-    assert_eq!(parsed.branch, "main");
-    assert_eq!(parsed.msg, "working", "the original msg is carried forward unchanged");
-    assert_eq!(parsed.source, "claude", "Kind::as_source must round-trip the original classification");
-    assert_eq!(crate::kind::Kind::from_source(&parsed.source), crate::kind::Kind::Claude);
-}
-
-#[test]
-fn double_delivery_of_the_acknowledge_broadcast_is_idempotent() {
-    let mut rt = runtime_with_pending_panes();
-    let out = rt.mouse_right_click(3, 0);
-    let Effect::BroadcastStatus { payload } = &out.effects[0] else {
-        panic!("expected BroadcastStatus, got {:?}", out.effects);
-    };
-    let payload = payload.clone();
-
-    rt.status_pipe(&payload);
-    let completed_at_first = rt.radar.status(10).unwrap().completed_epoch_s;
-    assert!(completed_at_first.is_some(), "Done must stamp a completion epoch");
-
-    // A second, later delivery of the SAME payload — e.g. a duplicate fire of
-    // the pipe, or another instance's echo racing this one — must be a
-    // no-op: `StatusStore::apply`'s identical-(status,msg)-rebroadcast rule
-    // keeps the ORIGINAL completion stamp rather than re-stamping it.
-    rt.status_pipe(&payload);
-    assert_eq!(
-        rt.radar.status(10).unwrap().completed_epoch_s,
-        completed_at_first,
-        "an identical re-delivery must not re-stamp the completion"
-    );
-}
-
-#[test]
 fn own_badge_row_updates_live_as_running_and_attention_move() {
     // `Sessions::set_own` was once dead code: nothing called it, so the own
     // row of the cross-session badge never reflected the running/
@@ -1325,7 +1082,7 @@ fn own_badge_row_updates_live_as_running_and_attention_move() {
     let before = rt.render(100, 80);
     assert!(!before.contains("work 1"), "setup: own row must start at zero running, got {before:?}");
 
-    rt.status_pipe(&payload_json(7, "running"));
+    rt.push(7, Status::from_wire("running"));
     let after = rt.render(100, 80);
     let running_glyph = Status::Running.glyph_for(GlyphSet::Plain);
     assert!(
@@ -1335,74 +1092,18 @@ fn own_badge_row_updates_live_as_running_and_attention_move() {
 }
 
 /// Helper: two tabs; pane 5 focused in active tab 0, pane 7 in background
-/// tab 1. Both panes have a Running command promoted via a prior timer tick.
-fn two_tab_runtime_with_running_commands() -> PluginRuntime {
+/// tab 1. Both panes report Running attention.
+fn two_tab_runtime_with_running_panes() -> PluginRuntime {
     let mut rt = runtime_with_config(config());
     rt.tabs_changed(vec![tab(0, "active", true), tab(1, "bg", false)]);
     // Place panes in their tabs.
     rt.radar.set_tab_panes_for_position(0, vec![TerminalPane { id: 5, focused_in_tab: true, ..Default::default() }]);
     rt.radar.set_tab_panes_for_position(1, vec![pane(7)]);
-    // Register foreground commands on both panes.
-    rt.command_changed(5, &["make".into()], true);
-    rt.command_changed(7, &["cargo".into(), "test".into()], true);
-    // Promote pending → Running via a timer tick.
+    rt.push(5, Status::Running);
+    rt.push(7, Status::Running);
+    // Arm the timer chain the way a first tick would.
     rt.timer_fast(PermissionProbe::default());
     rt
-}
-
-#[test]
-fn deferred_snapshot_write_flushes_on_the_next_tick() {
-    // A Running-label-only broadcast marks the snapshot dirty instead of
-    // persisting inline; the next timer tick must carry exactly one
-    // `PersistSnapshot`, then go quiet again.
-    let mut rt = runtime_with_config(config());
-    rt.tabs_changed(vec![tab(0, "work", true)]);
-    rt.radar.set_tab_panes_for_position(0, vec![pane(7)]);
-    let running =
-        |msg: &str| crate::payload::to_wire(&StatusPayload { msg: msg.into(), ..payload_for(7, Status::Running) });
-
-    let first = rt.status_pipe(&running("editing lib.rs"));
-    assert!(
-        first.effects.contains(&Effect::PersistSnapshot),
-        "the FIRST application is a status edge (None → Running): persists inline, got {:?}",
-        first.effects
-    );
-
-    let label = rt.status_pipe(&running("running tests"));
-    assert!(
-        !label.effects.contains(&Effect::PersistSnapshot),
-        "label-only update must not persist inline, got {:?}",
-        label.effects
-    );
-
-    let tick = rt.timer_fast(PermissionProbe::default());
-    assert!(
-        tick.effects.contains(&Effect::PersistSnapshot),
-        "the next tick flushes the deferred write, got {:?}",
-        tick.effects
-    );
-    let tick2 = rt.timer_fast(PermissionProbe::default());
-    assert!(
-        !tick2.effects.contains(&Effect::PersistSnapshot),
-        "the dirty flag is consumed by the flush, got {:?}",
-        tick2.effects
-    );
-
-    // An interleaving IMMEDIATE persist supersedes a pending deferral: a
-    // label-only update marks dirty, a status edge in the same second writes
-    // inline — the next tick must not repeat the write.
-    let _ = rt.status_pipe(&running("reading config"));
-    let edge = rt.status_pipe(&crate::payload::to_wire(&StatusPayload {
-        msg: "approve?".into(),
-        ..payload_for(7, Status::Pending)
-    }));
-    assert!(edge.effects.contains(&Effect::PersistSnapshot), "edge persists inline");
-    let tick3 = rt.timer_fast(PermissionProbe::default());
-    assert!(
-        !tick3.effects.contains(&Effect::PersistSnapshot),
-        "the inline write cleared the deferral — no redundant flush, got {:?}",
-        tick3.effects
-    );
 }
 
 #[test]
@@ -1420,13 +1121,8 @@ fn render_gate_vetoes_repaints_whose_drawn_content_is_unchanged() {
     live.insert(7);
     let mut tab_panes = HashMap::new();
     tab_panes.insert(0, vec![TerminalPane { focused_in_tab: true, ..pane(7) }]);
-    let manifest = || PaneUpdate {
-        tab_panes: tab_panes.clone(),
-        live: live.clone(),
-        theme: None,
-        exits: vec![],
-        native: HashMap::new(),
-    };
+    let manifest =
+        || PaneUpdate { tab_panes: tab_panes.clone(), live: live.clone(), theme: None, native: HashMap::new() };
 
     let first = rt.panes_changed(manifest());
     assert!(first.render, "first manifest is un-stamped content: renders");
@@ -1436,47 +1132,43 @@ fn render_gate_vetoes_repaints_whose_drawn_content_is_unchanged() {
     assert!(!repeat.render, "identical manifest re-report draws nothing new");
 
     // Tick-driven frames bypass the gate (spinner/ages animate off now_tick).
-    rt.radar.status_mut().apply(payload_for(7, Status::Running), rt.tick, 0);
+    set_status(&mut rt.radar, 7, Status::Running, "working", rt.tick);
     let _ = rt.render(30, 40);
     let tick = rt.timer_fast(PermissionProbe::default());
     assert!(tick.render, "animation tick renders even with identical rows");
 
     // A genuine content change still passes the gate.
     let _ = rt.render(30, 40);
-    let edge = rt.status_pipe(&crate::payload::to_wire(&StatusPayload {
-        msg: "approve?".into(),
-        ..payload_for(7, Status::Pending)
-    }));
+    let edge = rt.push(7, Status::Pending);
     assert!(edge.render, "a real status edge repaints");
 }
 
 #[test]
-fn noop_broadcast_skips_own_counts_work() {
-    // An identical re-broadcast advances nothing: no own-counts re-derive, no
-    // snapshot, no render. The pane's own counts can't have moved — the radar
+fn noop_report_skips_own_counts_work() {
+    // An identical re-report advances nothing: no own-counts re-derive, no
+    // render. The pane's own counts can't have moved — the radar
     // generation didn't.
     let mut rt = runtime_with_config(config());
     rt.tabs_changed(vec![tab(0, "work", true)]);
     rt.radar.set_tab_panes_for_position(0, vec![pane(7)]);
     let _ = rt.session_name_changed(Some("main".into()));
-    let wire = crate::payload::to_wire(&payload_for(7, Status::Running));
 
-    rt.status_pipe(&wire);
+    rt.push(7, Status::Running);
 
-    let repeat = rt.status_pipe(&wire);
+    let repeat = rt.push(7, Status::Running);
     assert!(!repeat.render);
     assert!(
         repeat.effects.iter().all(|e| matches!(e, Effect::SetTimeout(_))),
-        "an identical re-broadcast may at most re-arm the timer, got {:?}",
+        "an identical re-report may at most re-arm the timer, got {:?}",
         repeat.effects
     );
 }
 
 #[test]
 fn project_emits_effects_in_canonical_order() {
-    // Sole home of the order contract: renames → snapshot → cwd → SetTimeout
-    // — exercising all four effect kinds in one change.
-    let mut rt = two_tab_runtime_with_running_commands();
+    // Sole home of the order contract: renames → cwd → SetTimeout
+    // — exercising all three effect kinds in one change.
+    let mut rt = two_tab_runtime_with_running_panes();
     // `TimerChain::arm` self-guards on the armed cadence; the setup helper's
     // timer tick already armed it, so force the disarmed state to let
     // `project`'s unconditional arm call actually produce a `SetTimeout`.
@@ -1484,7 +1176,6 @@ fn project_emits_effects_in_canonical_order() {
 
     let change = RadarChange {
         render: true,
-        snapshot: SnapshotWrite::Now,
         renames: vec![TabRename { id: TabId::new(1), name: "renamed".into() }],
         cwd_bootstrap: vec![7],
         ..RadarChange::default()
@@ -1493,9 +1184,8 @@ fn project_emits_effects_in_canonical_order() {
 
     let kind = |e: &Effect| match e {
         Effect::RenameTab { .. } => 0,
-        Effect::PersistSnapshot => 1,
-        Effect::ResolveCwd { .. } => 2,
-        Effect::SetTimeout(_) => 3,
+        Effect::ResolveCwd { .. } => 1,
+        Effect::SetTimeout(_) => 2,
         other => panic!("unexpected effect in canonical-order test: {other:?}"),
     };
     let kinds: Vec<i32> = outcome.effects.iter().map(kind).collect();
@@ -1503,12 +1193,12 @@ fn project_emits_effects_in_canonical_order() {
     sorted.sort_unstable();
     assert_eq!(
         kinds, sorted,
-        "effects must appear in canonical order (renames < snapshot < cwd < timer); got {:?}",
+        "effects must appear in canonical order (renames < cwd < timer); got {:?}",
         outcome.effects
     );
-    // All four kinds must actually be present, otherwise the ordering
+    // All three kinds must actually be present, otherwise the ordering
     // assertion above is vacuous.
-    for expected in 0..=3 {
+    for expected in 0..=2 {
         assert!(kinds.contains(&expected), "expected effect kind {expected} to be present; got {:?}", outcome.effects);
     }
 }
@@ -1532,12 +1222,11 @@ fn cwd_changed_never_bootstraps_cwd() {
 }
 
 #[test]
-fn backgrounded_done_via_status_pipe_lets_the_timer_quiesce() {
+fn backgrounded_done_lets_the_timer_quiesce() {
     // The headline of the timer-arming rule: a finished agent in a background
     // tab must NOT keep the 1 Hz timer alive forever.
     let mut rt = runtime_with_config(config());
-    let raw = payload::to_wire(&StatusPayload { msg: "shipped".into(), ..payload_for(7, Status::Done) });
-    rt.status_pipe(&raw);
+    rt.push(7, Status::Done);
 
     // The timer quiesces within a bounded number of ticks — a backgrounded
     // Done doesn't pin it awake.
@@ -1550,22 +1239,26 @@ fn backgrounded_done_via_status_pipe_lets_the_timer_quiesce() {
     assert!(!rt.timer_should_continue(), "quiesced: nothing left to tick for");
 
     // The Done stays lit.
-    assert_eq!(rt.radar.status_store().get(7).unwrap().status, Status::Done);
+    assert_eq!(rt.radar.observation(7).unwrap().status, Status::Done);
 }
 
 #[test]
 fn flash_keeps_fast_timer_until_cleared() {
-    // A flip-to-pending pipe edge arms a two-tick ping flash — even with
+    // A flip-to-pending edge arms a two-tick ping flash — even with
     // nothing else running, the timer must keep ticking Fast until the flash
     // itself clears. Mirrors
-    // `backgrounded_done_via_status_pipe_lets_the_timer_quiesce`, which
+    // `backgrounded_done_lets_the_timer_quiesce`, which
     // quiesces right away; the flash pins the timer open for its own window.
     let mut rt = runtime_with_config(config());
     rt.tabs_changed(vec![tab(0, "work", true)]);
     rt.radar.set_tab_panes_for_position(0, vec![pane(7)]);
 
-    let raw = payload::to_wire(&StatusPayload { msg: "approve?".into(), ..payload_for(7, Status::Pending) });
-    let edge = rt.status_pipe(&raw);
+    // Waiting since "now", so the `· Nm` wait tag is still counting.
+    let waiting = PaneAttention {
+        since_ms: crate::clock::now_epoch_s() * 1000,
+        ..program_attention(Status::Pending, "approve?")
+    };
+    let edge = rt.attention_changed(7, waiting);
     assert!(edge.effects.contains(&Effect::SetTimeout(Cadence::Fast)), "the flip-to-pending edge arms the timer");
 
     // The flash (armed through tick 2) is still active at tick 1, so the
@@ -1604,9 +1297,9 @@ fn command_attention_prev_emits_switch_tab() {
     runtime.radar.set_tab_panes_for_position(0, vec![pane(10)]);
     runtime.radar.set_tab_panes_for_position(1, vec![pane(11)]);
     runtime.radar.set_tab_panes_for_position(2, vec![pane(12)]);
-    runtime.radar.status_mut().apply(payload_for(10, Status::Running), 1, 0);
-    runtime.radar.status_mut().apply(payload_for(11, Status::Pending), 1, 0);
-    runtime.radar.status_mut().apply(payload_for(12, Status::Pending), 1, 0);
+    set_status(&mut runtime.radar, 10, Status::Running, "working", 1);
+    set_status(&mut runtime.radar, 11, Status::Pending, "working", 1);
+    set_status(&mut runtime.radar, 12, Status::Pending, "working", 1);
 
     let out = runtime.control(Verb::AttentionPrev);
     assert_eq!(out.effects, vec![Effect::SwitchTab { position: 2 }]);
@@ -1619,8 +1312,8 @@ fn control_pipe_dispatches_known_verb() {
     runtime.tabs_changed(vec![tab(0, "a", true), tab(1, "b", false)]);
     runtime.radar.set_tab_panes_for_position(0, vec![pane(10)]);
     runtime.radar.set_tab_panes_for_position(1, vec![pane(11)]);
-    runtime.radar.status_mut().apply(payload_for(10, Status::Running), 1, 0);
-    runtime.radar.status_mut().apply(payload_for(11, Status::Pending), 1, 0);
+    set_status(&mut runtime.radar, 10, Status::Running, "working", 1);
+    set_status(&mut runtime.radar, 11, Status::Pending, "working", 1);
 
     // Exercises the full parse → command → effect path through the pipe entry.
     let out = runtime.control_pipe("attention-next");
@@ -1637,96 +1330,22 @@ fn cadence_seconds_maps_fast_and_slow() {
 }
 
 #[test]
-fn command_done_keeps_fast_timer_armed_until_ttl_recede() {
-    let mut rt = runtime_with_config(config());
-    rt.command_changed(7, &["make".into()], true);
-    rt.timer_fast(PermissionProbe::default()); // debounce tick 1
-    rt.timer_fast(PermissionProbe::default()); // promote (DEBOUNCE_TICKS=2)
-                                               // Command leaves the foreground → tentative done → confirmed next tick.
-    rt.command_changed(7, &["zsh".into()], true);
-    rt.timer_fast(PermissionProbe::default());
-    rt.timer_fast(PermissionProbe::default());
-    assert_eq!(rt.radar.command_store().get(7).unwrap().status, Status::Done);
-    assert!(rt.timer_chain.armed().is_some(), "a Done awaiting TTL must keep the timer armed");
-    // Tick past the TTL: the Done recedes and the timer quiesces. No tab
-    // topology is registered for pane 7, so the recede has no tab to
-    // ledger under and is silently dropped (`ledger_receded`) — the
-    // ledger stays empty and cadence fully disarms.
-    for _ in 0..=crate::command::DONE_TTL_TICKS {
-        rt.timer_fast(PermissionProbe::default());
-    }
-    assert_eq!(rt.radar.command_store().get(7).unwrap().status, Status::Idle);
-    assert!(rt.radar.ledger_is_empty(), "setup: no tab topology, so the recede has nowhere to ledger");
-    assert!(rt.timer_chain.armed().is_none(), "receded: nothing left to tick for");
-}
-
-#[test]
 fn remote_running_never_arms_fast_cadence() {
     // The regression this feature could most easily cause: a live ssh session
     // must render steady, not spin — and steady means it must never pin the
     // 1 Hz Fast cadence (`AGENTS.md`'s "never poll" rule,
-    // `docs/smart-tabs-postmortem.md`). Mirrors
-    // `command_done_keeps_fast_timer_armed_until_ttl_recede`'s shape, but a
-    // Remote Running row should NEVER need Fast — not even transiently after
-    // promotion, unlike a Job.
+    // `docs/smart-tabs-postmortem.md`).
     let mut rt = runtime_with_config(config());
-    let pending = rt.command_changed(7, &["ssh".into(), "prod-db".into()], true);
-    assert_eq!(
-        pending.effects,
-        vec![Effect::SetTimeout(Cadence::Fast)],
-        "the pending debounce promotion still needs a tick"
-    );
-    rt.timer_fast(PermissionProbe::default()); // debounce tick 1
-    rt.timer_fast(PermissionProbe::default()); // promote (DEBOUNCE_TICKS=2)
-    assert_eq!(rt.radar.command_store().get(7).unwrap().status, Status::Running);
-    assert_eq!(rt.radar.command_store().get(7).unwrap().kind, crate::kind::Kind::Remote);
-    // The promoting tick itself may still arm Fast; one more tick lets the
-    // row's own steadiness decide cadence.
-    let settled = rt.timer_fast(PermissionProbe::default());
+    let remote = PaneAttention { app: Some("zellij".into()), ..program_attention(Status::Running, "prod-db") };
+    let outcome = rt.attention_changed(7, remote);
+    assert_eq!(rt.radar.observation(7).unwrap().status, Status::Running);
+    assert_eq!(rt.radar.observation(7).unwrap().kind, crate::kind::Kind::Remote);
     assert!(
-        !settled.effects.contains(&Effect::SetTimeout(Cadence::Fast)),
-        "a steady remote session must not keep arming Fast cadence, got {:?}",
-        settled.effects
+        !outcome.effects.contains(&Effect::SetTimeout(Cadence::Fast)),
+        "a steady remote session must not arm Fast cadence, got {:?}",
+        outcome.effects
     );
-    assert_ne!(
-        rt.timer_chain.armed(),
-        Some(Cadence::Fast),
-        "steady — nothing here is tick-windowed, unlike a Done awaiting its TTL"
-    );
-}
-
-#[test]
-fn command_ttl_recede_rearms_slow_not_fast_when_ledgered() {
-    // The subtle Fast→Slow handoff: when the LAST fast-worthy signal (a
-    // Done awaiting its TTL) finally recedes, `arm_timer_if_needed`
-    // re-arms from scratch on that very tick's `project` call. This time
-    // the pane has real tab topology, so the recede lands a fresh entry
-    // in the ledger — the freshly re-armed cadence must be Slow (there's
-    // an age to repaint), not None (nothing left) and not Fast (nothing
-    // tick-windowed remains).
-    let mut rt = runtime_with_config(config());
-    rt.tabs_changed(vec![tab(0, "work", true)]);
-    rt.radar.set_tab_panes_for_position(0, vec![pane(7)]);
-    rt.command_changed(7, &["make".into()], true);
-    rt.timer_fast(PermissionProbe::default()); // debounce tick 1
-    rt.timer_fast(PermissionProbe::default()); // promote (DEBOUNCE_TICKS=2)
-    rt.command_changed(7, &["zsh".into()], true);
-    rt.timer_fast(PermissionProbe::default());
-    rt.timer_fast(PermissionProbe::default());
-    assert_eq!(rt.radar.command_store().get(7).unwrap().status, Status::Done);
-    assert_eq!(rt.timer_chain.armed(), Some(Cadence::Fast), "a Done awaiting TTL needs Fast resolution");
-
-    for _ in 0..=crate::command::DONE_TTL_TICKS {
-        rt.timer_fast(PermissionProbe::default());
-    }
-
-    assert_eq!(rt.radar.command_store().get(7).unwrap().status, Status::Idle);
-    assert!(!rt.radar.ledger_is_empty(), "the TTL recede must hand the completion to the ledger");
-    assert_eq!(
-        rt.timer_chain.armed(),
-        Some(Cadence::Slow),
-        "receded: nothing fast-worthy remains, but the fresh ledger entry keeps a Slow heartbeat armed"
-    );
+    assert_ne!(rt.timer_chain.armed(), Some(Cadence::Fast), "steady — nothing here is tick-windowed");
 }
 
 #[test]
@@ -1807,7 +1426,7 @@ fn spinning_runtime() -> PluginRuntime {
     rt.config.spinner_fps = 4;
     rt.tabs_changed(vec![tab(0, "a", true)]);
     rt.radar.set_tab_panes_for_position(0, vec![pane(5)]);
-    rt.status_pipe(&payload::to_wire(&payload_for(5, Status::Running)));
+    rt.push(5, Status::Running);
     rt
 }
 
@@ -1867,7 +1486,7 @@ fn frames_stand_down_when_hidden_eased_or_opted_out() {
     let mut rt = granted_runtime();
     rt.tabs_changed(vec![tab(0, "a", true)]);
     rt.radar.set_tab_panes_for_position(0, vec![pane(5)]);
-    rt.status_pipe(&payload::to_wire(&payload_for(5, Status::Running)));
+    rt.push(5, Status::Running);
     assert_eq!(rt.timer_chain.armed(), Some(Cadence::Fast));
 
     // Eased: past EASE_AFTER_TICKS the glyph blinks per tick, so frames between
@@ -1911,8 +1530,7 @@ fn fast_work_arriving_during_slow_rearms_fast() {
     // The earlier-scheduled slow fire is a harmless spurious tick, but a
     // fresh `SetTimeout(Fast)` must also be pushed so the 1s resolution
     // returns promptly.
-    let raw = payload::to_wire(&payload_for(5, Status::Running));
-    let outcome = rt.status_pipe(&raw);
+    let outcome = rt.push(5, Status::Running);
     assert!(
         outcome.effects.contains(&Effect::SetTimeout(Cadence::Fast)),
         "fast work arriving during a slow arm must re-arm Fast, got {:?}",
@@ -1930,8 +1548,7 @@ fn slow_armed_then_fast_topup() -> PluginRuntime {
     seed_done_ledger(&mut rt, now);
     rt.tabs_changed(vec![]); // arms Slow: one fire in flight
     assert_eq!(rt.timer_chain.armed(), Some(Cadence::Slow), "setup: slow-armed on fresh history");
-    let raw = payload::to_wire(&payload_for(5, Status::Running));
-    let outcome = rt.status_pipe(&raw);
+    let outcome = rt.push(5, Status::Running);
     assert!(
         outcome.effects.contains(&Effect::SetTimeout(Cadence::Fast)),
         "setup: the top-up must arm Fast, got {:?}",
@@ -2124,7 +1741,7 @@ mod timer_chain_fuzz {
                     }
                     Step::SetRunning(running) => {
                         let status = if running { "running" } else { "done" };
-                        let out = rt.status_pipe(&payload_json(7, status));
+                        let out = rt.push(7, Status::from_wire(status));
                         sim.schedule_from(&out.effects);
                     }
                     Step::SessionCycle => {
@@ -2146,15 +1763,15 @@ mod timer_chain_fuzz {
 
             // Stronger post-condition, independent of the starve check
             // above: after the random churn stops, force any dangling
-            // `status_pipe`-origin busy edge closed (a *still-running*
+            // busy edge closed (a *still-running*
             // agent legitimately keeps Fast armed forever — that's correct,
             // not a bug, so it must not be mistaken for one here) and let
             // no more domain events land. A generous drain (well past
-            // DONE_TTL_TICKS=60 and any plausible stacked-stale-fire
+            // the flash window and any plausible stacked-stale-fire
             // backlog) must reach full disarm — catching a chain that's
             // stuck "armed" on paper but only ever fires (or only ever gets
             // swallowed as stale) without ever settling.
-            let close = rt.status_pipe(&payload_json(7, "done"));
+            let close = rt.push(7, Status::from_wire("done"));
             sim.schedule_from(&close.effects);
             let mut drained = false;
             for _ in 0..5000 {
@@ -2183,36 +1800,35 @@ mod timer_chain_fuzz {
 fn painted_runtime() -> PluginRuntime {
     let mut rt = runtime_with_granted_permission();
     drive_tabs_and_panes(&mut rt);
-    rt.status_pipe(&payload_json(7, "running"));
+    rt.push(7, Status::from_wire("running"));
     let _ = rt.render(30, 40);
     rt
 }
 
-/// A one-tab, one-pane manifest: pane 7 in tab 0, no exits, default theme.
+/// A one-tab, one-pane manifest: pane 7 in tab 0 reporting Running, default theme.
 fn manifest_with_pane_7() -> PaneUpdate {
+    let running =
+        crate::attention::NativePane { attention: program_attention(Status::Running, "working"), ..Default::default() };
     PaneUpdate {
         tab_panes: HashMap::from([(0, vec![pane(7)])]),
         live: HashSet::from([7]),
         theme: None,
-        exits: Vec::new(),
-        native: HashMap::new(),
+        native: HashMap::from([(7, running)]),
     }
 }
 
 #[test]
 fn hidden_rail_ticks_its_state_but_never_paints() {
-    // Every tick still runs the stores' tick-domain clocks (debounce
-    // promotion, Done TTL, stale-Running grace) so a hidden instance stays
-    // in lockstep with its visible siblings — it just does not paint the
-    // frame nobody can see.
+    // Every tick still advances the tick clock (flash windows) so a hidden
+    // instance stays in lockstep with its visible siblings — it just does not
+    // paint the frame nobody can see.
     let mut rt = painted_runtime();
-    let argv: Vec<String> = vec!["cargo".into(), "test".into()];
-    rt.command_changed(9, &argv, true);
+    rt.push(9, Status::Running);
 
     let hide = rt.visibility_changed(false);
     assert_eq!(hide, Outcome::none(), "going dark is silent: nothing to paint, nothing to write");
 
-    for _ in 0..DEBOUNCE_TICKS {
+    for _ in 0..2 {
         let tick = rt.timer_fast(PermissionProbe::default());
         assert!(!tick.render, "a hidden rail never paints a tick frame");
         assert!(
@@ -2221,131 +1837,7 @@ fn hidden_rail_ticks_its_state_but_never_paints() {
             tick.effects
         );
     }
-    assert_eq!(
-        rt.radar.command_store().get(9).map(|o| o.status),
-        Some(Status::Running),
-        "the debounce promotion landed on schedule while hidden"
-    );
-}
-
-/// Two tabs, the runtime's own rail in tab 0 (pane 7), pane 8 in tab 1.
-fn two_tab_runtime_owning_tab_0() -> PluginRuntime {
-    let mut rt = runtime_with_granted_permission();
-    rt.tabs_changed(vec![tab(0, "mine", true), tab(1, "theirs", false)]);
-    rt.radar.set_tab_panes_for_position(0, vec![pane(7)]);
-    rt.radar.set_tab_panes_for_position(1, vec![pane(8)]);
-    rt.own_plugin_tab_changed(Some(0));
-    rt
-}
-
-fn persists(out: &Outcome) -> bool {
-    out.effects.contains(&Effect::PersistSnapshot)
-}
-
-#[test]
-fn the_instance_whose_tab_holds_the_pane_writes_the_snapshot_hidden_or_not() {
-    // One writer per edge: every instance holds the same converged stores,
-    // so the pane's own tab writes and the others stay out — visibility
-    // plays no part. A detached session (every instance hidden) therefore
-    // still keeps the file current for the instances Zellij spawns on the
-    // next attach.
-    let mut rt = two_tab_runtime_owning_tab_0();
-    rt.visibility_changed(false);
-
-    let mine = rt.status_pipe(&payload_json(7, "done"));
-    assert!(!mine.render, "hidden: no paint");
-    assert!(persists(&mine), "own pane's edge is written even while hidden, got {:?}", mine.effects);
-    assert_eq!(rt.radar.status_store().get(7).map(|o| o.status), Some(Status::Done));
-
-    let theirs = rt.status_pipe(&payload_json(8, "done"));
-    assert!(!persists(&theirs), "another tab's pane is that tab's write, got {:?}", theirs.effects);
-    assert_eq!(rt.radar.status_store().get(8).map(|o| o.status), Some(Status::Done), "the store still took it");
-
-    rt.visibility_changed(true);
-    let theirs_visible = rt.status_pipe(&payload_json(8, "running"));
-    assert!(!persists(&theirs_visible), "visible changes nothing about ownership, got {:?}", theirs_visible.effects);
-}
-
-#[test]
-fn an_edge_on_a_pane_no_tab_holds_is_written_by_everyone() {
-    // A broadcast can precede the manifest that seats its pane; when the
-    // owner cannot be named, every instance writes rather than none.
-    let mut rt = two_tab_runtime_owning_tab_0();
-    let unknown = rt.status_pipe(&payload_json(99, "running"));
-    assert!(persists(&unknown), "unknown pane: everyone writes, got {:?}", unknown.effects);
-
-    // Likewise before this instance has resolved which tab it lives in.
-    let mut unresolved = runtime_with_granted_permission();
-    drive_tabs_and_panes(&mut unresolved);
-    let edge = unresolved.status_pipe(&payload_json(7, "running"));
-    assert!(persists(&edge), "unresolved own tab: write, got {:?}", edge.effects);
-}
-
-#[test]
-fn a_foreign_edge_does_not_drop_an_owned_deferred_write() {
-    // Tab 0 owns pane 7 and has a label-only relabel deferred to the next
-    // tick. An edge on tab 1's pane 8 arrives first: it is not this
-    // instance's write, and it must not consume the dirty flag that carries
-    // pane 7's pending write.
-    let mut rt = two_tab_runtime_owning_tab_0();
-    rt.status_pipe(&payload_json(7, "running"));
-    let relabel =
-        rt.status_pipe(&payload::to_wire(&StatusPayload { msg: "editing".into(), ..payload_for(7, Status::Running) }));
-    assert!(!persists(&relabel) && rt.snapshot_dirty, "label-only defers, got {:?}", relabel.effects);
-
-    let foreign = rt.status_pipe(&payload_json(8, "done"));
-    assert!(!persists(&foreign));
-    assert!(rt.snapshot_dirty, "a non-owner edge leaves the owned deferral armed");
-
-    let flush = rt.timer_fast(PermissionProbe::default());
-    assert!(persists(&flush), "the tick flushes the owned deferral, got {:?}", flush.effects);
-    assert!(!rt.snapshot_dirty);
-}
-
-#[test]
-fn timer_driven_edges_are_written_by_every_instance() {
-    // Unlike a pushed edge, a debounce promotion / Done confirm is written by
-    // every instance: timers run on unaligned phases, so an owner-only rule
-    // lets a lagging sibling's own-pane write revert the owner's (see
-    // `RadarState::timer`).
-    let run = |pane_id: u32| {
-        let mut rt = two_tab_runtime_owning_tab_0();
-        rt.command_changed(pane_id, &["cargo".to_string(), "test".to_string()], true);
-        let mut ticks = Vec::new();
-        for _ in 0..DEBOUNCE_TICKS {
-            ticks.push(rt.timer_fast(PermissionProbe::default()));
-        }
-        assert_eq!(rt.radar.command_store().get(pane_id).map(|o| o.status), Some(Status::Running));
-        let promoted = ticks.last().unwrap().clone();
-        rt.command_changed(pane_id, &["zsh".to_string()], false);
-        let mut confirm = Vec::new();
-        for _ in 0..DEBOUNCE_TICKS {
-            confirm.push(rt.timer_fast(PermissionProbe::default()));
-        }
-        assert_eq!(rt.radar.command_store().get(pane_id).map(|o| o.status), Some(Status::Done));
-        (promoted, confirm.last().unwrap().clone())
-    };
-
-    let (promoted, done) = run(7);
-    assert!(persists(&promoted), "own pane's promotion is this tab's write, got {:?}", promoted.effects);
-    assert!(persists(&done), "own pane's Done confirm is this tab's write, got {:?}", done.effects);
-
-    let (promoted, done) = run(8);
-    assert!(promoted.render, "a foreign promotion still renders");
-    assert!(persists(&promoted), "a foreign promotion is written too, got {:?}", promoted.effects);
-    assert!(persists(&done), "a foreign Done confirm is written too, got {:?}", done.effects);
-}
-
-#[test]
-fn a_timer_edge_on_a_pane_no_tab_holds_is_written_by_everyone() {
-    let mut rt = two_tab_runtime_owning_tab_0();
-    rt.command_changed(99, &["cargo".to_string(), "test".to_string()], true);
-    let mut last = Outcome::none();
-    for _ in 0..DEBOUNCE_TICKS {
-        last = rt.timer_fast(PermissionProbe::default());
-    }
-    assert_eq!(rt.radar.command_store().get(99).map(|o| o.status), Some(Status::Running));
-    assert!(persists(&last), "unknown pane: everyone writes, got {:?}", last.effects);
+    assert_eq!(rt.tick, 2, "the tick clock advanced on schedule while hidden");
 }
 
 #[test]
@@ -2363,12 +1855,6 @@ fn reveal_repaints_once_even_when_the_rows_did_not_change() {
     let again = rt.visibility_changed(true);
     assert_eq!(again, Outcome::none(), "a repeated Visible(true) is a no-op");
     assert!(rt.timer_fast(PermissionProbe::default()).render, "visible again: tick frames paint as before");
-    let edge = rt.status_pipe(&payload_json(7, "done"));
-    assert!(
-        edge.effects.contains(&Effect::PersistSnapshot),
-        "visible again: this instance writes, got {:?}",
-        edge.effects
-    );
 }
 
 #[test]
@@ -2387,25 +1873,6 @@ fn a_manifest_proves_the_rail_visible() {
     rt.visibility_changed(false);
     rt.panes_changed(manifest_with_pane_7());
     assert!(rt.timer_fast(PermissionProbe::default()).render, "a PaneUpdate un-hides the rail");
-}
-
-#[test]
-fn rehydrated_server_row_keeps_its_kind_across_the_remote_sweep() {
-    // `load` runs the remote_commands sweep after every snapshot restore. A
-    // Server row must come back a Server — steady, zero ticks — not a plain
-    // Command that spins and pins Fast cadence (the regression the first
-    // sweep shipped with).
-    let mut seeded = crate::radar_state::RadarState::default();
-    seeded.command_changed(7, &["npm".into(), "run".into(), "dev".into()], true, 0);
-    seeded.timer(DEBOUNCE_TICKS, 0);
-    assert_eq!(seeded.command(7).unwrap().kind, crate::kind::Kind::Server);
-    let snapshot = seeded.snapshot_json(None, DEBOUNCE_TICKS);
-
-    let mut rt = runtime_with_config(config());
-    rt.load(config(), Some(&snapshot), PermissionProbe::default());
-    let obs = rt.radar.command_store().get(7).unwrap();
-    assert_eq!(obs.kind, crate::kind::Kind::Server, "rehydrated server row keeps its kind");
-    assert!(!obs.animating(), "and stays steady");
 }
 
 // ── Selectability: the rail is passive only once it has a terminal neighbor ──
@@ -2431,7 +1898,7 @@ fn selectable_effects(outcome: &Outcome) -> Vec<bool> {
 
 fn manifest(tab_panes: HashMap<usize, Vec<TerminalPane>>) -> PaneUpdate {
     let live = tab_panes.values().flatten().map(|p| p.id).collect();
-    PaneUpdate { tab_panes, live, theme: None, exits: Vec::new(), native: HashMap::new() }
+    PaneUpdate { tab_panes, live, theme: None, native: HashMap::new() }
 }
 
 #[test]
@@ -2441,7 +1908,7 @@ fn load_declares_the_rail_selectable_before_any_manifest_arrives() {
     // exactly what closed a rail-only tab. Load must declare the pane
     // selectable and wait for evidence of a terminal neighbor.
     let mut runtime = PluginRuntime::default();
-    let outcome = runtime.load(config(), None, PermissionProbe { marker: None, lock_acquired: false });
+    let outcome = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: false });
     assert!(runtime.permission.is_waiting());
     assert_eq!(selectable_effects(&outcome), vec![true]);
 }
@@ -2451,7 +1918,7 @@ fn rail_turns_passive_only_once_a_terminal_pane_shares_its_tab() {
     // Declared selectable at load (peer-waiting arm), then granted out of
     // band — the steady state of every rail after first-run coordination.
     let mut runtime = PluginRuntime::default();
-    runtime.load(config(), None, PermissionProbe { marker: None, lock_acquired: false });
+    runtime.load(config(), PermissionProbe { marker: None, lock_acquired: false });
     runtime.permission = PermissionState::Resolved { granted: true };
     runtime.tabs_changed(vec![tab(0, "Tab #1", true)]);
     runtime.own_plugin_tab_changed(Some(0));
@@ -2495,7 +1962,7 @@ fn requesting_rail_stays_selectable_despite_a_terminal_neighbor() {
     // Zellij's y/n prompt is tied to the requesting pane — it must remain
     // focusable until the answer lands, terminal neighbor or not.
     let mut runtime = PluginRuntime::default();
-    let load = runtime.load(config(), None, PermissionProbe { marker: None, lock_acquired: true });
+    let load = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: true });
     assert!(runtime.permission.is_requesting());
     assert_eq!(selectable_effects(&load), vec![true]);
 
@@ -2513,7 +1980,7 @@ fn granted_rail_in_a_rail_only_tab_stays_selectable_after_the_prompt() {
     // The grant resolves while the rail is still the tab's only pane: the
     // prompt is gone, but there is still nothing else to focus — no flip.
     let mut runtime = PluginRuntime::default();
-    runtime.load(config(), None, PermissionProbe { marker: None, lock_acquired: true });
+    runtime.load(config(), PermissionProbe { marker: None, lock_acquired: true });
     runtime.own_plugin_tab_changed(Some(0));
     runtime.panes_changed(manifest(HashMap::from([(0, vec![])])));
 
@@ -2531,7 +1998,7 @@ fn mode_runtime(show_mode: bool) -> PluginRuntime {
     };
     rt.config.show_mode = show_mode;
     drive_tabs_and_panes(&mut rt);
-    rt.status_pipe(&payload_json(7, "running"));
+    rt.push(7, Status::from_wire("running"));
     // Name already known, so the mode events below carry no news but the mode.
     let _ = rt.session_name_changed(Some("work".into()));
     let _ = rt.render(40, 30);

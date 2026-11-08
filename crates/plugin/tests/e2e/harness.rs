@@ -382,12 +382,24 @@ impl ZellijSession {
 
     /// Emit an OSC 7501 program-status sequence from the focused terminal pane
     /// (`printf` typed into the shell), so Zellij's own attention tracking
-    /// sees it — the native path, unlike `pipe_status`. `body` is the
-    /// `:`-separated pair list; `msg`/`title` values must be base64.
+    /// sees it. `body` is the `:`-separated pair list; `msg`/`title` values
+    /// must be base64.
     pub fn emit_program_status(&self, body: &str) {
         let cmd = format!(r"printf '\033]7501;%s\033\\' '{body}'");
         let _ = self.isolated.command("zellij").args(["--session", &self.name, "action", "write-chars", &cmd]).output();
         let _ = self.isolated.command("zellij").args(["--session", &self.name, "action", "write", "13"]).output();
+        // Allow Zellij to hand the new attention to the plugin and re-render.
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    /// `emit_program_status` from the next pane in the tab (focus-next, emit,
+    /// focus back) — the sibling of a two-terminal layout's focused pane.
+    pub fn emit_program_status_in_next_pane(&self, body: &str) {
+        let _ = self.action(&["focus-next-pane"]);
+        std::thread::sleep(Duration::from_millis(300));
+        self.emit_program_status(body);
+        let _ = self.action(&["focus-previous-pane"]);
+        std::thread::sleep(Duration::from_millis(200));
     }
 
     /// Move focus to the next pane in the tab, discover its pane ID via
@@ -427,63 +439,6 @@ impl ZellijSession {
             .args(args)
             .output()
             .expect("zellij action failed to spawn")
-    }
-
-    /// Send a `zj_radar.status.v1` pipe message to the plugin.
-    pub fn pipe_status(&self, json: &str) {
-        let out = self
-            .isolated
-            .command("zellij")
-            .args(["--session", &self.name, "pipe", "--name", "zj_radar.status.v1", "--", json])
-            .output()
-            .expect("zellij pipe failed to spawn");
-        if !out.status.success() {
-            eprintln!("[e2e] pipe failed (rc={}): {}", out.status, String::from_utf8_lossy(&out.stderr));
-        }
-        // Allow the plugin time to re-render.
-        std::thread::sleep(Duration::from_millis(500));
-    }
-
-    /// Fire the real notify.sh against this session (true hook->pipe->render).
-    ///
-    /// Gives notify.sh the session's full isolated environment so that the
-    /// `zellij pipe` inside it connects to the same private Zellij server.
-    /// `ZELLIJ_SESSION_NAME` is set so `zellij pipe` (which has no `--session`
-    /// flag) targets the right session even when invoked outside a live PTY.
-    ///
-    /// `pane_id` is the numeric terminal pane ID (from `discover_terminal_pane_id`);
-    /// it is formatted as `terminal_<pane_id>` for `$ZELLIJ_PANE_ID`.
-    pub fn run_notify_sh(&self, status: &str, pane_id: u32, hook_json: &str) {
-        // notify.sh lives at the workspace root, not under this crate.
-        // CARGO_MANIFEST_DIR is crates/plugin, so go up two levels — mirroring
-        // plugin_wasm_path. (Before the workspace split the manifest dir WAS the
-        // repo root, so the old `plugins/...` path silently broke this test.)
-        let script =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/zj-radar-claude/scripts/notify.sh");
-        use std::io::Write as _;
-        let mut command = self.isolated.command("bash");
-        command
-            .arg(&script)
-            .arg(status)
-            // Gate: notify.sh exits immediately if these are unset.
-            .env("ZELLIJ", "1")
-            .env("ZELLIJ_PANE_ID", format!("terminal_{pane_id}"))
-            // ZELLIJ_SESSION_NAME lets `zellij pipe` (no --session flag) target
-            // the correct session when called outside a live Zellij PTY.
-            .env("ZELLIJ_SESSION_NAME", &self.name)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit());
-        let mut child = command.spawn().expect("spawn notify.sh");
-        child.stdin.as_mut().unwrap().write_all(hook_json.as_bytes()).unwrap();
-        child.wait().unwrap();
-        // notify.sh's send is synchronous, so on the happy path the pipe has
-        // been consumed by the time `wait` returns (if the send deadline
-        // expired instead, the event was dropped — the caller's assertion
-        // will say so). A short pad covers server→plugin delivery; the render
-        // wait itself belongs to the caller's `wait_until` poll, not a flat
-        // sleep here.
-        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 
     /// Dump the focused terminal pane as plain text (may contain ANSI).

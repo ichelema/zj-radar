@@ -5,7 +5,7 @@
 //! and the naming *state* (`applied`: which name this module last applied to each
 //! tab, the basis for stickiness). It is fed resolved [`TabFacts`] — the caller
 //! does the joins across its stores and pane topology, so this module never
-//! learns about `StatusStore`, `CommandStore`, `TerminalPane`, or a cwd map.
+//! learns about `RadarState`'s observations, `TerminalPane`, or a cwd map.
 //!
 //! Stickiness in one candidate space: `computed_name` takes the top candidate and
 //! `name_supported` asks whether a name sits anywhere in that same space. Both

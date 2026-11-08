@@ -2,14 +2,14 @@
 //! `runtime/tests.rs`, and `radar_state/tests.rs`).
 //!
 //! These pin the canonical test vocabulary — position-derived tab ids, bare
-//! panes, and the status-payload strings (`"repo"` / `"main"` / `"working"` /
-//! `"claude"`) — in one place so the suites can't drift apart. Fixtures that
+//! panes, and native program attention — in one place so the suites can't
+//! drift apart. Fixtures that
 //! encode a *suite-specific* concern (State wiring in lib.rs, focus flags and
 //! explicit tab ids in radar_state) stay as thin local wrappers over these,
 //! so the difference reads as intentional at the definition site.
 
-use crate::payload::StatusPayload;
-use crate::radar_state::{RadarTab, TabId};
+use crate::attention::{PaneAttention, Source};
+use crate::radar_state::{RadarState, RadarTab, TabId};
 use crate::rollup::TerminalPane;
 use crate::status::Status;
 
@@ -30,24 +30,22 @@ pub(crate) fn pane(id: u32) -> TerminalPane {
     TerminalPane { id, ..TerminalPane::default() }
 }
 
-/// A status payload scoped to an explicit repo — for suites where the repo
-/// drives the behavior under test (tab naming, cross-repo isolation).
-pub(crate) fn payload_in_repo(pane_id: u32, status: Status, repo: &str) -> StatusPayload {
-    StatusPayload {
-        pane_id,
+/// The native attention OSC 7501 reports for a pane: `status` from a program
+/// (`app` claude-code), `msg` as Zellij's display text. `since_ms` stamps the
+/// completion / wait epoch (100 s).
+pub(crate) fn program_attention(status: Status, msg: &str) -> PaneAttention {
+    PaneAttention {
         status,
-        repo: repo.into(),
-        branch: "main".into(),
-        msg: "working".into(),
-        task: String::new(),
-        source: "claude".into(),
-        ack: false,
-        tasks: None,
+        source: Source::Program,
+        text: msg.into(),
+        app: Some("claude-code".into()),
+        since_ms: 100_000,
+        ..PaneAttention::default()
     }
 }
 
-/// The canonical status payload: repo `"repo"`, branch `"main"`,
-/// msg `"working"`, source `"claude"`.
-pub(crate) fn payload_for(pane_id: u32, status: Status) -> StatusPayload {
-    payload_in_repo(pane_id, status, "repo")
+/// Report `pane_id`'s native attention the way `PaneAttentionChanged` does.
+/// Returns whether the pane's observation changed.
+pub(crate) fn set_status(radar: &mut RadarState, pane_id: u32, status: Status, msg: &str, tick: u64) -> bool {
+    radar.attention_changed(pane_id, program_attention(status, msg), tick)
 }

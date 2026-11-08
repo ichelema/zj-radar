@@ -118,8 +118,6 @@ plugins {
     radar location="file:~/.config/zellij/plugins/zj_radar.wasm" {
         density "cards"         // cards · comfortable · compact
         naming "managed"        // off · managed · force
-        interactive_commands ""    // extra editors/pagers/TUIs to keep quiet
-        remote_commands ""         // extra remote-session launchers
         spinner_fps 4              // working-spinner frames/s (1 = once a second)
         task_lines "lines"         // background tasks: lines · count · off
         ledger true                // recent completions under ─ earlier ─

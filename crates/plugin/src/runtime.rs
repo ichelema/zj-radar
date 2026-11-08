@@ -9,15 +9,14 @@
 //! directly and assert on the returned `Outcome` — no Zellij needed.
 //!
 //! # Event entry points
-//! - [`load`](PluginRuntime::load) — first run: seed config/snapshot, begin the
+//! - [`load`](PluginRuntime::load) — first run: seed config, begin the
 //!   permission flow.
 //! - [`tabs_changed`](PluginRuntime::tabs_changed) /
 //!   [`panes_changed`](PluginRuntime::panes_changed) /
 //!   [`cwd_changed`](PluginRuntime::cwd_changed) — Zellij topology updates.
-//! - [`command_changed`](PluginRuntime::command_changed) — a pane's foreground
-//!   process changed (the *observed* information source).
-//! - [`status_pipe`](PluginRuntime::status_pipe) — a `zj_radar.status.v1`
-//!   broadcast from an agent hook (the *pushed* information source).
+//! - [`attention_changed`](PluginRuntime::attention_changed) — one pane's
+//!   native attention moved (`PaneAttentionChanged`); the manifest in
+//!   `panes_changed` carries the rest.
 //! - [`config_pipe`](PluginRuntime::config_pipe) /
 //!   [`control`](PluginRuntime::control) /
 //!   [`control_pipe`](PluginRuntime::control_pipe) — runtime config + remote
@@ -44,7 +43,7 @@ use crate::config;
 use crate::control::Verb;
 use crate::permission::{PermissionMarker, PermissionPolicy, PermissionProbe, PermissionState, Transition};
 use crate::presence::Presence;
-use crate::radar_state::{Direction, PaneUpdate, RadarChange, RadarState, RadarTab, SnapshotWrite, TabId};
+use crate::radar_state::{Direction, PaneUpdate, RadarChange, RadarState, RadarTab, TabId};
 use crate::render::{self, RenderedRail};
 use crate::rollup::{LedgerLine, TabRow};
 use crate::sessions::{BadgeEntry, CommitTarget, Sessions};
@@ -97,11 +96,6 @@ pub(crate) enum Effect {
     RequestPermission,
     SetSelectable(bool),
     SetTimeout(Cadence),
-    /// Write the shared snapshot: lib.rs reads the existing file, merges
-    /// (`snapshot_json`), and writes it back. For pushed edges, emitted only
-    /// by the edge's owner (`RadarState::persists_edges_for`); timer edges
-    /// are written by every instance (`RadarState::timer`).
-    PersistSnapshot,
     PersistPermissionMarker(PermissionMarker),
     RenameTab {
         tab_id: TabId,
@@ -151,23 +145,14 @@ pub(crate) enum Effect {
         tab_position: Option<usize>,
         pane_id: Option<u32>,
     },
-    /// Re-broadcast a `zj_radar.status.v1` payload over the shared pipe —
-    /// `payload` is already wire-encoded (`payload::to_wire`), ready to hand
-    /// to `zellij pipe`. Emitted by `mouse_right_click`'s pending-pane
-    /// acknowledge: dismissing a pending pane must be a SHARED signal (issue
-    /// #5's design constraint — clearing it only in the clicking instance
-    /// repeats the removed focus-clear mistake, where a background tab's
-    /// rail never learns the card changed). So the click never mutates
-    /// `radar` directly; it only ever produces this effect, and every
-    /// instance — including the one that clicked, via the same fan-out a
-    /// real producer's broadcast gets — converges through the normal
-    /// `status_pipe` → `StatusStore::apply` intake once the pipe echoes it
-    /// back. `apply`'s existing identical-rebroadcast no-op (same
-    /// `(status, msg)` twice: no `completed_epoch_s` re-stamp, no second
-    /// ledger edge) is what makes that convergence idempotent rather than a
-    /// second race.
-    BroadcastStatus {
-        payload: String,
+    /// Mark a pane seen in Zellij's own attention state
+    /// (`mark_session_pane_seen`). Emitted by `mouse_right_click`'s
+    /// pending-pane acknowledge and the `✓` hotspot: Zellij clears the pane's
+    /// attention and every rail converges on the resulting `PaneUpdate`, so
+    /// the click mutates nothing here.
+    MarkSeen {
+        session: String,
+        pane_id: u32,
     },
 }
 
@@ -335,11 +320,6 @@ pub(crate) struct PluginRuntime {
     /// `global_attention_changed` — so a single event's "now" never forks in two
     /// directions.
     last_now_epoch_s: u64,
-    /// A deferred snapshot write landed and hasn't been flushed yet — the
-    /// next timer tick carries it (`SnapshotWrite::Deferred`'s doc has the
-    /// why). Set in `project`, consumed by `timer`'s flush — and cleared by
-    /// any interleaving immediate persist, which supersedes it.
-    snapshot_dirty: bool,
     /// The `radar.generation()` the own badge counts were derived at. They
     /// are a pure function of radar state, so an event that didn't advance
     /// the generation can skip the whole derive — under interpreted wasm that
@@ -352,7 +332,7 @@ pub(crate) struct PluginRuntime {
     /// `project`'s render gate — a change whose re-derived key equals what is
     /// already on screen requests no repaint (`RadarChange::force_render`
     /// bypasses, for tick-driven frames). Zellij delivers every broadcast
-    /// and every `CommandChanged` to EVERY tab's instance, so vetoing
+    /// and every `PaneAttentionChanged` to EVERY tab's instance, so vetoing
     /// identical repaints here is one of the two big levers on session-wide
     /// plugin CPU; the other is `hidden`.
     last_render_key: Option<RenderKey>,
@@ -363,9 +343,8 @@ pub(crate) struct PluginRuntime {
     /// sees it), and the `cmd.v1` verbs (see `control`: every tab's rail
     /// receives each command, and a hidden rail's frozen `tabs` still mark
     /// its own tab active, so letting it act would race the visible rail's
-    /// `SwitchTab` with a wrong one). State keeps ticking at full cadence — the stores'
-    /// grace clocks count ticks, so a slowed instance would drift from its
-    /// siblings until reveal. `Visible(true)` repaints the skipped frame.
+    /// `SwitchTab` with a wrong one). State keeps ticking at full cadence, so a slowed
+    /// instance would drift from its siblings until reveal. `Visible(true)` repaints the skipped frame.
     /// Zellij 0.44 routes `TabUpdate`/`PaneUpdate` to the plugins in a
     /// client's *active* tab only, so receiving one proves this instance
     /// visible and clears the flag even if a `Visible(true)` was lost — a
@@ -409,8 +388,8 @@ type RenderKey = (
 
 /// The ONE derivation of the own badge row's counts. They are deliberately pane-level
 /// while the rail itself remains tab-rolled-up. `rows()` is already
-/// constrained by the current pane topology, so a pre-topology payload or
-/// stale store id cannot inflate cross-session counts; command observations
+/// constrained by the current pane topology, so a stale pane id cannot
+/// inflate cross-session counts; command observations
 /// are excluded at this seam (`is_status_origin`), not inferred later from a
 /// tab's dominant status. `attention_tab_position` is the first
 /// (lowest-position) row that `needs_you()`.
@@ -436,30 +415,12 @@ fn presence_counts(rows: &[TabRow]) -> (usize, usize, Option<usize>) {
 }
 
 impl PluginRuntime {
-    pub(crate) fn load(
-        &mut self,
-        config: config::Config,
-        snapshot: Option<&str>,
-        permission: PermissionProbe,
-    ) -> Outcome {
+    pub(crate) fn load(&mut self, config: config::Config, permission: PermissionProbe) -> Outcome {
         self.config = config;
         self.sessions.set_show_trees(self.config.session_tree);
         // Load's single clock capture, stored eagerly (and reused by
         // `begin_permission_flow`'s arm below, keeping one "now" per event).
         self.last_now_epoch_s = crate::clock::now_epoch_s();
-        if let Some(raw) = snapshot {
-            if let Some(tick) = self.radar.load_snapshot(raw) {
-                self.tick = tick;
-            }
-        }
-        // Level-triggered interactive-set application, AFTER the snapshot load
-        // so a rehydrated stale Running-nvim row is demoted here — the TUI
-        // fires no further CommandChanged until it exits, so this is the only
-        // edge that can catch it (`docs/activity-model.md` §5).
-        self.radar.set_interactive_commands(&self.config.interactive_commands);
-        // Same level-triggered treatment for the remote set: a rehydrated
-        // remote_commands extra re-kinds an already-promoted row immediately.
-        self.radar.set_remote_commands(&self.config.remote_commands);
         self.begin_permission_flow(permission)
     }
 
@@ -532,14 +493,14 @@ impl PluginRuntime {
             self.own_tab_position.is_some_and(|pos| update.tab_panes.get(&pos).is_some_and(|panes| !panes.is_empty()));
         let mut effects = Vec::new();
         self.sync_selectable(&mut effects);
-        let change = self.radar.panes_changed(update, self.tick, now, self.config.naming);
+        let change = self.radar.panes_changed(update, self.tick, self.config.naming);
         self.project(effects, change, now)
     }
 
     /// `elapsed_s` is the duration Zellij reports on `Event::Timer` — the
     /// seconds the fired `set_timeout` was armed with, i.e. which cadence
     /// scheduled this fire. `now_epoch_s` is the event's single clock
-    /// capture, taken by the caller like every store beneath already does —
+    /// capture, taken by the caller —
     /// lib.rs passes `clock::now_epoch_s()`; the virtual-time harness
     /// (`runtime/tests.rs`'s `FireSim`) passes its own advancing epoch, so
     /// the wall-clock-keyed gates in here move in lockstep with simulated
@@ -579,7 +540,7 @@ impl PluginRuntime {
         // state) as the cadence discrimination for the gates below.
         let is_slow_fire = elapsed_s > STALE_FIRE_ELAPSED_S;
         // One clock capture per event (the caller's): every consumer below
-        // (store timer, cadence decision, re-arm via project) sees the same "now".
+        // (cadence decision, re-arm via project) sees the same "now".
         let now = now_epoch_s;
         let mut effects = Vec::new();
         let permission_changed = self.check_deferred_permission_request(permission, &mut effects);
@@ -590,11 +551,7 @@ impl PluginRuntime {
             effects.push(Effect::HeartbeatPermissionLock);
         }
         self.tick += 1;
-        // A tick can mutate the command store (debounced promotion to Running,
-        // Running→Done confirm). Every instance persists the snapshot when it
-        // does, or a tab opened in that window would seed a rail missing the
-        // change (why every instance, not just the owner: `RadarState::timer`).
-        let store_changed = self.radar.timer(self.tick, now);
+        self.radar.timer(self.tick);
         // BEFORE re-arming below, commit an idle cycle selection if one is
         // pending. Committing here — not after `project` re-arms — matters:
         // a commit clears `Sessions::wants_fast_cadence`, and the chain must
@@ -613,7 +570,6 @@ impl PluginRuntime {
         let awaiting_permission = self.permission.is_requesting();
         let render = permission_changed
             || awaiting_permission
-            || store_changed
             || self.timer_should_continue()
             // A Slow fire exists to repaint ledger ages — even when nothing
             // else changed, `format_age` output may have moved.
@@ -621,16 +577,8 @@ impl PluginRuntime {
             // the desire can have moved on (in either direction) between the
             // arm and the fire.
             || is_slow_fire;
-        // The tick is also the flush point for writes deferred by
-        // Running-label-only broadcasts (`SnapshotWrite::Deferred`) — one
-        // read-merge-write per second ceiling instead of one per message per
-        // instance. Taken unconditionally (not `||`-short-circuited behind
-        // `store_changed`) so an immediate persist on the same tick can never
-        // leave the flag armed for a redundant write next tick.
-        let flush = std::mem::take(&mut self.snapshot_dirty);
         let change = RadarChange {
             render,
-            snapshot: SnapshotWrite::now_if(store_changed || flush),
             // Tick-driven frames (spinner, ages) redraw identical rows —
             // exempt from the rows-diff render gate by definition.
             force_render: true,
@@ -640,7 +588,7 @@ impl PluginRuntime {
     }
 
     /// A frame-only fire: nothing changed but the spinner's frame, so skip
-    /// every per-tick duty (store timers, persists)
+    /// every per-tick duty
     /// and just re-arm and repaint. The repaint bypasses `project`'s rows-diff
     /// gate by construction — the rows are identical, the frame is not — and
     /// honors the visibility gate (a rail that went hidden mid-frame paints
@@ -691,8 +639,8 @@ impl PluginRuntime {
     /// (same cached `RenderedRail`, same permission gate), then acknowledges
     /// a pending pane or tab row: see `acknowledge_pending_targets`. This is
     /// issue #5's fix for the completed-turn-ending-in-a-courtesy-question
-    /// trap: `Pending` has no exit besides another broadcast, so a click that
-    /// means "I saw it, stop asking" has to BE one. A peer-session badge line
+    /// trap: a click that means "I saw it, stop asking" marks the pane seen in
+    /// Zellij. A peer-session badge line
     /// (`session: Some(_)`) is not a pane or tab: a no-op.
     pub(crate) fn mouse_right_click(&mut self, line: isize, _col: usize) -> Outcome {
         if !self.permission.granted() {
@@ -711,57 +659,26 @@ impl PluginRuntime {
     /// `target` should check for a dismissible `Pending` — one pane for a
     /// pane row (`target.pane_id: Some(p)`), every pane in the tab for a tab
     /// row (`target.pane_id: None` — a tab's header line, or a plain tab with
-    /// no per-pane detail line at all) — turned into one `Effect::BroadcastStatus`
-    /// per pane whose STATUS-PIPE observation (`RadarState::status_observation`;
-    /// never command-origin, which is untouched by design) currently reads
-    /// `Pending`. A target with nothing Pending on it — including every
-    /// other status, and a tab with no tracked panes at all — produces no
-    /// effects: `Outcome::with_effects(false, vec![])` equals `Outcome::none()`,
-    /// so this is a strict no-op, not a render with nothing to show for it.
+    /// no per-pane detail line at all) — turned into one `Effect::MarkSeen`
+    /// per pane whose native observation currently reads `Pending`. A target
+    /// with nothing Pending on it produces no effects, and so does a session
+    /// whose name is not known yet (`MarkSeen` addresses a pane by session).
     /// Deliberately returns `render: false` from the caller regardless: this
-    /// gesture never mutates `radar` — see `Effect::BroadcastStatus`'s doc for
-    /// why the convergence has to ride the pipe instead.
+    /// gesture never mutates `radar` — Zellij's own seen mark comes back as
+    /// the next `PaneUpdate`.
     fn acknowledge_pending_targets(&self, target: &render::RailTarget) -> Vec<Effect> {
+        if self.own_session_name.is_empty() {
+            return Vec::new();
+        }
         let pane_ids = match target.pane_id {
             Some(pane_id) => vec![pane_id],
             None => self.radar.pane_ids_for_tab(target.tab_position),
         };
         pane_ids
             .into_iter()
-            .filter_map(|pane_id| self.acknowledge_pending_payload(pane_id))
-            .map(|payload| Effect::BroadcastStatus { payload })
+            .filter(|&pane_id| self.radar.observation(pane_id).is_some_and(|o| o.status == Status::Pending))
+            .map(|pane_id| Effect::MarkSeen { session: self.own_session_name.clone(), pane_id })
             .collect()
-    }
-
-    /// The synthetic `zj_radar.status.v1` payload that acknowledges `pane_id`
-    /// — `None` unless the status store currently reads it as `Pending`
-    /// (anything else, including a command-origin observation the status
-    /// store never held in the first place, is left alone). Carries the
-    /// observation's own repo/branch/msg forward — only `status` moves,
-    /// Pending → Done — and re-derives `source` from its already-classified
-    /// `kind` via `Kind::as_source`, the exact inverse of the intake
-    /// classification (`Kind::from_source`), so the pane's `Kind` survives
-    /// the round trip unchanged. `task` is left absent (empty): `StatusStore::apply`
-    /// treats an empty `task` on a non-Idle status as "leave the sticky label
-    /// alone", so the turn's task stays put rather than this dismiss quietly
-    /// erasing it. Rides with `ack: true`: this Done means "the user has seen
-    /// it" (the wire flag is kept for producers and peers).
-    fn acknowledge_pending_payload(&self, pane_id: u32) -> Option<String> {
-        let obs = self.radar.status_observation(pane_id)?;
-        if obs.status != Status::Pending {
-            return None;
-        }
-        Some(crate::payload::to_wire(&crate::payload::StatusPayload {
-            pane_id,
-            status: Status::Done,
-            repo: obs.repo.clone(),
-            branch: obs.branch.clone(),
-            msg: obs.msg.clone(),
-            task: String::new(),
-            source: obs.kind.as_source().to_string(),
-            ack: true,
-            tasks: None,
-        }))
     }
 
     /// Run an imperative command verb. `AttentionNext/Prev` resolve a
@@ -980,23 +897,6 @@ impl PluginRuntime {
         self.project(vec![], RadarChange { render, ..RadarChange::default() }, crate::clock::now_epoch_s())
     }
 
-    pub(crate) fn command_changed(&mut self, pane_id: u32, command: &[String], is_foreground: bool) -> Outcome {
-        let change = self.radar.command_changed(pane_id, command, is_foreground, self.tick);
-        self.project(vec![], change, crate::clock::now_epoch_s())
-    }
-
-    pub(crate) fn status_pipe(&mut self, raw: &str) -> Outcome {
-        let now = crate::clock::now_epoch_s();
-        let Some(change) = self.radar.status_pipe(raw, self.tick, now, self.config.naming) else {
-            return Outcome::none();
-        };
-        self.project(vec![], change, now)
-    }
-
-    pub(crate) fn snapshot_json(&self, existing: Option<&str>) -> String {
-        self.radar.snapshot_json(existing, self.tick)
-    }
-
     pub(crate) fn config_pipe(&mut self, raw: &str) -> Outcome {
         let Some(kv) = crate::config::overrides_from_json(raw) else {
             return Outcome::none();
@@ -1005,15 +905,6 @@ impl PluginRuntime {
         // Display-only now (peers always publish trees): just re-derive the
         // badge; `force_render` below repaints.
         self.sessions.set_show_trees(self.config.session_tree);
-        // Re-apply the interactive set level-triggered: an `interactive_commands`
-        // override must demote an already-promoted Running TUI row NOW — it will
-        // never fire another CommandChanged until it exits. A sweep that changed
-        // state persists, so instances spawned later rehydrate the demotion.
-        let swept = self.radar.set_interactive_commands(&self.config.interactive_commands);
-        // Same for the remote set: a live `remote_commands` override re-kinds
-        // an already-promoted row (e.g. a `distrobox enter` pane) without
-        // waiting for it to exit.
-        let swept = swept | self.radar.set_remote_commands(&self.config.remote_commands);
         let renames = self.radar.recompute_renames(self.config.naming);
         let change = RadarChange {
             render: true,
@@ -1021,14 +912,13 @@ impl PluginRuntime {
             // A config override (density, glyphs, header…) redraws identical
             // rows differently — bypass the rows-diff render gate.
             force_render: true,
-            snapshot: SnapshotWrite::now_if(swept),
             ..RadarChange::default()
         };
         self.project(vec![], change, crate::clock::now_epoch_s())
     }
 
     /// The ledger the rail draws: empty when `ledger false`. The ring is still
-    /// recorded and persisted, so flipping it back on shows history.
+    /// recorded, so flipping it back on shows history.
     fn shown_ledger(&self) -> std::rc::Rc<Vec<crate::rollup::LedgerLine>> {
         if self.config.ledger {
             self.radar.ledger_lines()
@@ -1182,12 +1072,11 @@ impl PluginRuntime {
     /// battery property's full-disarm state — otherwise. A *denied* rail
     /// disarms unconditionally: without
     /// `ReadApplicationState` none of the events that clear domain work ever
-    /// arrive, so a stale `Running` loaded from a snapshot would otherwise
+    /// arrive, so a stale `Running` would otherwise
     /// pin Fast ticks and repaints forever behind a static needs-permission
     /// face.
-    /// `now_epoch_s` is the event's single clock capture (the stores already
-    /// take epochs as arguments; this extends that discipline up through the
-    /// runtime so one event never sees two different "now"s).
+    /// `now_epoch_s` is the event's single clock capture, so one event never
+    /// sees two different "now"s.
     fn desired_cadence(&self, now_epoch_s: u64) -> Option<Cadence> {
         if self.permission.denied() {
             return None;
@@ -1236,20 +1125,15 @@ impl PluginRuntime {
 
     /// Whether the one-shot timer should (re-)arm for *domain* reasons — the
     /// "tick only while there's something to do" rule that keeps an idle rail from
-    /// waking every second. Three triggers:
+    /// waking every second. Two triggers:
     ///
     /// - **animating work** — a `Running` agent/command whose glyph spins each
     ///   tick (`RadarState::needs_fast_ticks`);
-    /// - **a command `Done` awaiting its TTL recede** (`RadarState::has_done_awaiting_recede`)
-    ///   — the row itself is static (it doesn't animate), but the ledger handoff
-    ///   at `DONE_TTL_TICKS` still needs a tick to land on schedule, so it keeps
-    ///   this armed even though `needs_fast_ticks` stays narrow (see that
-    ///   method's doc for the arming split).
     /// - **an active ping flash** (`RadarState::has_active_flash`) — the
     ///   flip-to-pending glance-catcher is a two-tick visual, not a card fact,
     ///   so nothing else here would otherwise keep the timer awake for it.
     fn timer_should_continue(&self) -> bool {
-        self.radar.needs_fast_ticks() || self.radar.has_done_awaiting_recede() || self.radar.has_active_flash(self.tick)
+        self.radar.needs_fast_ticks() || self.radar.has_active_flash(self.tick)
     }
 
     fn effects_from_renames(&self, renames: Vec<TabRename>) -> Vec<Effect> {
@@ -1259,7 +1143,7 @@ impl PluginRuntime {
     /// The sole projection from a domain [`RadarChange`] to host [`Effect`]s.
     /// `fx` is a caller-supplied seed so the `timer` handler's permission
     /// effects come first, without a post-hoc splice. Canonical order: renames
-    /// → snapshot → cwd → `SetTimeout` (pinned by
+    /// → cwd → `SetTimeout` (pinned by
     /// `project_emits_effects_in_canonical_order`). This is the only
     /// *domain-change* path that arms the timer
     /// (the permission flow arms it separately in `begin_permission_flow`).
@@ -1281,28 +1165,6 @@ impl PluginRuntime {
     fn project(&mut self, mut fx: Vec<Effect>, c: RadarChange, now_epoch_s: u64) -> Outcome {
         self.last_now_epoch_s = now_epoch_s;
         fx.extend(self.effects_from_renames(c.renames));
-        // One writer per edge (`RadarState::persists_edges_for`). A non-owner
-        // leaves `snapshot_dirty` alone: it may be carrying a deferred write
-        // for a pane it does own.
-        if self.radar.persists_edges_for(c.snapshot_pane) {
-            match c.snapshot {
-                SnapshotWrite::Now => {
-                    fx.push(Effect::PersistSnapshot);
-                    // An inline write covers anything a pending deferral
-                    // would have flushed — clear it so the next tick doesn't
-                    // repeat the exact read-merge-write this state exists to
-                    // avoid.
-                    self.snapshot_dirty = false;
-                }
-                SnapshotWrite::Deferred => {
-                    // A Running-label-only broadcast: the write rides the
-                    // next timer tick (see `timer`'s flush) instead of paying
-                    // a read-merge-write per message per instance.
-                    self.snapshot_dirty = true;
-                }
-                SnapshotWrite::None => {}
-            }
-        }
         let mut render = c.render;
         // The own badge counts are a pure function of radar state (plus the
         // session name, handled in `learn_session_name`), so re-derive them
@@ -1313,8 +1175,8 @@ impl PluginRuntime {
             self.presence_gen = Some(self.radar.generation());
             render |= self.sessions.set_own(self.own_counts());
         }
-        // Rows-diff render gate: Zellij delivers every broadcast and every
-        // `CommandChanged` to every tab's instance, and most deliveries
+        // Rows-diff render gate: Zellij delivers every
+        // `PaneAttentionChanged` to every tab's instance, and most deliveries
         // change nothing this instance would DRAW differently. When the
         // content-derived render inputs match what the last `render()`
         // actually drew (`last_render_key`), drop the repaint request.

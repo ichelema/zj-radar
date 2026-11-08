@@ -1,13 +1,12 @@
 //! Session-scoped filesystem coordination for the per-tab sidebar instances.
 //!
-//! `PluginRuntime` stays pure: it receives an opaque snapshot string and a
-//! `PermissionProbe`, then emits effects when state should be persisted. This
+//! `PluginRuntime` stays pure: it receives a `PermissionProbe`, then emits
+//! effects when the permission marker should be persisted. This
 //! module owns the filesystem implementation behind those facts and effects.
 //! It uses Zellij's plugin-url-scoped `/cache` mount when available, falls back
 //! to `/tmp/zj-radar`, and degrades to disabled persistence if neither root is
-//! writable. In disabled mode the plugin still runs; late-spawned sidebars just
-//! start empty until the next broadcast, and first-run permission prompts cannot
-//! be coordinated across tab instances.
+//! writable. In disabled mode the plugin still runs; first-run permission prompts
+//! cannot be coordinated across tab instances.
 
 use crate::permission::{PermissionMarker, PermissionProbe};
 use std::path::{Path, PathBuf};
@@ -17,8 +16,9 @@ use std::time::{Duration, SystemTime};
 const CACHE_ROOT: &str = "/cache";
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const TMP_ROOT: &str = "/tmp/zj-radar";
-/// Namespace for every file this module owns in the shared root — snapshots
-/// and permission markers/locks (all pid-scoped via `session_prefix`).
+/// Namespace for every file this module owns in the shared root — permission
+/// markers/locks (all pid-scoped via `session_prefix`) and the snapshots older
+/// versions left behind, which pruning still sweeps.
 const SESSION_FILE_PREFIX: &str = "zj-radar.";
 const SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// How long the first-run permission lock is trusted. The lock prevents every
@@ -38,7 +38,6 @@ pub(crate) struct SessionFileIds {
 #[derive(Debug)]
 pub(crate) struct SessionFilesOpen {
     pub files: SessionFiles,
-    pub snapshot: Option<String>,
     pub permission: PermissionProbe,
 }
 
@@ -51,8 +50,6 @@ pub(crate) struct SessionFiles {
 struct SessionPaths {
     root: PathBuf,
     session_prefix: String,
-    snapshot: PathBuf,
-    snapshot_tmp: PathBuf,
     permission_marker: PathBuf,
     permission_marker_tmp: PathBuf,
     permission_lock: PathBuf,
@@ -79,15 +76,13 @@ impl SessionFiles {
                 continue;
             }
             prune_stale_files(&paths, now, max_age);
-            let snapshot = std::fs::read_to_string(&paths.snapshot).ok();
             let files = SessionFiles { paths: Some(paths) };
             let permission = files.permission_probe(now);
-            return SessionFilesOpen { files, snapshot, permission };
+            return SessionFilesOpen { files, permission };
         }
 
         SessionFilesOpen {
             files: SessionFiles::default(),
-            snapshot: None,
             permission: PermissionProbe { marker: None, lock_acquired: true },
         }
     }
@@ -96,11 +91,6 @@ impl SessionFiles {
         let paths = self.paths.as_ref()?;
         let raw = std::fs::read_to_string(&paths.permission_marker).ok()?;
         marker_from_str(raw.trim())
-    }
-
-    pub(crate) fn snapshot(&self) -> Option<String> {
-        let paths = self.paths.as_ref()?;
-        std::fs::read_to_string(&paths.snapshot).ok()
     }
 
     pub(crate) fn persist_permission_marker(&self, marker: PermissionMarker) {
@@ -123,18 +113,6 @@ impl SessionFiles {
             return;
         };
         let _ = std::fs::write(&paths.permission_lock, b"");
-    }
-
-    /// Write the shared snapshot (`Effect::PersistSnapshot`): the existing
-    /// record, if any, is handed to `json` for the merge (`snapshot::to_json`
-    /// keeps entries another instance persisted), and the result lands via
-    /// tmp+rename. Disabled mode is a no-op.
-    pub(crate) fn persist_snapshot(&self, json: impl FnOnce(Option<&str>) -> String) {
-        let Some(paths) = &self.paths else {
-            return;
-        };
-        let existing = self.snapshot();
-        write_via_tmp(&paths.snapshot_tmp, &paths.snapshot, json(existing.as_deref()).as_bytes());
     }
 
     /// Re-probe the permission state for a timer tick: re-read the marker and,
@@ -205,12 +183,10 @@ fn reclaim_if_stale(lock: &Path, now: SystemTime, ttl: Duration) -> bool {
 impl SessionPaths {
     fn new(root: PathBuf, ids: SessionFileIds) -> Self {
         let session_prefix = format!("{SESSION_FILE_PREFIX}{}", ids.zellij_pid);
-        let snapshot = root.join(format!("{session_prefix}.json"));
-        let snapshot_tmp = root.join(format!("{session_prefix}.json.{}.tmp", ids.plugin_id));
         let permission_marker = root.join(format!("{session_prefix}.permissions"));
         let permission_marker_tmp = root.join(format!("{session_prefix}.permissions.{}.tmp", ids.plugin_id));
         let permission_lock = root.join(format!("{session_prefix}.permissions.lock"));
-        Self { root, session_prefix, snapshot, snapshot_tmp, permission_marker, permission_marker_tmp, permission_lock }
+        Self { root, session_prefix, permission_marker, permission_marker_tmp, permission_lock }
     }
 
     fn is_current_session_file(&self, name: &str) -> bool {
@@ -331,13 +307,11 @@ mod tests {
     }
 
     #[test]
-    fn open_reads_snapshot_as_opaque_text_and_acquires_first_lock() {
+    fn open_acquires_first_lock() {
         let dir = TempDir::new("open");
-        std::fs::write(dir.join("zj-radar.42.json"), b"not json").unwrap();
 
         let opened = open(dir.path(), ids(7, 42));
 
-        assert_eq!(opened.snapshot.as_deref(), Some("not json"));
         assert_eq!(opened.permission.marker, None);
         assert!(opened.permission.lock_acquired);
         assert!(dir.join("zj-radar.42.permissions.lock").exists());
@@ -430,30 +404,6 @@ mod tests {
     }
 
     #[test]
-    fn persist_snapshot_writes_through_instance_tmp_then_rename() {
-        let dir = TempDir::new("snapshot");
-        let opened = open(dir.path(), ids(9, 42));
-
-        opened.files.persist_snapshot(|_| r#"{"v":1}"#.into());
-
-        assert_eq!(std::fs::read_to_string(dir.join("zj-radar.42.json")).unwrap(), r#"{"v":1}"#);
-        assert_eq!(opened.files.snapshot().as_deref(), Some(r#"{"v":1}"#));
-        assert!(!dir.join("zj-radar.42.json.9.tmp").exists());
-    }
-
-    #[test]
-    fn failed_snapshot_temp_write_keeps_existing_snapshot() {
-        let dir = TempDir::new("snapshot-failure");
-        std::fs::write(dir.join("zj-radar.42.json"), "old").unwrap();
-        std::fs::create_dir(dir.join("zj-radar.42.json.9.tmp")).unwrap();
-        let opened = open(dir.path(), ids(9, 42));
-
-        opened.files.persist_snapshot(|_| "new".into());
-
-        assert_eq!(std::fs::read_to_string(dir.join("zj-radar.42.json")).unwrap(), "old");
-    }
-
-    #[test]
     fn root_selection_falls_back_to_next_writable_root() {
         let dir = TempDir::new("fallback");
         let broken = dir.join("cache-as-file");
@@ -466,10 +416,10 @@ mod tests {
             SystemTime::now(),
             SNAPSHOT_MAX_AGE,
         );
-        opened.files.persist_snapshot(|_| "seed".into());
+        opened.files.persist_permission_marker(PermissionMarker::Granted);
 
-        assert!(!broken.join("zj-radar.42.json").exists());
-        assert_eq!(std::fs::read_to_string(fallback.join("zj-radar.42.json")).unwrap(), "seed");
+        assert!(!broken.join("zj-radar.42.permissions").exists());
+        assert_eq!(std::fs::read_to_string(fallback.join("zj-radar.42.permissions")).unwrap(), "granted");
     }
 
     #[test]
@@ -486,10 +436,8 @@ mod tests {
             SystemTime::now(),
             SNAPSHOT_MAX_AGE,
         );
-        opened.files.persist_snapshot(|_| "ignored".into());
         opened.files.persist_permission_marker(PermissionMarker::Denied);
 
-        assert_eq!(opened.snapshot, None);
         assert_eq!(opened.permission.marker, None);
         assert!(opened.permission.lock_acquired);
         assert_eq!(opened.files.permission_marker(), None);
@@ -565,25 +513,5 @@ mod tests {
         assert!(dir.join("zj-radar.1.unknown").exists());
         assert!(dir.join("zj-radar.1.json.tmp").exists());
         assert!(dir.join("zj-radar.1.permissions.tmp").exists());
-    }
-
-    #[test]
-    fn persist_snapshot_hands_the_existing_record_to_the_merge() {
-        let dir = tempfile::tempdir().unwrap();
-        let files = SessionFiles::open_with_roots_at(
-            SessionFileIds { plugin_id: 1, zellij_pid: 42 },
-            [dir.path().to_path_buf()],
-            SystemTime::now(),
-            SNAPSHOT_MAX_AGE,
-        )
-        .files;
-        let snapshot = dir.path().join("zj-radar.42.json");
-        files.persist_snapshot(|existing| {
-            assert!(existing.is_none());
-            "first".into()
-        });
-        assert_eq!(std::fs::read_to_string(&snapshot).unwrap(), "first");
-        files.persist_snapshot(|existing| format!("{}+second", existing.unwrap()));
-        assert_eq!(std::fs::read_to_string(&snapshot).unwrap(), "first+second");
     }
 }

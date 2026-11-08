@@ -1,5 +1,6 @@
 // E2E tests: drive a real Zellij in a PTY, load the zj-radar plugin, and
-// assert that piped status messages render in the sidebar.
+// assert that the agent status a pane reports (OSC 7501, typed into the pane)
+// renders in the sidebar.
 //
 // These are gated behind `--features e2e` and marked `#[ignore]` so that
 // `cargo test` stays fast and hermetic. Run with:
@@ -19,6 +20,29 @@ mod harness;
 
 use harness::*;
 use std::time::Duration;
+
+/// Standard base64 (OSC 7501 wants `msg`/`title` values encoded).
+fn b64(text: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in text.as_bytes().chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The OSC 7501 body of a `claude-code` root record: `state` is `working`,
+/// `blocked`, `done`, `error` or `idle`; `msg` is the display text.
+fn osc(state: &str, msg: &str) -> String {
+    format!("state={state}:app=claude-code:msg={}", b64(msg))
+}
 
 /// The harness itself is an E2E dependency: every test must run on a private
 /// Zellij server, even when the caller already has a live server and exports
@@ -46,8 +70,8 @@ fn harness_runs_on_a_private_zellij_server() {
     );
 }
 
-/// Smoke test: start Zellij with the plugin sidebar, pipe a status message,
-/// and assert that the repo/message text appears in the rendered screen.
+/// Smoke test: start Zellij with the plugin sidebar, report a working agent
+/// over OSC 7501, and assert that its message appears in the rendered screen.
 ///
 /// # How it works
 /// 1. `pre_grant_permissions` seeds Zellij's `permissions.kdl` in a complete
@@ -57,14 +81,11 @@ fn harness_runs_on_a_private_zellij_server() {
 ///    (avoids slow direnv/devenv init). It polls the PTY buffer until the
 ///    plugin's " RADAR" header appears. All Zellij subprocesses use the same
 ///    private HOME, XDG roots, and socket dir.
-/// 3. `discover_terminal_pane_id` injects `echo ZPID=$ZELLIJ_PANE_ID` into
-///    the terminal pane and reads the result from `dump-screen`. The pane ID
-///    must match the `"pane": {"id": ...}` field in the pipe payload for the
-///    plugin to display the status row.
-/// 4. `pipe_status` sends the JSON payload via `zellij pipe`.
-/// 5. We assert that "web" and/or "building" appear in the PTY buffer SUFFIX
-///    captured AFTER the pipe call (ordering-sensitive: proves the plugin
-///    rendered the status in response to the pipe, not from earlier output).
+/// 3. `emit_program_status` types an OSC 7501 `printf` into the focused
+///    terminal pane, so Zellij's own attention tracking sees the status and
+///    hands it to the plugin in the pane manifest.
+/// 4. We assert that "building" appears in the sidebar region, not the PTY
+///    buffer (which also holds the terminal's own echo).
 #[test]
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
 fn plugin_loads_and_renders_status() {
@@ -87,29 +108,19 @@ fn plugin_loads_and_renders_status() {
     let session = ZellijSession::start(&session_name, &layout, &wasm, temp_home);
     eprintln!("[e2e] plugin loaded (saw ' RADAR' in PTY)");
 
-    // Discover the terminal pane's actual ID so the pipe payload matches.
-    let pane_id = session.discover_terminal_pane_id();
-    eprintln!("[e2e] terminal pane_id={}", pane_id);
-
-    // Build the pipe payload with the real pane ID.
-    let payload = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_id}}},"status":"running","repo":"web","branch":"main","msg":"building"}}"#
-    );
-    eprintln!("[e2e] piping: {}", payload);
-    session.pipe_status(&payload);
+    session.emit_program_status(&osc("working", "building"));
 
     // Poll the vt100-parsed sidebar region (left 32 cols) for the agent's
     // activity, up to 5s. Asserting on the sidebar region — not pty_text() —
-    // excludes the terminal scrollback that echoes the piped JSON, so a match is
-    // a real render, not a false positive; and polling returns the instant the
-    // frame is ready rather than fixed-sleeping. (The repo `web` isn't shown —
-    // the tab name comes from cwd — so we key off the activity msg `building`.)
+    // excludes the terminal scrollback, so a match is a real render, not a
+    // false positive; and polling returns the instant the frame is ready
+    // rather than fixed-sleeping.
     let appeared = session.wait_for_sidebar(32, "building", std::time::Duration::from_secs(5));
     let sidebar = sidebar_region(&session.screen(), 32);
     eprintln!("[e2e] sidebar region (32 cols):\n{}", sidebar);
-    assert!(appeared, "sidebar should show the piped activity 'building' after the pipe;\nsidebar:\n{sidebar}");
+    assert!(appeared, "sidebar should show the reported activity 'building';\nsidebar:\n{sidebar}");
 
-    eprintln!("[e2e] PASS: found piped status in the rendered sidebar");
+    eprintln!("[e2e] PASS: found the reported status in the rendered sidebar");
 }
 
 /// `spinner_fps` (default 4) on the real frame: a running agent's spinner
@@ -124,10 +135,7 @@ fn spinner_steps_several_times_a_second_by_default() {
     let temp_home = pre_grant_permissions(&wasm);
     let session_name = format!("zjr_fps_{}", std::process::id());
     let session = ZellijSession::start(&session_name, &sidebar_layout(&wasm), &wasm, temp_home);
-    let pane_id = session.discover_terminal_pane_id();
-    session.pipe_status(&format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_id}}},"status":"running","msg":"spinning"}}"#
-    ));
+    session.emit_program_status(&osc("working", "spinning"));
     assert!(session.wait_for_sidebar(32, "spinning", Duration::from_secs(5)), "the agent row must render");
 
     const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -151,13 +159,10 @@ fn spinner_steps_several_times_a_second_by_default() {
     assert!(changes >= 5, "a 4 Hz spinner changes ~8 times in 2s (1 Hz: ~2); saw {changes}: {seen:?}");
 }
 
-/// Background tasks end to end through the real wasm plugin: the payload
-/// sequence a Claude turn produces when it backgrounds a test run (launch,
-/// turn-end snapshot while it still runs, the failure outcome from the
-/// `<task-notification>` wake, the final turn end) must draw the `┊` task
-/// line, hold the agent's steady `⋯` while it waits, then flip the task to
-/// `✗` and the agent to done — parse → merge → render on a live rail, not the
-/// host-side renderer the insta snapshots pin.
+/// Background tasks end to end through the real wasm plugin: an OSC 7501 child
+/// record (`id=`) under a working agent must draw the `┊` task line, with the
+/// record's `title` as its label — Zellij → manifest → merge → render on a
+/// live rail, not the host-side renderer the insta snapshots pin.
 #[test]
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
 fn background_task_lines_render_on_the_live_rail() {
@@ -166,56 +171,15 @@ fn background_task_lines_render_on_the_live_rail() {
     let isolated = pre_grant_permissions(&wasm);
     let session_name = format!("zjr_tasks_{}", std::process::id());
     let session = ZellijSession::start(&session_name, &sidebar_layout(&wasm), &wasm, isolated);
-    let pane_id = session.discover_terminal_pane_id();
-    let payload = |status: &str, msg: &str, task: &str, tasks: &str| {
-        format!(
-            r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_id}}},"status":"{status}","repo":"web","branch":"main","msg":"{msg}","task":"{task}","tasks":{tasks}}}"#
-        )
-    };
     let secs = std::time::Duration::from_secs(5);
 
-    // A human prompt, then the PostToolUse that backgrounded the tests.
-    session.pipe_status(&payload("running", "working", "fix flaky retries", "null"));
-    session.pipe_status(&payload(
-        "running",
-        "running tests",
-        "",
-        r#"{"snapshot":false,"items":[{"id":"b1","state":"running","label":"Run tests","holds":true}]}"#,
-    ));
+    session.emit_program_status(&osc("working", "fixing retries"));
+    session.emit_program_status(&format!("state=working:app=claude-code:id=b1:title={}", b64("Run tests")));
     assert!(
         session.wait_for_sidebar(32, "┊", secs) && session.wait_for_sidebar(32, "Run tests", secs),
-        "the launch should draw a task line;\nsidebar:\n{}",
+        "a child record should draw a task line;\nsidebar:\n{}",
         sidebar_region(&session.screen(), 32)
     );
-
-    // The turn ends while the tests still run: the agent waits (steady ⋯).
-    session.pipe_status(&payload(
-        "running",
-        "waiting on Run tests",
-        "",
-        r#"{"snapshot":true,"items":[{"id":"b1","state":"running","label":"Run tests","holds":true}]}"#,
-    ));
-    assert!(
-        session.wait_for_sidebar(32, "⋯", secs),
-        "a turn-end snapshot with holding work should show the waiting glyph;\nsidebar:\n{}",
-        sidebar_region(&session.screen(), 32)
-    );
-
-    // The wake reports the failure, then the final turn end lists nothing.
-    session.pipe_status(&payload(
-        "running",
-        "working",
-        "",
-        r#"{"snapshot":false,"items":[{"id":"b1","state":"failed"}]}"#,
-    ));
-    session.pipe_status(&payload("done", "tests failed", "", r#"{"snapshot":true,"items":[]}"#));
-    let settled = session.wait_until(secs, |s| {
-        let sb = sidebar_region(&s.screen(), 32);
-        sb.lines().any(|l| l.contains('┊') && l.contains('✗') && l.contains("Run tests")) && !sb.contains('⋯')
-    });
-    let sidebar = sidebar_region(&session.screen(), 32);
-    eprintln!("[e2e] sidebar region (32 cols):\n{sidebar}");
-    assert!(settled, "the task should end as ✗ under a done agent (no ⋯);\nsidebar:\n{sidebar}");
 }
 
 /// Issue #46: a rail whose tab holds no terminal pane must not take the
@@ -304,9 +268,10 @@ fn rail_only_tab_keeps_the_session_alive() {
 }
 
 /// A real left click on the exact, one-based screen coordinate of the pending
-/// glyph acknowledges through Zellij's mouse routing and the plugin's pipe
-/// echo. This is the layer that the unreachable right-click implementation
-/// could never exercise (zellij-org/zellij#5350).
+/// glyph acknowledges through Zellij's mouse routing: the plugin asks Zellij to
+/// mark the pane seen and the next manifest drops the hotspot. This is the
+/// layer that the unreachable right-click implementation could never exercise
+/// (zellij-org/zellij#5350).
 #[test]
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
 fn clicking_pending_glyph_acknowledges_the_pane() {
@@ -314,18 +279,16 @@ fn clicking_pending_glyph_acknowledges_the_pane() {
     let temp_home = pre_grant_permissions(&wasm);
     let session_name = format!("zjr_ack_glyph_{}", std::process::id());
     let session = ZellijSession::start(&session_name, &sidebar_layout(&wasm), &wasm, temp_home);
-    let pane_id = session.discover_terminal_pane_id();
-    let payload = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_id}}},"status":"pending","repo":"web","branch":"main","msg":"approve glyph"}}"#
-    );
-    session.pipe_status(&payload);
+    session.emit_program_status(&osc("blocked", "approve glyph"));
 
     let ready =
         session.wait_until(std::time::Duration::from_secs(5), |s| sidebar_region(&s.screen(), 32).contains('✓'));
     let screen = session.screen();
     let sidebar = sidebar_region(&screen, 32);
     assert!(ready, "pending glyph must be visible before clicking; rail:\n{sidebar}");
-    let row = sidebar_row_index(&screen, 32, "approve glyph").expect("the pending pane line must be visible");
+    // The acknowledge hotspot sits on the first line that carries a `✓` (the
+    // tab line; a tab hotspot acknowledges every pending pane in the tab).
+    let row = sidebar.lines().position(|line| line.contains('✓')).expect("a line with the pending glyph");
     let glyph_col = sidebar
         .lines()
         .nth(row)
@@ -344,18 +307,16 @@ fn clicking_pending_glyph_acknowledges_the_pane() {
     });
     let after = sidebar_region(&session.screen(), 32);
     eprintln!("[e2e] pending glyph click col={}, row={} rail after:\n{}", glyph_col, row + 1, after);
-    assert!(acknowledged, "exact glyph click must broadcast ack and remove its hotspot; rail:\n{after}");
+    assert!(acknowledged, "exact glyph click must mark the pane seen and remove its hotspot; rail:\n{after}");
 }
 
-/// Multi-agent scenario: pipe a running agent and a pending ("needs-you") agent
-/// to two different pane IDs. Assert that the pending/needs-you content ("api"
-/// or "approve") appears in the rendered sidebar.
+/// Multi-agent scenario: a working agent and a blocked ("needs-you") agent in
+/// two different panes. Assert that the needs-you content ("approve") appears
+/// in the rendered sidebar.
 ///
 /// Uses a unique session name to avoid collisions with the smoke test when
 /// both run in the same `cargo test` invocation.
 ///
-/// Ordering-sensitive: we snapshot the PTY buffer length BEFORE the second pipe
-/// and assert the matching text appears in the suffix captured AFTER it.
 #[test]
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
 fn multi_agent_needs_you_is_visible() {
@@ -376,109 +337,32 @@ fn multi_agent_needs_you_is_visible() {
     let session = ZellijSession::start(&session_name, &layout, &wasm, temp_home);
     eprintln!("[e2e] plugin loaded");
 
-    // Discover the focused terminal pane ID.
-    let pane_id = session.discover_terminal_pane_id();
-    eprintln!("[e2e] focused terminal pane_id={}", pane_id);
-
-    // Discover the sibling terminal pane ID (focus-next, read, focus-back).
-    let sibling_id = session.discover_next_pane_id().unwrap_or_else(|| {
-        eprintln!("[e2e] warn: could not discover sibling pane; guessing pane_id+1");
-        pane_id + 1
-    });
-    eprintln!("[e2e] sibling terminal pane_id={}", sibling_id);
-
-    // Pipe a running agent using the focused pane id.
-    let running_payload = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_id}}},"status":"running","repo":"web","msg":"building"}}"#
-    );
-    eprintln!("[e2e] piping running agent: {}", running_payload);
-    session.pipe_status(&running_payload);
-
-    // Pipe a pending ("needs-you") agent to the sibling pane.
-    let pending_payload = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{sibling_id}}},"status":"pending","repo":"api","msg":"approve?"}}"#
-    );
-    eprintln!("[e2e] piping pending agent: {}", pending_payload);
-    session.pipe_status(&pending_payload);
+    // A working agent in the focused pane, a blocked one in its sibling.
+    session.emit_program_status(&osc("working", "building"));
+    session.emit_program_status_in_next_pane(&osc("blocked", "approve?"));
 
     // Poll the vt100 sidebar region (not pty_text) for the needs-you agent's
     // activity — the pending pane is highest-severity, so its msg drives the
     // tab's detail line. Returns as soon as the frame is ready.
     let appeared = session.wait_until(std::time::Duration::from_secs(5), |s| {
         let sb = sidebar_region(&s.screen(), 32);
-        sb.contains("api") || sb.contains("approve")
+        sb.contains("approve")
     });
     let sidebar = sidebar_region(&session.screen(), 32);
     eprintln!("[e2e] sidebar region (32 cols):\n{}", sidebar);
-    assert!(appeared, "pending (needs-you) agent must surface in the sidebar after the pipe;\nsidebar:\n{sidebar}");
+    assert!(appeared, "pending (needs-you) agent must surface in the sidebar;\nsidebar:\n{sidebar}");
 
     eprintln!("[e2e] PASS: needs-you agent appeared in the rendered sidebar");
-}
-
-/// End-to-end notify.sh scenario: fire the real notify.sh hook script against
-/// the isolated session and assert that its piped status drives the sidebar.
-///
-/// # How notify.sh reaches the isolated session
-/// `run_notify_sh` gives the bash subprocess the same private HOME, XDG roots,
-/// and socket dir as the session. The `zellij pipe` call inside notify.sh thus
-/// connects to the isolated Zellij server and delivers the message to the
-/// plugin.
-///
-/// `ZELLIJ=1` and `ZELLIJ_PANE_ID=terminal_<pane_id>` are also set so
-/// notify.sh passes its guard checks and uses the correct pane number.
-#[test]
-#[ignore = "e2e: requires zellij + built wasm + jq; run via `just test-e2e`"]
-fn notify_sh_end_to_end_updates_sidebar() {
-    let wasm = plugin_wasm_path();
-    assert!(
-        wasm.exists(),
-        "Plugin wasm not found at {:?}. Build it first:\n  cargo build --release --target wasm32-wasip1",
-        wasm
-    );
-
-    let temp_home = pre_grant_permissions(&wasm);
-    let session_name = format!("zjr_hook_{}", std::process::id());
-    let layout = sidebar_layout(&wasm);
-
-    eprintln!("[e2e] starting notify.sh session '{}'", session_name);
-    let session = ZellijSession::start(&session_name, &layout, &wasm, temp_home);
-    eprintln!("[e2e] plugin loaded");
-
-    // Discover the real terminal pane ID so notify.sh uses a pane that the
-    // plugin knows about.
-    let pane_id = session.discover_terminal_pane_id();
-    eprintln!("[e2e] terminal pane_id={}", pane_id);
-
-    // Fire the real notify.sh with a PostToolUse Edit hook payload.
-    // notify.sh will derive msg="editing auth.rs" and pipe it to the plugin.
-    let hook_json =
-        r#"{"hook_event_name":"PostToolUse","cwd":".","tool_name":"Edit","tool_input":{"file_path":"src/auth.rs"}}"#;
-    eprintln!("[e2e] firing notify.sh running with hook JSON: {}", hook_json);
-    session.run_notify_sh("running", pane_id, hook_json);
-
-    // Poll the vt100 sidebar region for the activity notify.sh derived.
-    let appeared = session.wait_until(std::time::Duration::from_secs(5), |s| {
-        let sb = sidebar_region(&s.screen(), 32);
-        sb.contains("editing") || sb.contains("auth.rs")
-    });
-    let sidebar = sidebar_region(&session.screen(), 32);
-    eprintln!("[e2e] sidebar region (32 cols):\n{}", sidebar);
-    assert!(
-        appeared,
-        "notify.sh hook should drive the sidebar (expected 'editing' or 'auth.rs');\nsidebar:\n{sidebar}"
-    );
-
-    eprintln!("[e2e] PASS: notify.sh hook drove the sidebar render");
 }
 
 /// Line-per-pane structure test: two TRACKED panes in one tab must each render
 /// as a distinct line in the sidebar (the redesign's doc scenario H).
 ///
-/// Pipes distinct status payloads to both terminal panes and asserts — using
+/// Reports distinct statuses from both terminal panes and asserts — using
 /// only the SIDEBAR REGION (left 32 columns of the vt100-parsed screen) — that
-/// each pane's identifier appears on its own line. This avoids the false-positive
+/// each pane's message appears on its own line. This avoids the false-positive
 /// trap of checking `pty_text()`, which also contains the terminal panes'
-/// scrollback echoing the piped/typed text.
+/// scrollback.
 #[test]
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
 fn multi_pane_renders_one_line_per_pane() {
@@ -497,31 +381,9 @@ fn multi_pane_renders_one_line_per_pane() {
     let session = ZellijSession::start(&session_name, &layout, &wasm, temp_home);
     eprintln!("[e2e] plugin loaded");
 
-    // Discover the focused terminal pane (pane A).
-    let pane_a = session.discover_terminal_pane_id();
-    eprintln!("[e2e] pane_a={}", pane_a);
-
-    // Discover the sibling terminal pane (pane B).
-    let pane_b = session.discover_next_pane_id().unwrap_or_else(|| {
-        eprintln!("[e2e] warn: could not discover sibling pane; guessing pane_a+1");
-        pane_a + 1
-    });
-    eprintln!("[e2e] pane_b={}", pane_b);
-
-    // Pipe a RUNNING status to pane A with a short, distinct repo+msg pair.
-    // "alpha" / "taska" are kept to <=8 chars so they fit comfortably in 32 cols.
-    let payload_a = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_a}}},"status":"running","repo":"alpha","msg":"taska"}}"#
-    );
-    eprintln!("[e2e] piping pane A: {}", payload_a);
-    session.pipe_status(&payload_a);
-
-    // Pipe a RUNNING status to pane B with a different repo+msg.
-    let payload_b = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_b}}},"status":"running","repo":"beta","msg":"taskb"}}"#
-    );
-    eprintln!("[e2e] piping pane B: {}", payload_b);
-    session.pipe_status(&payload_b);
+    // Pane A (focused) and pane B (its sibling) each report a distinct message.
+    session.emit_program_status(&osc("working", "taska"));
+    session.emit_program_status_in_next_pane(&osc("working", "taskb"));
 
     // Extra settle time so both renders complete before we snapshot.
     std::thread::sleep(std::time::Duration::from_millis(600));
@@ -532,26 +394,18 @@ fn multi_pane_renders_one_line_per_pane() {
     eprintln!("[e2e] sidebar region (32 cols):\n{}", sidebar);
 
     // Each row of the sidebar is a separate line in `sidebar`.
-    // We look for: two different lines — one containing "alpha" or "taska",
-    // another containing "beta" or "taskb" — proving the line-per-pane layout.
+    // We look for: two different lines — one containing "taska", another
+    // containing "taskb" — proving the line-per-pane layout.
     let lines: Vec<&str> = sidebar.lines().collect();
 
-    let line_a = lines.iter().position(|l| l.contains("alpha") || l.contains("taska"));
-    let line_b = lines.iter().position(|l| l.contains("beta") || l.contains("taskb"));
+    let line_a = lines.iter().position(|l| l.contains("taska"));
+    let line_b = lines.iter().position(|l| l.contains("taskb"));
 
-    eprintln!("[e2e] pane-A identifier on sidebar row: {:?}", line_a);
-    eprintln!("[e2e] pane-B identifier on sidebar row: {:?}", line_b);
+    eprintln!("[e2e] pane-A message on sidebar row: {:?}", line_a);
+    eprintln!("[e2e] pane-B message on sidebar row: {:?}", line_b);
 
-    assert!(
-        line_a.is_some(),
-        "pane A (repo='alpha', msg='taska') must appear in the sidebar region;\nsidebar:\n{}",
-        sidebar
-    );
-    assert!(
-        line_b.is_some(),
-        "pane B (repo='beta', msg='taskb') must appear in the sidebar region;\nsidebar:\n{}",
-        sidebar
-    );
+    assert!(line_a.is_some(), "pane A (msg='taska') must appear in the sidebar region;\nsidebar:\n{}", sidebar);
+    assert!(line_b.is_some(), "pane B (msg='taskb') must appear in the sidebar region;\nsidebar:\n{}", sidebar);
     assert_ne!(
         line_a, line_b,
         "pane A and pane B must appear on DIFFERENT sidebar lines (line-per-pane layout);\n\
@@ -577,14 +431,8 @@ fn focused_pane_line_is_highlighted_and_follows_focus() {
     let layout = sidebar_layout_two_terminal(&wasm);
     let session = ZellijSession::start(&session_name, &layout, &wasm, temp_home);
 
-    let pane_a = session.discover_terminal_pane_id();
-    let pane_b = session.discover_next_pane_id().unwrap_or(pane_a + 1);
-    eprintln!("[e2e] pane_a={pane_a} (focused) pane_b={pane_b}");
-    for (id, msg) in [(pane_a, "taska"), (pane_b, "taskb")] {
-        session.pipe_status(&format!(
-            r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{id}}},"status":"running","msg":"{msg}"}}"#
-        ));
-    }
+    session.emit_program_status(&osc("working", "taska"));
+    session.emit_program_status_in_next_pane(&osc("working", "taskb"));
     assert!(session.wait_for_sidebar(32, "taskb", Duration::from_secs(5)), "both panes must render");
 
     // (row bg of pane A's line, row bg of pane B's line, row bg of the tab header)
@@ -632,19 +480,7 @@ fn focused_pane_line_is_highlighted_and_follows_focus() {
     // layer holds the user's focus — the cue must move to it.
     session.run_action_checked(&["new-pane", "--floating"]);
     std::thread::sleep(Duration::from_millis(800));
-    session.run_action_checked(&["write-chars", r#"echo "ZPIDF=$ZELLIJ_PANE_ID""#]);
-    session.run_action_checked(&["write", "13"]);
-    std::thread::sleep(Duration::from_millis(800));
-    let dump = session.dump_screen();
-    let pane_f: u32 = dump
-        .split("ZPIDF=")
-        .filter_map(|rest| rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok())
-        .last()
-        .unwrap_or_else(|| panic!("floating pane id not found in dump: {dump:?}"));
-    eprintln!("[e2e] floating pane_f={pane_f}");
-    session.pipe_status(&format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_f}}},"status":"running","msg":"taskf"}}"#
-    ));
+    session.emit_program_status(&osc("working", "taskf"));
     let bands3 = |s: &ZellijSession| {
         let screen = s.screen();
         let row = |needle| sidebar_row_index(&screen, 32, needle);
@@ -670,7 +506,7 @@ fn focused_pane_line_is_highlighted_and_follows_focus() {
 /// Rendered-output fidelity: assert on the ACTUAL cells Zellij painted — both
 /// text and color — not just substring presence in the PTY stream.
 ///
-/// After piping a running agent to the focused pane, the parsed sidebar must show:
+/// After a working agent reports from the focused pane, the parsed sidebar must show:
 ///   1. the " RADAR" header on row 0;
 ///   2. the agent card as TWO rows — a tab row carrying the focus spine `▌` and a
 ///      running spinner glyph (one of `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`), and the next row carrying the
@@ -682,9 +518,7 @@ fn focused_pane_line_is_highlighted_and_follows_focus() {
 ///      end-to-end (the unit `tint_map` oracle, but on the real frame).
 ///
 /// Robust to the spinner tick, pane-id assignment, and timing: it pins structure
-/// and the color *relationship*, not exact RGB or a byte-for-byte frame. (Note we
-/// key off the activity `building`, not the repo `web`: in this layout the tab
-/// name comes from Zellij's cwd, so the repo isn't shown — only the msg is.)
+/// and the color *relationship*, not exact RGB or a byte-for-byte frame.
 #[test]
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
 fn rendered_sidebar_paints_focused_card_with_text_and_tint() {
@@ -701,15 +535,8 @@ fn rendered_sidebar_paints_focused_card_with_text_and_tint() {
     let session = ZellijSession::start(&session_name, &layout, &wasm, temp_home);
     eprintln!("[e2e] plugin loaded");
 
-    let pane_id = session.discover_terminal_pane_id();
-    eprintln!("[e2e] terminal pane_id={}", pane_id);
-
-    // Running agent on the focused pane → its tab is the active (focused) card.
-    let payload = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_id}}},"status":"running","repo":"web","msg":"building"}}"#
-    );
-    eprintln!("[e2e] piping: {}", payload);
-    session.pipe_status(&payload);
+    // Working agent on the focused pane → its tab is the active (focused) card.
+    session.emit_program_status(&osc("working", "building"));
     std::thread::sleep(std::time::Duration::from_millis(800));
 
     let screen = session.screen();
@@ -765,89 +592,41 @@ fn rendered_sidebar_paints_focused_card_with_text_and_tint() {
     eprintln!("[e2e] PASS: focused card rendered with correct text + a distinct surface tint");
 }
 
-/// Behavior: a completion the user is WATCHING recedes. CONTEXT.md's
-/// Focus does NOT drive rail state (CONTEXT.md's convergence rule): a `done` on
-/// the pane you are watching stays lit — focus-driven recede was removed because
-/// focus is per-client and never reaches background instances, so it desynced
-/// tabs. A finished status clears only via *shared* signals every instance
-/// receives; here we exercise the broadcast one end-to-end: `done` persists
-/// through several timer ticks, then an `idle` broadcast (the `/clear` reset
-/// path) recedes it.
+/// Behavior: a completion the user is WATCHING is seen at once — Zellij reads
+/// the focused pane's `done` as seen, so the card does not stay lit — and the
+/// rail files it in the `─ earlier` ledger from the pane's remembered record.
 #[test]
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
-fn focused_done_stays_lit_until_a_shared_clear() {
+fn focused_done_enters_the_ledger() {
     let wasm = plugin_wasm_path();
-    assert!(
-        wasm.exists(),
-        "Plugin wasm not found at {:?}. Build it first:\n  cargo build --release --target wasm32-wasip1",
-        wasm
-    );
+    assert!(wasm.exists(), "Plugin wasm not found at {:?}", wasm);
 
     let temp_home = pre_grant_permissions(&wasm);
     let session_name = format!("zjr_recede_{}", std::process::id());
     let layout = sidebar_layout(&wasm);
     let session = ZellijSession::start(&session_name, &layout, &wasm, temp_home);
-    let pane_id = session.discover_terminal_pane_id();
-    eprintln!("[e2e] terminal pane_id={}", pane_id);
 
-    // Running agent on the focused pane → its activity renders.
-    let running = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_id}}},"status":"running","repo":"web","msg":"deploying"}}"#
-    );
-    session.pipe_status(&running);
-    std::thread::sleep(std::time::Duration::from_millis(800));
+    session.emit_program_status(&osc("working", "deploying"));
     assert!(
-        sidebar_region(&session.screen(), 32).contains("deploying"),
-        "precondition: the running agent's activity must render first;\nsidebar:\n{}",
+        session.wait_for_sidebar(32, "deploying", Duration::from_secs(5)),
+        "precondition: the working agent's activity must render first;\nsidebar:\n{}",
         sidebar_region(&session.screen(), 32)
     );
 
-    // It finishes while the pane is still focused. Focus must not clear it:
-    // the row (still carrying its message) stays lit through the settle ticks.
-    let done = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_id}}},"status":"done","repo":"web","msg":"deploying"}}"#
-    );
-    session.pipe_status(&done);
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    let sidebar = sidebar_region(&session.screen(), 32);
-    eprintln!("[e2e] post-done sidebar (32 cols):\n{}", sidebar);
-    assert!(
-        sidebar.contains("deploying"),
-        "a Done must stay lit even while watched (focus never clears state);\nsidebar:\n{}",
-        sidebar
-    );
-
-    // A shared signal — a fresh broadcast for the pane (the `/clear` → idle
-    // reset) — is what recedes it, on every instance alike. Check the CARD
-    // region only: the receded completion now legitimately resurfaces as an
-    // `─ earlier` ledger row (spec §9's bottom region), so a whole-sidebar
-    // substring check would false-negative once that row renders — this
-    // asserts the live card is gone, not that the string vanished entirely.
-    let idle = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_id}}},"status":"idle","repo":"web","msg":""}}"#
-    );
-    session.pipe_status(&idle);
-    let receded = session.wait_until(std::time::Duration::from_secs(6), |s| {
-        !card_region_only(&sidebar_region(&s.screen(), 32)).contains("deploying")
+    // It finishes while the pane is still focused.
+    session.emit_program_status(&osc("done", "deployed"));
+    let filed = session.wait_until(Duration::from_secs(6), |s| {
+        sidebar_region(&s.screen(), 32).split_once("─ earlier").is_some_and(|(_, after)| after.contains("deployed"))
     });
     let sidebar = sidebar_region(&session.screen(), 32);
-    eprintln!("[e2e] post-idle sidebar (32 cols):\n{}", sidebar);
-    assert!(receded, "an idle broadcast must recede the finished card row;\nsidebar:\n{}", sidebar);
-    // The feature working: the completion that just receded resurfaces below
-    // the `─ earlier` rule as a ledger row rather than vanishing outright.
-    assert!(
-        sidebar.split_once("─ earlier").is_some_and(|(_, after)| after.contains("deploying")),
-        "the receded completion should resurface as an `─ earlier` ledger row;\nsidebar:\n{}",
-        sidebar
-    );
-    eprintln!("[e2e] PASS: done stayed lit under focus, receded to the ledger on the idle broadcast");
+    eprintln!("[e2e] post-done sidebar (32 cols):\n{sidebar}");
+    assert!(filed, "the finished turn should resurface as an `─ earlier` ledger row;\nsidebar:\n{sidebar}");
 }
 
 /// Behavior: an error the user is watching must NOT recede — CONTEXT.md's hard
 /// rule "an Error or a 'needs you' Pending stays lit even while watched". The
-/// sibling of `focused_done_stays_lit_until_a_shared_clear`: same focused-pane
-/// setup, same timer ticks; a legacy `on_focus` hint riding the payload is
-/// tolerated on the wire but inert, so the error stays on the rail.
+/// sibling of `focused_done_enters_the_ledger`: same focused-pane setup, same
+/// timer ticks, but the error stays on the rail.
 #[test]
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
 fn focused_error_stays_lit_on_the_rendered_rail() {
@@ -862,18 +641,10 @@ fn focused_error_stays_lit_on_the_rendered_rail() {
     let session_name = format!("zjr_errstay_{}", std::process::id());
     let layout = sidebar_layout(&wasm);
     let session = ZellijSession::start(&session_name, &layout, &wasm, temp_home);
-    let pane_id = session.discover_terminal_pane_id();
-    eprintln!("[e2e] terminal pane_id={}", pane_id);
-
-    // An error finishes on the focused pane. The payload deliberately carries a
-    // legacy `on_focus:"idle"` hint: older producers may still send it, and it
-    // must be tolerated on the wire yet change nothing — the error persists.
-    let error = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_id}}},"status":"error","repo":"web","msg":"tests failed","on_focus":"idle"}}"#
-    );
-    session.pipe_status(&error);
-    // Same generous settle as the recede test — if anything were going to recede it,
-    // it would have happened within these ticks.
+    // An error finishes on the focused pane.
+    session.emit_program_status(&osc("error", "tests failed"));
+    // Same generous settle as the ledger test — if anything were going to recede
+    // it, it would have happened within these ticks.
     std::thread::sleep(std::time::Duration::from_secs(3));
 
     let sidebar = sidebar_region(&session.screen(), 32);
@@ -916,10 +687,7 @@ fn click_on_a_tab_row_switches_the_active_tab() {
     // Tab 1's terminal pane (echoes ZPID=<pane1>) + a tracked agent row ("alpha").
     let pane1 = session.discover_terminal_pane_id();
     eprintln!("[e2e] tab1 pane_id={}", pane1);
-    let p1 = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane1}}},"status":"running","repo":"one","msg":"alpha"}}"#
-    );
-    session.pipe_status(&p1);
+    session.emit_program_status(&osc("working", "alpha"));
 
     // Open tab 2 (default layout → no sidebar). new-tab focuses it; discover its
     // pane id (echoes ZPID=<pane2>), then give it a tracked row ("beta"). The
@@ -930,10 +698,7 @@ fn click_on_a_tab_row_switches_the_active_tab() {
     let pane2 = session.discover_terminal_pane_id();
     eprintln!("[e2e] tab2 pane_id={}", pane2);
     assert_ne!(pane1, pane2, "tab 2 must have a distinct terminal pane id");
-    let p2 = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane2}}},"status":"running","repo":"two","msg":"beta"}}"#
-    );
-    session.pipe_status(&p2);
+    session.emit_program_status(&osc("working", "beta"));
 
     // Return to tab 1 — the only tab showing the rail we will click. go-to-tab is
     // fire-and-forget and can be dropped under load, so poll-retry it until
@@ -944,13 +709,6 @@ fn click_on_a_tab_row_switches_the_active_tab() {
         s.dump_screen().contains(&format!("ZPID={pane1}"))
     });
     assert!(on_tab1, "could not return to tab 1 before the click");
-
-    // These are synthetic producers attached to idle shells, so their Running
-    // observations correctly enter the prompt-return grace clock. Refresh them
-    // after the tab-switch setup so that expiry cannot turn this click-routing
-    // test into a stale-status timing test.
-    session.pipe_status(&p1);
-    session.pipe_status(&p2);
 
     // Both tab rows must render in tab 1's rail before we can click tab 2's.
     // Retain the exact screen that satisfied the poll: a subsequent timer render
@@ -1079,16 +837,13 @@ fn manual_tab_name_survives_switch_to_another_plugin_instance() {
     );
 }
 
-/// Pins the load-bearing property behind the exit-clear fix: per-pane
-/// `CommandChanged` activity is delivered to the plugin instance in *every* tab,
-/// not just the tab whose pane it happened in. (Contrast focus, which is
-/// per-client and is NOT delivered to background instances — the root of the
-/// stale-status desync.) A command run in tab one must appear in tab two's rail
-/// too; since the exit-clear rides this same `CommandChanged` signal, this proves
-/// it converges across tabs without a producer-side hook.
+/// A pane's attention reaches the plugin instance in *every* tab, not just the
+/// tab whose pane reported it: a status emitted in tab one must appear in tab
+/// two's rail too (Zellij hands the new manifest to the instance of the tab
+/// that becomes active).
 #[test]
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
-fn command_activity_reaches_background_tab_instances() {
+fn native_attention_reaches_background_tab_instances() {
     use std::time::Duration;
     let wasm = plugin_wasm_path();
     assert!(
@@ -1118,48 +873,30 @@ fn command_activity_reaches_background_tab_instances() {
     eprintln!("[e2e] pane1(tab one)={pane1}  pane2(tab two)={pane2}");
     assert_ne!(pane1, pane2, "could not switch to tab two to discover its pane");
 
-    // Back to tab one, then run a plain foreground command in its terminal. This
-    // exercises the *observed-command* path (`CommandChanged`) — no pipe, no pane
-    // id matching — which is exactly the signal the exit-clear rides. `sleep 30`
-    // stays foreground long enough to observe from the other tab.
+    // Back to tab one, then report a working agent from its terminal.
     let back1 = session.wait_until(Duration::from_secs(8), |s| {
         s.run_action(&["go-to-tab", "1"]);
         s.dump_screen().contains(&format!("ZPID={pane1}"))
     });
-    assert!(back1, "could not return to tab one to run the command");
-    session.run_action(&["write-chars", "sleep 30"]);
-    session.run_action(&["write", "13"]);
+    assert!(back1, "could not return to tab one to report the status");
+    session.emit_program_status(&osc("working", "elsewhere"));
 
-    // Tab one's OWN instance must show the running command (baseline: the
-    // command path works in-instance).
-    let seen_on_1 = session.wait_for_sidebar(32, "sleep", Duration::from_secs(10));
-    eprintln!("[e2e] tab-one rail WHILE running:\n{}", sidebar_region(&session.screen(), 32));
-    assert!(
-        seen_on_1,
-        "tab one's own rail should show the running command;\n{}",
-        sidebar_region(&session.screen(), 32)
-    );
+    // Tab one's OWN instance must show it (baseline).
+    let seen_on_1 = session.wait_for_sidebar(32, "elsewhere", Duration::from_secs(10));
+    assert!(seen_on_1, "tab one's own rail should show the status;\n{}", sidebar_region(&session.screen(), 32));
 
-    // THE QUESTION: switch to tab two and read ITS rail. Does the background
-    // instance also see tab one's command? That answers whether `CommandChanged`
-    // (and thus the exit-clear) reaches instances in other tabs.
+    // THE QUESTION: switch to tab two and read ITS rail. Does the other
+    // instance also show tab one's agent?
     let on2 = session.wait_until(Duration::from_secs(8), |s| {
         s.run_action(&["go-to-tab", "2"]);
         s.dump_screen().contains(&format!("ZPID={pane2}"))
     });
     assert!(on2, "could not switch to tab two to read its rail");
-    // Give tab two's instance time to process + promote (debounce) if it got it.
-    let converged = session.wait_until(Duration::from_secs(6), |s| sidebar_region(&s.screen(), 32).contains("sleep"));
+    let converged =
+        session.wait_until(Duration::from_secs(6), |s| sidebar_region(&s.screen(), 32).contains("elsewhere"));
     let tab2 = sidebar_region(&session.screen(), 32);
-    eprintln!("[e2e] tab-two rail (background instance):\n{tab2}");
-    eprintln!("[e2e] RESULT: background instance sees the command (converges) = {converged}");
-    assert!(
-        converged,
-        "CONVERGENCE: tab two's background instance does NOT show tab one's \
-         running command — CommandChanged did not reach the background instance, \
-         so the exit-clear converges only for newly-opened tabs (snapshot). The \
-         SessionEnd→idle broadcast would be needed to converge live. tab-two rail:\n{tab2}"
-    );
+    eprintln!("[e2e] tab-two rail (other instance):\n{tab2}");
+    assert!(converged, "CONVERGENCE: tab two's instance does NOT show tab one's agent. tab-two rail:\n{tab2}");
 }
 
 /// The auto-dispatch onboarding path (`zj-radar run` on a LIVE attach): attaching
@@ -1271,17 +1008,10 @@ fn rail_paints_every_column_of_its_pane() {
     let session = ZellijSession::start(&session_name, &layout, &wasm, temp_home);
     eprintln!("[e2e] plugin loaded");
 
-    let pane_id = session.discover_terminal_pane_id();
-    eprintln!("[e2e] terminal pane_id={pane_id}");
-
-    // Active/running status on the sole tab's pane -> tab.active is true (only
+    // Active/working status on the sole tab's pane -> tab.active is true (only
     // one tab exists and it's the focused one) -> card_tint picks
     // theme.surface_active for its row (crates/plugin/src/render.rs card_tint).
-    let payload = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_id}}},"status":"running","repo":"web","msg":"building"}}"#
-    );
-    eprintln!("[e2e] piping: {payload}");
-    session.pipe_status(&payload);
+    session.emit_program_status(&osc("working", "building"));
     std::thread::sleep(std::time::Duration::from_millis(800));
 
     let screen = session.screen();
@@ -1399,7 +1129,7 @@ fn rail_paints_every_column_of_its_pane() {
 }
 
 /// Cross-session e2e: TWO independently-started, real Zellij servers — not
-/// two tabs of one server (that's `command_activity_reaches_background_tab_
+/// two tabs of one server (that's `native_attention_reaches_background_tab_
 /// instances`) — proving the whole cross-session feature works between
 /// separate processes, WITHOUT any session-manager trigger: B's agent
 /// attention (OSC 7501) reaches A's plugin through Zellij's
@@ -1440,17 +1170,12 @@ fn session_next_switches_to_the_session_with_attention() {
     eprintln!("[e2e] B terminal pane_id={pane_b}");
     b.emit_program_status("state=blocked:app=claude-code:kind=question:msg=cGljayBvbmU=");
 
-    // Piping a `running` status into A's OWN terminal arms A's Fast cadence
+    // A `working` status in A's OWN terminal arms A's Fast cadence
     // (an active `Running` row animates every tick — see
     // `timer_should_continue`/`needs_fast_ticks`) without giving A any
     // attention of its own, so it doesn't interfere with the ordering
     // assertion below (B is still the only attention>0 peer).
-    let pane_a = a.discover_terminal_pane_id();
-    eprintln!("[e2e] A terminal pane_id={pane_a}");
-    let a_payload = format!(
-        r#"{{"v":1,"source":"claude","pane":{{"type":"terminal","id":{pane_a}}},"status":"running","repo":"radar-a-repo","msg":"keep-fast"}}"#
-    );
-    a.pipe_status(&a_payload);
+    a.emit_program_status(&osc("working", "keep-fast"));
 
     // A's badge must show B's name TOGETHER WITH the attention glyph+count —
     // not just B's bare name — this needle also rules out the degenerate

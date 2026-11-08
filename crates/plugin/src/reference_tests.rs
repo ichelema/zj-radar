@@ -6,7 +6,7 @@
 //! docs/rail-reference.md. Editing a `rail-input`/`rail-expect` pair in the doc
 //! edits this test — the doc is the single source of truth for rail rendering.
 
-use crate::command::DEBOUNCE_TICKS;
+use crate::attention::{NativePane, PaneAttention, Record, Source};
 use crate::config::{Density, NamingMode};
 use crate::radar_state::{PaneUpdate, RadarState, RadarTab, TabId};
 use crate::render::{GlyphSet, RenderOpts};
@@ -103,6 +103,48 @@ fn parse_cases(doc: &str) -> Vec<Case> {
 
 // ── DSL builder ─────────────────────────────────────────────────────────────
 
+// A fixed "now" for the `ledger` directive's age math and the `waiting` trailer,
+// so a scenario's round numbers produce deterministic, doc-readable text
+// (e.g. 90 → "1m").
+const LEDGER_NOW_EPOCH_S: u64 = 1_000_000;
+
+/// The native attention for one DSL pane: a shell-command row for `command`,
+/// an OSC 7501 program record (root `id`-less record, so an idle pane stays
+/// tracked) for everything else. `waiting_m` backdates `since` against
+/// `LEDGER_NOW_EPOCH_S`.
+fn native_pane(
+    kind: crate::kind::Kind,
+    status: Status,
+    msg: &str,
+    exit_code: Option<i32>,
+    waiting_m: u64,
+) -> NativePane {
+    use crate::kind::Kind;
+    let since_ms = LEDGER_NOW_EPOCH_S.saturating_sub(waiting_m * 60) * 1000;
+    let app = match kind {
+        Kind::Claude => "claude-code",
+        Kind::Remote => "zellij",
+        other => other.as_source(),
+    };
+    let (source, app, records) = if kind == Kind::Command {
+        (Source::Command, None, vec![])
+    } else {
+        let root = Record {
+            id: None,
+            status,
+            app: Some(app.into()),
+            title: None,
+            msg: Some(msg.into()),
+            updated_ms: since_ms,
+        };
+        (Source::Program, Some(app.into()), vec![root])
+    };
+    NativePane {
+        attention: PaneAttention { status, source, text: msg.into(), app, exit_code, since_ms, remembered: None },
+        records,
+    }
+}
+
 /// Parse a `rail-input` DSL block into `(Vec<TabRow>, RenderOpts)` by routing
 /// through the real `RadarState` aggregator.
 ///
@@ -113,16 +155,16 @@ fn parse_cases(doc: &str) -> Vec<Case> {
 ///   jump_hint            ← footer advertises `alt-[n] jump` (default: hidden)
 ///   mode <name>          ← footer shows that Zellij mode (default: none)
 ///   tab <pos> "<name>" [active]
-///     <kind> <status> "<msg>" [task "<text>"] [exit <N>|?]   ← indented; one line per pane
+///     <kind> <status> "<msg>" [waiting <N>m] [exit <N>|?]   ← indented; one line per pane
 ///
-/// For idle panes: Running is applied first (tick=0, same msg) to set
-/// `ever_active=true`, then Idle (tick=1, same msg). This preserves the
-/// idle-but-tracked behavior required by scenario J.
+/// Each pane is the native attention Zellij would report for it: an OSC 7501
+/// program record (every kind but `command`) or a shell-command row
+/// (`command`). An idle pane carries a root record, so it stays tracked
+/// (scenario J).
 ///
 /// Panics on unknown `kind` or `status` tokens with a descriptive message.
 fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpts) {
     use crate::kind::Kind;
-    use crate::payload::{to_wire, StatusPayload};
 
     let mut width: usize = 32;
     let mut height: usize = usize::MAX / 2;
@@ -133,10 +175,6 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
     let mut mode: Option<crate::mode::Mode> = None;
     let mut now_tick: u64 = 0;
     let mut ledger_lines: Vec<crate::rollup::LedgerLine> = Vec::new();
-    // A fixed "now" for the `ledger` directive's age math, so a scenario's
-    // round `age_secs` numbers produce deterministic, doc-readable
-    // `format_age` text (e.g. 90 → "1m").
-    const LEDGER_NOW_EPOCH_S: u64 = 1_000_000;
 
     /// Split a leading `"quoted"` token off `s`, returning (contents, rest).
     /// THE quote splitter for every DSL site that reads a quoted string —
@@ -160,21 +198,14 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
         kind: Kind,
         status: Status,
         msg: String,
-        /// Sticky task label (empty = no task). Set via the `task "<text>"` trailer.
-        task: String,
-        /// true = register pane but send NO status (→ PaneDisplay::Untracked)
+        /// true = register pane but report NO attention (→ PaneDisplay::Untracked)
         untracked: bool,
-        /// Some(code) → command-origin path: command_changed + timer + on_exit.
-        /// None → status_pipe path (existing behavior).
-        exit_code: Option<Option<i32>>,
+        /// The `exit <N>|?` trailer: the exit code of a finished command.
+        exit_code: Option<i32>,
         /// Minutes this pane has been waiting on the user (Pending only). Set
-        /// via the `waiting <N>m` trailer; backdates the apply epoch so the
-        /// `· Nm` wait tag renders. 0 = applied "now" (no tag).
+        /// via the `waiting <N>m` trailer; backdates the attention's `since`
+        /// so the `· Nm` wait tag renders. 0 = "now" (no tag).
         waiting_m: u64,
-        /// true = the `interactive "<argv>"` form: drives the command-observer
-        /// path with an interactive foreground command (a quiet pending — no
-        /// status, no Running row) → PaneDisplay::Interactive's muted label.
-        interactive: bool,
     }
 
     struct TabSpec {
@@ -326,39 +357,15 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
                         kind: Kind::Other,
                         status: Status::Idle,
                         msg: title.to_string(),
-                        task: String::new(),
                         untracked: true,
                         exit_code: None,
                         waiting_m: 0,
-                        interactive: false,
                     });
                 }
                 continue;
             }
 
-            // Interactive pane form: `interactive "<argv>"` — an editor/pager/
-            // TUI in the foreground (docs/activity-model.md, Companion class).
-            if let Some(rest) = trimmed.strip_prefix("interactive ") {
-                let (argv, _) = take_quoted(rest);
-                let pane_id = next_pane_id;
-                next_pane_id += 1;
-                if let Some(idx) = current_tab {
-                    tabs[idx].panes.push(PaneSpec {
-                        pane_id,
-                        kind: Kind::Command,
-                        status: Status::Idle,
-                        msg: argv.to_string(),
-                        task: String::new(),
-                        untracked: false,
-                        exit_code: None,
-                        waiting_m: 0,
-                        interactive: true,
-                    });
-                }
-                continue;
-            }
-
-            // Parse: kind status "msg" [exit <N>|?]
+            // Parse: kind status "msg" [waiting <N>m] [exit <N>|?]
             // We split on the first two spaces to get kind and status, then parse
             // the remainder manually to correctly handle quoted messages that may
             // contain spaces, followed by an optional `exit <N>|?` trailer.
@@ -368,7 +375,7 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
             let rest = parts.next().unwrap_or("\"\"");
 
             // Parse the (possibly-quoted) message; whatever follows the close
-            // quote is the trailer chain (`task`/`waiting`/`exit`). An
+            // quote is the trailer chain (`waiting`/`exit`). An
             // unquoted msg consumes the whole rest, so it carries no trailers.
             let (msg, after_msg) = take_quoted(rest);
 
@@ -389,18 +396,12 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
                 panic!("reference DSL: unknown status '{}' in scenario", status_str);
             }
 
-            // Trailers after the closing quote: `task "<text>"`, `waiting <N>m`,
-            // and/or `exit <N>|?`.
-            let mut task = String::new();
-            let mut exit_code: Option<Option<i32>> = None;
+            // Trailers after the closing quote: `waiting <N>m` and/or `exit <N>|?`.
+            let mut exit_code: Option<i32> = None;
             let mut waiting_m: u64 = 0;
             let mut trailer = after_msg.trim();
             while !trailer.is_empty() {
-                if trailer.starts_with("task \"") {
-                    let (text, remainder) = take_quoted(&trailer["task ".len()..]);
-                    task = text.to_string();
-                    trailer = remainder.trim();
-                } else if let Some(rest) = trailer.strip_prefix("waiting ") {
+                if let Some(rest) = trailer.strip_prefix("waiting ") {
                     let (mins, remainder) = rest.split_once(' ').unwrap_or((rest, ""));
                     let mins = mins.strip_suffix('m').unwrap_or_else(|| {
                         panic!("reference DSL: bad waiting trailer '{trailer}' — expected 'waiting <N>m'")
@@ -412,15 +413,15 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
                 } else if let Some(code_str) = trailer.strip_prefix("exit ") {
                     let code_str = code_str.trim();
                     if code_str == "?" {
-                        exit_code = Some(None);
+                        // An unknown code is the absence of one.
                     } else if let Ok(n) = code_str.parse::<i32>() {
-                        exit_code = Some(Some(n));
+                        exit_code = Some(n);
                     } else {
                         panic!("reference DSL: bad exit code '{code_str}' — must be an integer or '?'");
                     }
                     trailer = "";
                 } else {
-                    panic!("reference DSL: unknown pane trailer '{trailer}' — only 'task \"<text>\"', 'waiting <N>m', and 'exit <N>|?' are supported");
+                    panic!("reference DSL: unknown pane trailer '{trailer}' — only 'waiting <N>m' and 'exit <N>|?' are supported");
                 }
             }
 
@@ -435,11 +436,9 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
                     kind,
                     status,
                     msg: msg.to_string(),
-                    task,
                     untracked: false,
                     exit_code,
                     waiting_m,
-                    interactive: false,
                 });
             }
             continue;
@@ -466,9 +465,12 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
         .collect();
     radar.tabs_changed(radar_tabs);
 
-    // 2. panes_changed: register all panes as live terminal panes.
+    // 2. panes_changed: register all panes as live terminal panes, each with
+    // the native attention Zellij would report for it. Untracked panes report
+    // nothing → PaneDisplay::Untracked.
     let mut tab_panes: HashMap<usize, Vec<TerminalPane>> = HashMap::new();
     let mut live: HashSet<u32> = HashSet::new();
+    let mut native: HashMap<u32, NativePane> = HashMap::new();
 
     for spec in &tabs {
         let position = spec.pos.saturating_sub(1);
@@ -477,6 +479,9 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
             .iter()
             .map(|p| {
                 live.insert(p.pane_id);
+                if !p.untracked {
+                    native.insert(p.pane_id, native_pane(p.kind, p.status, &p.msg, p.exit_code, p.waiting_m));
+                }
                 TerminalPane { floating: false, id: p.pane_id, title: p.msg.clone(), focused_in_tab: false }
             })
             .collect();
@@ -485,131 +490,13 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
         }
     }
 
-    let update = PaneUpdate { tab_panes, live, theme: None, exits: Vec::new(), native: HashMap::new() };
-    radar.panes_changed(update, 0, 0, NamingMode::Off);
-
-    // 3. Apply status for each tracked pane.
-    //
-    // Two paths:
-    //   a) status_pipe path (exit_code == None): the existing StatusPipe-origin path.
-    //      Untracked panes get NO update → PaneDisplay::Untracked.
-    //      For idle panes: first apply Running (tick=0) to set ever_active=true,
-    //      then apply Idle (tick=1). This preserves scenario J's idle-but-tracked behavior.
-    //
-    //   b) command-origin path (exit_code == Some(code)): drives the CommandStore path
-    //      so that pane_outcome() fires and end-result tags (no tag / exit N / ✗) render.
-    //      Sequence:
-    //        1. command_changed(tick=0) — registers a pending command with the msg as argv.
-    //        2. timer(tick=DEBOUNCE_TICKS) — promotes pending→Running once the debounce
-    //           window elapses.
-    //        3. panes_changed with exits vec containing the exit code — calls on_exit,
-    //           which sets status Done/Error and exit_code on the resolved entry.
-
-    // Command-observer intake, one loop for both DSL shapes: `interactive
-    // "<argv>"` records a quiet pending (identity for the muted label, never
-    // promoted — the later timer step can't touch it) and `exit <N>|?` panes
-    // register the pending the exits batch below completes. Argv comes from
-    // splitting the msg so the CommandStore compacts it back into the display
-    // message (e.g. "cargo build" stays "cargo build").
-    let mut command_exits: Vec<(u32, Option<i32>)> = Vec::new();
-    for spec in &tabs {
-        for pane in &spec.panes {
-            if pane.interactive || pane.exit_code.is_some() {
-                let argv: Vec<String> = pane.msg.split_whitespace().map(|s| s.to_string()).collect();
-                radar.command_changed(pane.pane_id, &argv, true, 0);
-                if let Some(code) = pane.exit_code {
-                    command_exits.push((pane.pane_id, code));
-                }
-            }
-        }
-    }
-
-    for spec in &tabs {
-        for pane in &spec.panes {
-            if pane.untracked || pane.exit_code.is_some() || pane.interactive {
-                continue; // untracked / command-exit / interactive panes handled separately
-            }
-
-            // kind -> wire source name (inverse of the `from_source` the DSL used)
-            let source = pane.kind.as_source();
-
-            if pane.status == Status::Idle {
-                // First prime ever_active (and the task) with Running, then switch
-                // to Idle with task="" — the idle apply clears it, matching real
-                // `/clear` semantics.
-                let wire_running = to_wire(&StatusPayload {
-                    pane_id: pane.pane_id,
-                    status: Status::Running,
-                    msg: pane.msg.clone(),
-                    task: pane.task.clone(),
-                    source: source.to_string(),
-                    ..Default::default()
-                });
-                radar.status_pipe(&wire_running, 0, 0, NamingMode::Off);
-
-                let wire_idle = to_wire(&StatusPayload {
-                    pane_id: pane.pane_id,
-                    status: Status::Idle,
-                    msg: pane.msg.clone(),
-                    source: source.to_string(),
-                    ..Default::default()
-                });
-                radar.status_pipe(&wire_idle, 1, 0, NamingMode::Off);
-            } else {
-                let wire = to_wire(&StatusPayload {
-                    pane_id: pane.pane_id,
-                    status: pane.status,
-                    msg: pane.msg.clone(),
-                    task: pane.task.clone(),
-                    source: source.to_string(),
-                    ..Default::default()
-                });
-                // Applied "now" relative to the render epoch, backdated by the
-                // `waiting <N>m` trailer — how the doc's pending scenarios earn
-                // (or, at 0, deliberately do not earn) the `· Nm` wait tag.
-                let apply_epoch = LEDGER_NOW_EPOCH_S.saturating_sub(pane.waiting_m * 60);
-                radar.status_pipe(&wire, 0, apply_epoch, NamingMode::Off);
-            }
-        }
-    }
-
-    if !command_exits.is_empty() {
-        // Promote all pending commands to Running so the msg is set before exit.
-        radar.timer(DEBOUNCE_TICKS, 0);
-
-        // Now deliver the exits. Re-register the live pane set (unchanged) along
-        // with the exits vec so that panes_changed → on_exit sets Done/Error.
-        let mut tab_panes2: HashMap<usize, Vec<TerminalPane>> = HashMap::new();
-        let mut live2: HashSet<u32> = HashSet::new();
-        for spec in &tabs {
-            let position = spec.pos.saturating_sub(1);
-            let terminal_panes: Vec<TerminalPane> = spec
-                .panes
-                .iter()
-                .map(|p| {
-                    live2.insert(p.pane_id);
-                    TerminalPane { floating: false, id: p.pane_id, title: p.msg.clone(), focused_in_tab: false }
-                })
-                .collect();
-            if !terminal_panes.is_empty() {
-                tab_panes2.insert(position, terminal_panes);
-            }
-        }
-        let update2 = PaneUpdate {
-            tab_panes: tab_panes2,
-            live: live2,
-            theme: None,
-            exits: command_exits,
-            native: HashMap::new(),
-        };
-        radar.panes_changed(update2, 2, 0, NamingMode::Off);
-    }
+    radar.panes_changed(PaneUpdate { tab_panes, live, theme: None, native }, 0, NamingMode::Off);
 
     // 4. Build RenderOpts
     let theme = DerivedColors::from_bg_fg((0, 0, 0), (200, 200, 200));
     // Fixtures render a settled state, not the instant a pane just flipped to
     // Pending — pass a tick well past any flash window armed during setup
-    // above (which uses small hardcoded ticks like 0/1/DEBOUNCE_TICKS) so a
+    // above (tick 0) so a
     // `claude pending ...` scenario never spuriously renders the flash tint.
     let rows = radar.rows(10_000);
     let mut opts = RenderOpts {

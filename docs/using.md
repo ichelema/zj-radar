@@ -71,10 +71,7 @@ how long it has run. Both are whole minutes, frozen at `1h+`.
 holds a steady `▸` instead, because it never finishes. So does a connected
 remote session (`ssh`, `mosh`); while it is connected, its tab line also
 carries a right-aligned `⇄`, and its ending reads "disconnected" rather than
-"done". Editors, pagers, and
-other interactive programs never spin; the pane shows a muted label such as
-`○ $ nvim README.md`. Add your own to the quiet set with the
-`interactive_commands` option. Why each class looks the way it does is in
+"done". Why each class looks the way it does is in
 [`activity-model.md`](activity-model.md).
 
 **Overflow.** When tabs outnumber the lines available, trailing idle tabs fold

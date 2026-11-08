@@ -41,8 +41,6 @@ the field as it was, so a typo never resets a setting.
 | `task_lines` | `lines` · `count` · `off` | `lines` | How an agent's background tasks show: a `┊` line per task, only a `+N` count on the agent's row, or nothing. See [`using.md`](using.md). |
 | `ledger` | `true` · `false` | `true` | Show the `─ earlier ─` list of recent completions. `false` shows only live panes; history is still recorded, so `true` brings it back. See [`using.md`](using.md). |
 | `session_tree` | `true` · `false` | `false` | Draw peer sessions' tab trees on this rail (off keeps one line per session). Display-only: every session publishes its tree regardless. See [`using.md`](using.md#cross-session-badge). |
-| `interactive_commands` | comma/space-separated exe names | *(empty)* | Extra programs to treat as interactive: never a spinning row, only a muted label. Extends the built-in set of editors, pagers, and TUIs. Applies live. See [`activity-model.md`](activity-model.md). |
-| `remote_commands` | comma/space-separated exe names | *(empty)* | Extra programs to treat as remote-session launchers (steady mark, tab `⇄` marker). Matched by program name alone, arguments ignored. Extends the built-in set (`ssh`, `mosh`, `mosh-client`, `autossh`, `et`). Applies live. See [`activity-model.md`](activity-model.md). |
 
 Notes:
 

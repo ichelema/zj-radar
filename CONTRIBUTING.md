@@ -82,7 +82,7 @@ Some docs and assets are test inputs. Edit them through their test.
 | `docs/rail-reference.md` (`rail-input`/`rail-expect` blocks) | `crates/plugin/src/reference_tests.rs` |
 | `docs/configuration.md` (both pipe names; every `cmd.v1` verb) | `config.rs`, `control.rs` |
 | `plugins/zj-radar-claude/hooks/hooks.json` (timeouts ≥ send cap + 2) | `hooks_manifest_tests.rs` |
-| `plugins/zj-radar-claude/scripts/notify.sh` (pipe name, deadlines) | `crates/plugin/src/lib.rs`, bats |
+| `plugins/zj-radar-claude/scripts/notify.sh` (deadlines) | bats |
 | `plugins/zj-radar-claude/scripts/notify.sh` (Claude background-task rules: service phrases and jq service rules, waiting message, SubagentStop msg) | `plugins/zj-radar-claude/tests/parity.bats` against `crates/cli/src/agents.rs` |
 | Root `Cargo.toml` version + `=X.Y.Z` core pin, `plugins/zj-radar-claude/.claude-plugin/plugin.json` (version) | `workspace_core_pin_and_claude_plugin_versions_agree` in `hooks_manifest_tests.rs` (`release.yml` only checks the tag against `Cargo.toml`) |
 | `examples/radar-sidebar.kdl` | `crates/cli/src/layout.rs` |
