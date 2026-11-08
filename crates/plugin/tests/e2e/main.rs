@@ -177,8 +177,9 @@ fn background_task_lines_render_on_the_live_rail() {
     session.emit_program_status(&format!("state=working:app=claude-code:id=b1:title={}", b64("Run tests")));
     assert!(
         session.wait_for_sidebar(32, "┊", secs) && session.wait_for_sidebar(32, "Run tests", secs),
-        "a child record should draw a task line;\nsidebar:\n{}",
-        sidebar_region(&session.screen(), 32)
+        "a child record should draw a task line;\nsidebar:\n{}\nterminal pane:\n{}",
+        sidebar_region(&session.screen(), 32),
+        session.dump_screen()
     );
 }
 
