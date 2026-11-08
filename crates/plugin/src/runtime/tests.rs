@@ -523,6 +523,7 @@ fn panes_changed_prunes_focuses_and_persists_snapshot() {
         live: live.clone(),
         theme: Some(theme::DerivedColors::default()),
         exits: vec![(10, Some(0))],
+        native: HashMap::new(),
     });
     assert!(first.render);
     assert_eq!(runtime.radar.last_focused(), Some(10));
@@ -533,6 +534,7 @@ fn panes_changed_prunes_focuses_and_persists_snapshot() {
         live,
         theme: Some(theme::DerivedColors::default()),
         exits: Vec::new(),
+        native: HashMap::new(),
     });
 
     assert!(outcome.render);
@@ -558,6 +560,7 @@ fn panes_changed_emits_resolve_cwd_effect_for_new_panes() {
         live: HashSet::from([7]),
         theme: None,
         exits: Vec::new(),
+        native: HashMap::new(),
     });
 
     assert!(outcome.effects.iter().any(|e| matches!(e, Effect::ResolveCwd { pane_ids } if pane_ids == &vec![7])));
@@ -622,6 +625,7 @@ fn sidebar_instance_never_renames_a_foreign_tab() {
         live: HashSet::from([10, 11]),
         theme: None,
         exits: Vec::new(),
+        native: HashMap::new(),
     });
     // The cwd bootstrap is deliberately NOT ownership-scoped (the cwd also
     // stamps observed commands' repo, which the notification claim key hashes
@@ -741,6 +745,7 @@ fn no_tabs_with_history_renders_ledger_not_scanning() {
             live: HashSet::new(),
             theme: None,
             exits: Vec::new(),
+            native: HashMap::new(),
         });
     }
     assert!(!runtime.radar.ledger_is_empty(), "setup: ledger must be seeded");
@@ -1689,7 +1694,13 @@ fn render_gate_vetoes_repaints_whose_drawn_content_is_unchanged() {
     live.insert(7);
     let mut tab_panes = HashMap::new();
     tab_panes.insert(0, vec![TerminalPane { focused_in_tab: true, ..pane(7) }]);
-    let manifest = || PaneUpdate { tab_panes: tab_panes.clone(), live: live.clone(), theme: None, exits: vec![] };
+    let manifest = || PaneUpdate {
+        tab_panes: tab_panes.clone(),
+        live: live.clone(),
+        theme: None,
+        exits: vec![],
+        native: HashMap::new(),
+    };
 
     let first = rt.panes_changed(manifest());
     assert!(first.render, "first manifest is un-stamped content: renders");
@@ -1821,6 +1832,7 @@ fn backgrounded_done_emits_notify_effect() {
         live: HashSet::from([5, 7]),
         theme: None,
         exits: vec![(7, Some(0))], // pane 7 exits 0 → Done in background
+        native: HashMap::new(),
     });
     assert!(
         out.effects.iter().any(|e| matches!(e, Effect::Notify { .. })),
@@ -1844,6 +1856,7 @@ fn focused_done_emits_no_notify_effect() {
         live: HashSet::from([5, 7]),
         theme: None,
         exits: vec![(5, Some(0))], // pane 5 exits 0 while focused
+        native: HashMap::new(),
     });
     assert!(
         !out.effects.iter().any(|e| matches!(e, Effect::Notify { .. })),
@@ -3177,6 +3190,7 @@ fn manifest_with_pane_7() -> PaneUpdate {
         live: HashSet::from([7]),
         theme: None,
         exits: Vec::new(),
+        native: HashMap::new(),
     }
 }
 
@@ -3426,7 +3440,7 @@ fn selectable_effects(outcome: &Outcome) -> Vec<bool> {
 
 fn manifest(tab_panes: HashMap<usize, Vec<TerminalPane>>) -> PaneUpdate {
     let live = tab_panes.values().flatten().map(|p| p.id).collect();
-    PaneUpdate { tab_panes, live, theme: None, exits: Vec::new() }
+    PaneUpdate { tab_panes, live, theme: None, exits: Vec::new(), native: HashMap::new() }
 }
 
 #[test]

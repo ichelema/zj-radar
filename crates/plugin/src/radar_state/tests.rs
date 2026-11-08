@@ -190,6 +190,7 @@ fn exited_pane_root_clears_its_pushed_status() {
         live: HashSet::from([7, 8]),
         theme: None,
         exits: vec![(7, Some(130)), (8, Some(0))],
+        native: HashMap::new(),
     };
     let change = radar.panes_changed(update, 2, 100, config::NamingMode::Off);
 
@@ -293,6 +294,7 @@ fn active_tab_focus_is_the_only_global_focus_transition() {
         live: HashSet::from([1, 2]),
         theme: None,
         exits: Vec::new(),
+        native: HashMap::new(),
     };
 
     radar.panes_changed(update, 7, 0, config::NamingMode::Off);
@@ -360,7 +362,7 @@ fn managed_naming_skips_manual_names_but_force_overrides() {
 
 fn pane_update(tab_panes: HashMap<usize, Vec<TerminalPane>>) -> PaneUpdate {
     let live = tab_panes.values().flat_map(|panes| panes.iter().map(|p| p.id)).collect();
-    PaneUpdate { tab_panes, live, theme: None, exits: Vec::new() }
+    PaneUpdate { tab_panes, live, theme: None, exits: Vec::new(), native: HashMap::new() }
 }
 
 #[test]
@@ -529,6 +531,7 @@ fn panes_changed_persists_when_an_exit_displaces_a_completion() {
         live: HashSet::from([1]),
         theme: None,
         exits: vec![(1, Some(0))],
+        native: HashMap::new(),
     };
     let change = radar.panes_changed(update, 5, 200, config::NamingMode::Off);
     assert!(change.snapshot == SnapshotWrite::Now, "an exit that displaced a completion persists");
@@ -821,6 +824,7 @@ fn snapshot_merge_drops_existing_dead_panes_after_live_update() {
             live: HashSet::from([2]),
             theme: None,
             exits: Vec::new(),
+            native: HashMap::new(),
         },
         3,
         0,
@@ -1424,6 +1428,7 @@ proptest! {
                         live: live.clone(),
                         theme: None,
                         exits: exits.clone(),
+                        native: HashMap::new(),
                     };
                     st.panes_changed(update, tick, 0, config::NamingMode::Off);
 
@@ -1582,6 +1587,7 @@ fn raw_pane(id: u32, tab_pos: usize) -> RawPane {
         default_fg: None,
         exited: false,
         exit_status: None,
+        attention: None,
     }
 }
 
@@ -1748,6 +1754,7 @@ fn prune_ledgers_completions_with_the_pre_close_tab_name() {
         live: HashSet::new(),
         theme: None,
         exits: Vec::new(),
+        native: HashMap::new(),
     };
     // Two updates: the first absence is the break-pane grace manifest; the
     // second confirms the close and prunes. By then the pane is long gone
@@ -1782,7 +1789,13 @@ fn pending_and_running_never_ledger() {
     assert_eq!(radar.status(2).unwrap().status, Status::Pending);
 
     // Both panes close.
-    let update = PaneUpdate { tab_panes: HashMap::new(), live: HashSet::new(), theme: None, exits: Vec::new() };
+    let update = PaneUpdate {
+        tab_panes: HashMap::new(),
+        live: HashSet::new(),
+        theme: None,
+        exits: Vec::new(),
+        native: HashMap::new(),
+    };
     radar.panes_changed(update, 5, 999, config::NamingMode::Off);
 
     assert!(radar.ledger_is_empty(), "Running/Pending carry nothing to ledger — only Done/Error recede");
@@ -1825,7 +1838,13 @@ fn shadowed_command_completion_never_ledgers() {
     // closes — pruning both stores in the same PaneUpdate. Exactly ONE
     // ledger entry should land: the STATUS one.
     radar.status_mut().apply(payload_in_repo(7, Status::Done, "pinky"), confirm_tick + DONE_TTL_TICKS, 950);
-    let update = PaneUpdate { tab_panes: HashMap::new(), live: HashSet::new(), theme: None, exits: Vec::new() };
+    let update = PaneUpdate {
+        tab_panes: HashMap::new(),
+        live: HashSet::new(),
+        theme: None,
+        exits: Vec::new(),
+        native: HashMap::new(),
+    };
     // Second absence confirms the close (the first is the break-pane grace).
     radar.panes_changed(update.clone(), confirm_tick + DONE_TTL_TICKS + 1, 999, config::NamingMode::Off);
     radar.panes_changed(update, confirm_tick + DONE_TTL_TICKS + 2, 999, config::NamingMode::Off);
@@ -1969,4 +1988,76 @@ fn set_remote_commands_sweep_rekinds_an_already_promoted_row() {
     let changed = radar.set_remote_commands(&extras);
     assert!(changed);
     assert_eq!(radar.command(1).unwrap().kind, Kind::Remote, "already-promoted row re-kinds live");
+}
+
+// ── Native attention (Zellij ≥ 0.46) ──
+
+fn native_working(app: &str, text: &str) -> crate::attention::NativePane {
+    use crate::attention::{NativePane, PaneAttention, Record, Source};
+    NativePane {
+        attention: PaneAttention {
+            status: Status::Running,
+            source: Source::Program,
+            text: text.into(),
+            app: Some(app.into()),
+            ..PaneAttention::default()
+        },
+        records: vec![Record { status: Status::Running, app: Some(app.into()), ..Record::default() }],
+    }
+}
+
+fn native_update(panes: Vec<(u32, crate::attention::NativePane)>) -> PaneUpdate {
+    let mut update = pane_update(HashMap::from([(0, panes.iter().map(|(id, _)| pane(*id)).collect())]));
+    update.native = panes.into_iter().collect();
+    update
+}
+
+#[test]
+fn native_attention_wins_over_both_stores() {
+    let mut radar = RadarState::default();
+    radar.tabs_changed(vec![tab(10, 0, "Tab #1", true)]);
+    radar.status_mut().apply(payload_in_repo(7, Status::Done, "repo"), 1, 0);
+    radar.panes_changed(
+        native_update(vec![(7, native_working("claude-code", "Reading files"))]),
+        2,
+        0,
+        config::NamingMode::Off,
+    );
+    let rows = radar.rows(2);
+    let display = &rows[0].display;
+    assert_eq!(display.status, Status::Running);
+    assert_eq!(display.panes[0].kind(), Kind::Claude);
+    assert_eq!(display.panes[0].msg(), "Reading files");
+    assert!(radar.needs_fast_ticks(), "a native Running row spins");
+    assert!(radar.notify_views().is_empty(), "Zellij notifies natively for a reported pane");
+}
+
+#[test]
+fn idle_native_pane_falls_back_to_the_stores() {
+    let mut radar = RadarState::default();
+    radar.tabs_changed(vec![tab(10, 0, "Tab #1", true)]);
+    radar.status_mut().apply(payload_in_repo(7, Status::Running, "repo"), 1, 0);
+    radar.panes_changed(
+        native_update(vec![(7, crate::attention::NativePane::default())]),
+        2,
+        0,
+        config::NamingMode::Off,
+    );
+    assert_eq!(radar.rows(2)[0].display.status, Status::Running);
+}
+
+#[test]
+fn native_flip_to_pending_flashes_once() {
+    let mut radar = RadarState::default();
+    radar.tabs_changed(vec![tab(10, 0, "Tab #1", true)]);
+    radar.panes_changed(native_update(vec![(7, native_working("codex", "x"))]), 1, 0, config::NamingMode::Off);
+    let mut pending = native_working("codex", "needs approval");
+    pending.attention.status = Status::Pending;
+    radar.panes_changed(native_update(vec![(7, pending.clone())]), 5, 100, config::NamingMode::Off);
+    assert!(radar.rows(5)[0].flash);
+    assert!(radar.pending_wait_unsaturated(100));
+    radar.timer(7, 0);
+    // A re-reported Pending is not a flip.
+    radar.panes_changed(native_update(vec![(7, pending)]), 8, 100, config::NamingMode::Off);
+    assert!(!radar.rows(8)[0].flash);
 }

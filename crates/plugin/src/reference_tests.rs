@@ -485,7 +485,7 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
         }
     }
 
-    let update = PaneUpdate { tab_panes, live, theme: None, exits: Vec::new() };
+    let update = PaneUpdate { tab_panes, live, theme: None, exits: Vec::new(), native: HashMap::new() };
     radar.panes_changed(update, 0, 0, NamingMode::Off);
 
     // 3. Apply status for each tracked pane.
@@ -595,7 +595,13 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
                 tab_panes2.insert(position, terminal_panes);
             }
         }
-        let update2 = PaneUpdate { tab_panes: tab_panes2, live: live2, theme: None, exits: command_exits };
+        let update2 = PaneUpdate {
+            tab_panes: tab_panes2,
+            live: live2,
+            theme: None,
+            exits: command_exits,
+            native: HashMap::new(),
+        };
         radar.panes_changed(update2, 2, 0, NamingMode::Off);
     }
 
