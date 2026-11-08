@@ -286,7 +286,7 @@ mod tests {
     fn wasm_release_url_points_at_versioned_asset() {
         assert_eq!(
             wasm_release_url("0.1.0"),
-            "https://github.com/marktoda/zj-radar/releases/download/v0.1.0/zj_radar.wasm"
+            "https://github.com/ichelema/zj-radar/releases/download/v0.1.0/zj_radar.wasm"
         );
     }
 
@@ -294,7 +294,7 @@ mod tests {
     fn wasm_checksum_url_is_the_wasm_url_plus_sha256() {
         assert_eq!(
             wasm_checksum_url("0.1.0"),
-            "https://github.com/marktoda/zj-radar/releases/download/v0.1.0/zj_radar.wasm.sha256"
+            "https://github.com/ichelema/zj-radar/releases/download/v0.1.0/zj_radar.wasm.sha256"
         );
     }
 

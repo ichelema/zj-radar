@@ -2,7 +2,7 @@
 # zj-radar CLI installer.
 #
 #   curl --proto '=https' --tlsv1.2 -LsSf \
-#     https://github.com/marktoda/zj-radar/releases/latest/download/install.sh | sh
+#     https://github.com/ichelema/zj-radar/releases/latest/download/install.sh | sh
 #
 # Downloads the prebuilt `zj-radar` binary matching this machine's OS/arch from a
 # GitHub release and installs it. Pure POSIX sh. The whole script is defined as
@@ -12,11 +12,11 @@
 # Environment overrides:
 #   ZJ_RADAR_VERSION   release tag to install (e.g. v0.1.2). Default: latest.
 #   ZJ_RADAR_BIN_DIR   install directory. Default: ~/.local/bin.
-#   ZJ_RADAR_REPO      owner/repo to download from. Default: marktoda/zj-radar.
+#   ZJ_RADAR_REPO      owner/repo to download from. Default: ichelema/zj-radar.
 
 set -eu
 
-REPO="${ZJ_RADAR_REPO:-marktoda/zj-radar}"
+REPO="${ZJ_RADAR_REPO:-ichelema/zj-radar}"
 VERSION="${ZJ_RADAR_VERSION:-latest}"
 BIN_DIR="${ZJ_RADAR_BIN_DIR:-$HOME/.local/bin}"
 

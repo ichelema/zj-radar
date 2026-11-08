@@ -603,7 +603,7 @@ mod tests {
     fn cli_release_urls_follow_the_release_asset_naming() {
         assert_eq!(
             cli_release_url("0.5.1", "aarch64-apple-darwin"),
-            "https://github.com/marktoda/zj-radar/releases/download/v0.5.1/zj-radar-aarch64-apple-darwin.tar.gz"
+            "https://github.com/ichelema/zj-radar/releases/download/v0.5.1/zj-radar-aarch64-apple-darwin.tar.gz"
         );
     }
 

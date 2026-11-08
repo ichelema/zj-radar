@@ -80,13 +80,13 @@ fake_uname() {
 @test "asset_url: default version uses the /latest/download/ redirect" {
   run run_installer "asset_url x86_64-unknown-linux-musl"
   [ "$status" -eq 0 ]
-  [ "$output" = "https://github.com/marktoda/zj-radar/releases/latest/download/zj-radar-x86_64-unknown-linux-musl.tar.gz" ]
+  [ "$output" = "https://github.com/ichelema/zj-radar/releases/latest/download/zj-radar-x86_64-unknown-linux-musl.tar.gz" ]
 }
 
 @test "asset_url: ZJ_RADAR_VERSION pins the tag path" {
   ZJ_RADAR_VERSION=v9.9.9 run run_installer "asset_url aarch64-apple-darwin"
   [ "$status" -eq 0 ]
-  [ "$output" = "https://github.com/marktoda/zj-radar/releases/download/v9.9.9/zj-radar-aarch64-apple-darwin.tar.gz" ]
+  [ "$output" = "https://github.com/ichelema/zj-radar/releases/download/v9.9.9/zj-radar-aarch64-apple-darwin.tar.gz" ]
 }
 
 # ── verify_sha256: the integrity gate ────────────────────────────────────────

@@ -38,9 +38,9 @@ curl -LsSf "https://github.com/zellij-org/zellij/releases/download/${ZELLIJ_VERS
 
 # ── README step 1: the installer ─────────────────────────────────────────────
 if [ -n "${ZJ_RADAR_VERSION:-}" ]; then
-    installer_url="https://github.com/marktoda/zj-radar/releases/download/${ZJ_RADAR_VERSION}/install.sh"
+    installer_url="https://github.com/ichelema/zj-radar/releases/download/${ZJ_RADAR_VERSION}/install.sh"
 else
-    installer_url="https://github.com/marktoda/zj-radar/releases/latest/download/install.sh"
+    installer_url="https://github.com/ichelema/zj-radar/releases/latest/download/install.sh"
 fi
 curl --proto '=https' --tlsv1.2 -LsSf "$installer_url" | sh
 export PATH="$HOME/.local/bin:$PATH"
