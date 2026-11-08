@@ -173,8 +173,12 @@ fn background_task_lines_render_on_the_live_rail() {
     let session = ZellijSession::start(&session_name, &sidebar_layout(&wasm), &wasm, isolated);
     let secs = std::time::Duration::from_secs(5);
 
-    session.emit_program_status(&osc("working", "fixing retries"));
+    // Child first: Zellij sends PaneUpdate (the only carrier of the records)
+    // only when the pane's resolved attention changes, and a child under a
+    // root that is already working changes nothing. The root's Idle → Working
+    // step then delivers both records in one PaneUpdate.
     session.emit_program_status(&format!("state=working:app=claude-code:id=b1:title={}", b64("Run tests")));
+    session.emit_program_status(&osc("working", "fixing retries"));
     assert!(
         session.wait_for_sidebar(32, "┊", secs) && session.wait_for_sidebar(32, "Run tests", secs),
         "a child record should draw a task line;\nsidebar:\n{}\nterminal pane:\n{}",
