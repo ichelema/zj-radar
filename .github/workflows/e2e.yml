@@ -93,7 +93,9 @@ jobs:
       - name: live e2e (L5)
         if: steps.scope.outputs.run == 'true'
         # The git build goes ahead of the devshell's nixpkgs zellij on PATH.
-        run: nix develop -c env PATH="$HOME/zellij-git/bin:$PATH" sh -c 'zellij --version && just test-e2e'
+        # Set inside the devshell: an outer "$PATH" would expand to the
+        # runner's PATH and drop the devshell's (just, bats, …).
+        run: nix develop -c sh -c 'PATH="$HOME/zellij-git/bin:$PATH"; zellij --version && just test-e2e'
       - name: file a failure issue (nightly visibility)
         if: failure() && github.event_name == 'schedule'
         uses: ./.github/actions/nightly-failure-issue
