@@ -2061,3 +2061,113 @@ fn native_flip_to_pending_flashes_once() {
     radar.panes_changed(native_update(vec![(7, pending)]), 8, 100, config::NamingMode::Off);
     assert!(!radar.rows(8)[0].flash);
 }
+
+fn native_done(app: &str, text: &str) -> crate::attention::NativePane {
+    let mut pane = native_working(app, text);
+    pane.attention.status = Status::Done;
+    pane.attention.since_ms = 50_000;
+    pane.records[0].status = Status::Done;
+    pane
+}
+
+#[test]
+fn a_seen_native_done_enters_the_ledger() {
+    let mut radar = RadarState::default();
+    radar.tabs_changed(vec![tab(10, 0, "api", true)]);
+    radar.panes_changed(
+        native_update(vec![(7, native_done("claude-code", "Turn finished"))]),
+        1,
+        0,
+        config::NamingMode::Off,
+    );
+    assert!(radar.ledger().is_empty(), "a lit Done is still a card fact");
+    // Zellij marks the focused pane seen: same records, attention Idle.
+    let mut seen = native_done("claude-code", "");
+    seen.attention.status = Status::Idle;
+    seen.attention.source = crate::attention::Source::Other;
+    // Zellij also remembers it: the same completion, so still one ledger row.
+    seen.attention.remembered = Some(crate::attention::Remembered {
+        status: Status::Done,
+        text: "done: Turn finished".into(),
+        since_ms: 50_000,
+    });
+    assert!(radar.attention_changed(7, seen.attention.clone(), 2));
+    let lines = radar.ledger_lines();
+    assert_eq!(lines.len(), 1);
+    assert_eq!((lines[0].tab_name.as_str(), lines[0].label.as_str(), lines[0].error), ("api", "Turn finished", false));
+    assert_eq!(lines[0].at_epoch_s, 50);
+    // Re-reporting the Idle state is not a second edge.
+    radar.panes_changed(native_update(vec![(7, seen)]), 3, 0, config::NamingMode::Off);
+    assert_eq!(radar.ledger_lines().len(), 1);
+}
+
+#[test]
+fn a_native_error_pane_that_closes_enters_the_ledger() {
+    let mut radar = RadarState::default();
+    radar.tabs_changed(vec![tab(10, 0, "api", true)]);
+    let mut failed = native_done("codex", "Crashed");
+    failed.attention.status = Status::Error;
+    radar.panes_changed(native_update(vec![(7, failed)]), 1, 0, config::NamingMode::Off);
+    radar.panes_changed(native_update(vec![]), 2, 0, config::NamingMode::Off);
+    let lines = radar.ledger_lines();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].error);
+    assert_eq!(lines[0].tab_name, "api");
+}
+
+#[test]
+fn a_done_seen_at_once_enters_the_ledger_from_remembered() {
+    // A focused pane's Done is seen before any update shows it: Working →
+    // Idle, with the Done kept in `remembered`.
+    let mut radar = RadarState::default();
+    radar.tabs_changed(vec![tab(10, 0, "api", true)]);
+    radar.panes_changed(
+        native_update(vec![(7, native_working("claude-code", "Refactor"))]),
+        1,
+        0,
+        config::NamingMode::Off,
+    );
+    let mut seen = native_done("claude-code", "");
+    seen.attention.status = Status::Idle;
+    seen.attention.remembered = Some(crate::attention::Remembered {
+        status: Status::Done,
+        text: "done: Refactor complete".into(),
+        since_ms: 60_000,
+    });
+    radar.panes_changed(native_update(vec![(7, seen.clone())]), 2, 0, config::NamingMode::Off);
+    radar.panes_changed(native_update(vec![(7, seen)]), 3, 0, config::NamingMode::Off);
+    let lines = radar.ledger_lines();
+    assert_eq!(lines.len(), 1, "one completion, however many updates repeat it");
+    assert_eq!((lines[0].label.as_str(), lines[0].at_epoch_s), ("Refactor complete", 60));
+}
+
+#[test]
+fn attention_changed_reaches_a_rail_without_a_manifest() {
+    // A hidden tab's instance gets no `PaneUpdate`, only `PaneAttentionChanged`.
+    let mut radar = RadarState::default();
+    let working = native_working("pi", "Thinking");
+    assert!(radar.attention_changed(7, working.attention.clone(), 1));
+    assert!(radar.needs_fast_ticks());
+    assert!(!radar.attention_changed(7, working.attention, 2), "an identical attention changes nothing");
+}
+
+#[test]
+fn a_hidden_rail_ledgers_on_the_manifest_its_reveal_brings() {
+    // Hidden: no tabs, no manifest, only `PaneAttentionChanged`; on reveal
+    // the manifest comes before the tabs.
+    let mut radar = RadarState::default();
+    let mut seen = native_done("claude-code", "");
+    seen.attention.status = Status::Idle;
+    seen.attention.remembered =
+        Some(crate::attention::Remembered { status: Status::Done, text: "done: Ship it".into(), since_ms: 70_000 });
+    radar.attention_changed(7, seen.attention.clone(), 1);
+    assert!(radar.ledger().is_empty(), "no topology yet: no tab to file it under");
+    // By the reveal Zellij has forgotten the remembered Done.
+    seen.attention.remembered = None;
+    radar.panes_changed(native_update(vec![(7, seen)]), 2, 0, config::NamingMode::Off);
+    assert!(radar.ledger().is_empty());
+    radar.tabs_changed(vec![tab(10, 0, "api", false), tab(20, 1, "web", true)]);
+    let lines = radar.ledger_lines();
+    assert_eq!(lines.len(), 1);
+    assert_eq!((lines[0].tab_name.as_str(), lines[0].label.as_str()), ("api", "Ship it"));
+}

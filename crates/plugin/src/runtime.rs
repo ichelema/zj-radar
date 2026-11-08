@@ -1430,6 +1430,12 @@ impl PluginRuntime {
         self.project(vec![], change, crate::clock::now_epoch_s())
     }
 
+    /// `PaneAttentionChanged` — see `RadarState::attention_changed`.
+    pub(crate) fn attention_changed(&mut self, pane_id: u32, attention: crate::attention::PaneAttention) -> Outcome {
+        let render = self.radar.attention_changed(pane_id, attention, self.tick);
+        self.project(vec![], RadarChange { render, ..RadarChange::default() }, crate::clock::now_epoch_s())
+    }
+
     pub(crate) fn command_changed(&mut self, pane_id: u32, command: &[String], is_foreground: bool) -> Outcome {
         let change = self.radar.command_changed(pane_id, command, is_foreground, self.tick);
         self.project(vec![], change, crate::clock::now_epoch_s())

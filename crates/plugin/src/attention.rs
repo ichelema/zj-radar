@@ -34,6 +34,23 @@ pub(crate) struct PaneAttention {
     pub app: Option<String>,
     pub exit_code: Option<i32>,
     pub since_ms: u64,
+    /// The program's deciding record, kept after the pane is seen: a focused
+    /// pane's Done is seen at once and never shows as the status.
+    pub remembered: Option<Remembered>,
+}
+
+/// `PaneAttention::remembered`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Remembered {
+    pub status: Status,
+    pub text: String,
+    pub since_ms: u64,
+}
+
+/// A completion's ledger label: Zellij's text without its `done: ` /
+/// `failed: ` head, which the ledger glyph already says.
+pub(crate) fn completion_label(text: &str) -> &str {
+    text.strip_prefix("done: ").or_else(|| text.strip_prefix("failed: ")).unwrap_or(text)
 }
 
 /// One `ProgramStatusRecord`: the root (`id == None`) or a child.
@@ -388,6 +405,13 @@ mod tests {
         let o = program(Status::Running, "x", "a\x1b[31mb\nc").observation(None, 1).unwrap();
         assert!(!o.msg.contains('\x1b') && !o.msg.contains('\n'), "{:?}", o.msg);
         assert_eq!(o.kind, Kind::Other);
+    }
+
+    #[test]
+    fn completion_labels_drop_the_status_head() {
+        assert_eq!(completion_label("done: Refactor complete"), "Refactor complete");
+        assert_eq!(completion_label("failed: exit 2"), "exit 2");
+        assert_eq!(completion_label("cargo test"), "cargo test");
     }
 
     #[test]

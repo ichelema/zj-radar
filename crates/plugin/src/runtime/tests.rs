@@ -4016,3 +4016,18 @@ fn theme_switch_to_an_unusable_palette_falls_back() {
     assert!(out.render);
     assert_eq!(rt.theme, theme::DerivedColors::default());
 }
+
+#[test]
+fn pane_attention_changed_renders_only_on_a_change() {
+    let mut rt = runtime_with_granted_permission();
+    rt.tabs_changed(vec![tab(0, "api", true)]);
+    let working = crate::attention::PaneAttention {
+        status: Status::Running,
+        source: crate::attention::Source::Program,
+        text: "Thinking".into(),
+        app: Some("pi".into()),
+        ..Default::default()
+    };
+    assert!(rt.attention_changed(7, working.clone()).render);
+    assert!(!rt.attention_changed(7, working).render);
+}

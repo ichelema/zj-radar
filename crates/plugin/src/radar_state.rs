@@ -242,6 +242,13 @@ pub(crate) struct RadarState {
     /// The latest manifest's native attention, for each pane it has something
     /// to show for. Wins over both stores (`resolve`).
     native: HashMap<u32, TrackedObservation>,
+    /// The raw native attention `native` derives from: the latest manifest,
+    /// with `PaneAttentionChanged` patching a pane's attention in between.
+    native_raw: HashMap<u32, NativePane>,
+    /// Native completions whose pane no known tab holds yet — a hidden rail
+    /// hears `PaneAttentionChanged` before any manifest. Filed once a
+    /// manifest and the tabs seat the pane (`file_unfiled`).
+    unfiled: Vec<(u32, Status, String, u64)>,
     tabs: Vec<RadarTab>,
     tab_panes: HashMap<usize, Vec<TerminalPane>>,
     pane_cwd: HashMap<u32, String>,
@@ -475,6 +482,7 @@ impl RadarState {
         // current set), so `applied` doesn't accrete gone tabs.
         let live: HashSet<TabId> = self.tabs.iter().map(|t| t.id).collect();
         self.namer.retain_tabs(&live);
+        self.file_unfiled();
         RadarChange { render: true, settle: false, ..RadarChange::default() }
     }
 
@@ -566,15 +574,21 @@ impl RadarState {
         }
         self.live_panes = Some(update.live.clone());
         self.tab_panes = update.tab_panes;
-        let old_native = std::mem::take(&mut self.native);
-        for (id, pane) in update.native {
-            let prev = old_native.get(&id);
-            let Some(obs) = pane.observation(prev, tick) else { continue };
-            if obs.status == Status::Pending && prev.is_none_or(|p| p.status != Status::Pending) {
-                self.arm_flash(id, tick);
-            }
-            self.native.insert(id, obs);
+        // A live pane ledgers under its current tab, one gone from the
+        // manifest under the tab it was last seen in. (A hidden rail's first
+        // manifest is the one its reveal brings, so `old_index` can be empty.)
+        self.native_raw = update.native;
+        let mut index = self.pane_tab_index();
+        for (id, tab) in &old_index {
+            index.entry(*id).or_insert_with(|| tab.clone());
         }
+        let mut ids: Vec<u32> = self.native.keys().chain(self.native_raw.keys()).copied().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            self.native_changed(id, tick, &index);
+        }
+        self.file_unfiled();
         // An absent pane gets one manifest of grace before it's pruned:
         // Zellij's break-pane family reports session state while the moved
         // pane is extracted and in no tab (zellij screen.rs: `extract_pane` →
@@ -682,6 +696,84 @@ impl RadarState {
             self.touch();
         }
         changed
+    }
+
+    /// `PaneAttentionChanged`: one pane's attention moved. Unlike the
+    /// manifest it reaches hidden tabs' instances too, so the ledger and
+    /// counts there stay current. Returns whether rows changed.
+    pub(crate) fn attention_changed(
+        &mut self,
+        pane_id: u32,
+        attention: crate::attention::PaneAttention,
+        tick: u64,
+    ) -> bool {
+        self.native_raw.entry(pane_id).or_default().attention = attention;
+        let index = self.pane_tab_index();
+        let changed = self.native_changed(pane_id, tick, &index);
+        if changed {
+            self.touch();
+        }
+        changed
+    }
+
+    /// Re-derive one pane's native observation from `native_raw` and act on
+    /// the edge: a Done/Error that changes status or disappears leaves the
+    /// card for the ledger (a seen Done reads Idle), and a flip to Pending
+    /// flashes the tab. Returns whether the observation changed.
+    fn native_changed(&mut self, pane_id: u32, tick: u64, index: &HashMap<u32, (TabId, String)>) -> bool {
+        let prev = self.native.remove(&pane_id);
+        let obs = self.native_raw.get(&pane_id).and_then(|p| p.observation(prev.as_ref(), tick));
+        let status = obs.as_ref().map(|o| o.status);
+        let changed = prev != obs;
+        if status == Some(Status::Pending) && prev.as_ref().is_none_or(|p| p.status != Status::Pending) {
+            self.arm_flash(pane_id, tick);
+        }
+        if let Some(obs) = obs {
+            self.native.insert(pane_id, obs);
+        }
+        if let Some(prev) = prev.filter(|p| p.status.is_completion() && Some(p.status) != status) {
+            self.ledger_native(pane_id, prev.status, &prev.msg, prev.completed_epoch_s, index);
+        }
+        let remembered = self.native_raw.get(&pane_id).and_then(|p| p.attention.remembered.clone());
+        if let Some(r) = remembered.filter(|r| r.status.is_completion() && Some(r.status) != status) {
+            self.ledger_native(pane_id, r.status, &r.text, Some(r.since_ms / 1000), index);
+        }
+        changed
+    }
+
+    /// Retry the completions no tab could hold yet: on reveal a rail's
+    /// `PaneUpdate` can come before its first `TabUpdate`, so either may be
+    /// the one that seats the pane.
+    fn file_unfiled(&mut self) {
+        let index = self.pane_tab_index();
+        for (id, status, label, at) in std::mem::take(&mut self.unfiled) {
+            self.ledger_native(id, status, &label, Some(at), &index);
+        }
+    }
+
+    /// File one native completion under the pane's tab. Both edges in
+    /// `native_changed` can report the same completion; `Ledger::push`
+    /// merges them (same pane, outcome and label).
+    fn ledger_native(
+        &mut self,
+        pane_id: u32,
+        status: Status,
+        text: &str,
+        at_epoch_s: Option<u64>,
+        index: &HashMap<u32, (TabId, String)>,
+    ) {
+        let Some(at_epoch_s) = at_epoch_s else { return };
+        let label = crate::attention::completion_label(text).to_string();
+        let Some((tab_id, tab_name)) = index.get(&pane_id) else {
+            // ponytail: unbounded only in theory, a manifest drains it; cap it if hidden rails ever live without one
+            self.unfiled.push((pane_id, status, label, at_epoch_s));
+            return;
+        };
+        let outcome = if status == Status::Error { LedgerOutcome::Error } else { LedgerOutcome::Done };
+        let entry = LedgerEntry { at_epoch_s, outcome, tab_id: *tab_id, tab_name: tab_name.clone(), label, pane_id };
+        if self.ledger.push(entry.sanitized()) {
+            self.touch();
+        }
     }
 
     pub(crate) fn cwd_changed(&mut self, pane_id: u32, path: String, naming: config::NamingMode) -> RadarChange {

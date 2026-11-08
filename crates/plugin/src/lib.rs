@@ -390,6 +390,11 @@ fn native_attention(a: PaneAttention) -> attention::PaneAttention {
         app: a.detail.app,
         exit_code: a.detail.exit_code,
         since_ms: a.since_ms,
+        remembered: a.remembered.map(|r| attention::Remembered {
+            status: native_status(r.status),
+            text: r.text,
+            since_ms: r.since_ms,
+        }),
     }
 }
 
@@ -407,6 +412,9 @@ impl ZellijPlugin for State {
             // Every other session on this server, with counts and the panes
             // that want attention: the cross-session badge's peers.
             EventType::GlobalAttentionUpdate,
+            // One pane's attention moved; unlike `PaneUpdate` it reaches the
+            // instances of hidden tabs too (ledger edges, counts).
+            EventType::PaneAttentionChanged,
             // Replaces `SessionUpdate`: stock zj-radar never calls the
             // blocking `get_session_list()` host fn that's the ONLY thing
             // that repopulates `SessionUpdate`'s peer list in zellij 0.44.3
@@ -599,6 +607,10 @@ impl ZellijPlugin for State {
                     return self.handle_outcome(outcome);
                 }
                 false // plugin panes: nothing observed, nothing to repaint
+            }
+            Event::PaneAttentionChanged(PaneId::Terminal(id), attention) => {
+                let outcome = self.runtime.attention_changed(id, native_attention(attention));
+                self.handle_outcome(outcome)
             }
             Event::CommandChanged(pane_id, command, is_foreground, _clients) => {
                 if let PaneId::Terminal(id) = pane_id {
