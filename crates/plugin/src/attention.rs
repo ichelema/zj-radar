@@ -47,10 +47,14 @@ pub(crate) struct Remembered {
     pub since_ms: u64,
 }
 
-/// A completion's ledger label: Zellij's text without its `done: ` /
-/// `failed: ` head, which the ledger glyph already says.
+/// A completion's ledger label: Zellij's text without the head the ledger
+/// glyph already says (`done`, `failed`, `finished`, with an optional
+/// ` · 3s` duration). `exited 2` stays: the glyph doesn't carry the code.
 pub(crate) fn completion_label(text: &str) -> &str {
-    text.strip_prefix("done: ").or_else(|| text.strip_prefix("failed: ")).unwrap_or(text)
+    match text.split_once(": ") {
+        Some((head, rest)) if matches!(head.split(" · ").next(), Some("done" | "failed" | "finished")) => rest,
+        _ => text,
+    }
 }
 
 /// One `ProgramStatusRecord`: the root (`id == None`) or a child.
@@ -407,6 +411,12 @@ mod tests {
         assert_eq!(completion_label("done: Refactor complete"), "Refactor complete");
         assert_eq!(completion_label("failed: exit 2"), "exit 2");
         assert_eq!(completion_label("cargo test"), "cargo test");
+        // Zellij's command heads.
+        assert_eq!(completion_label("done · 3s: cargo test"), "cargo test");
+        assert_eq!(completion_label("finished: make"), "make");
+        assert_eq!(completion_label("exited 1 · 2s: cargo test"), "exited 1 · 2s: cargo test");
+        // Only the first head goes.
+        assert_eq!(completion_label("done: note: see log"), "note: see log");
     }
 
     #[test]

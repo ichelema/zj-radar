@@ -833,6 +833,24 @@ fn a_seen_native_done_enters_the_ledger() {
 }
 
 #[test]
+fn a_seen_long_native_done_files_one_ledger_row() {
+    // Longer than the 60-char cap: the lit card's `msg` and the remembered
+    // text must still yield the same label, or the two edges file twice.
+    let text = format!("done: {}", "Refactored the session index and updated every caller ".repeat(2));
+    let mut radar = RadarState::default();
+    radar.tabs_changed(vec![tab(10, 0, "api", true)]);
+    radar.panes_changed(native_update(vec![(7, native_done("claude-code", &text))]), 1, config::NamingMode::Off);
+    let mut seen = native_done("claude-code", "");
+    seen.attention.status = Status::Idle;
+    seen.attention.source = crate::attention::Source::Other;
+    seen.attention.remembered = Some(crate::attention::Remembered { status: Status::Done, text, since_ms: 50_000 });
+    assert!(radar.attention_changed(7, seen.attention, 2));
+    let lines = radar.ledger_lines();
+    assert_eq!(lines.len(), 1, "{:?}", lines.iter().map(|l| &l.label).collect::<Vec<_>>());
+    assert!(lines[0].label.starts_with("Refactored the session index"));
+}
+
+#[test]
 fn a_native_error_pane_that_closes_enters_the_ledger() {
     let mut radar = RadarState::default();
     radar.tabs_changed(vec![tab(10, 0, "api", true)]);

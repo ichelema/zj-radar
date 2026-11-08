@@ -519,10 +519,17 @@ impl RadarState {
         index: &HashMap<u32, (TabId, String)>,
     ) {
         let Some(at_epoch_s) = at_epoch_s else { return };
-        let label = crate::attention::completion_label(text).to_string();
+        // Cap before dropping the head, as the observation's `msg` was: the
+        // two edges in `native_changed` must yield the same label to merge.
+        let text = crate::payload::sanitize(text, crate::payload::MAX_MSG_CHARS);
+        let label = crate::attention::completion_label(&text).to_string();
         let Some((tab_id, tab_name)) = index.get(&pane_id) else {
-            // ponytail: unbounded only in theory, a manifest drains it; cap it if hidden rails ever live without one
-            self.unfiled.push((pane_id, status, label, at_epoch_s));
+            // `remembered` re-fires on every event until the pane is seen: queue it once.
+            let item = (pane_id, status, label, at_epoch_s);
+            if !self.unfiled.contains(&item) {
+                // ponytail: a pane no manifest ever seats stays queued (one entry per completion); prune by `live` if it grows
+                self.unfiled.push(item);
+            }
             return;
         };
         let outcome = if status == Status::Error { LedgerOutcome::Error } else { LedgerOutcome::Done };
