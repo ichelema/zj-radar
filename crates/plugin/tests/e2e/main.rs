@@ -933,9 +933,10 @@ fn ungranted_rail_is_enabled_by_its_own_prompt() {
 /// `surface_active` — the same tint implicated in the report) and reads the
 /// OUTER vt100 screen — the terminal's own view of what Zellij emitted, not
 /// anything internal to the plugin. It pins: painted-last-col ==
-/// pane-last-col (31, since `size=32 borderless=true` gives the pane
-/// on-screen columns `0..=31`) on both the header row and the focused card's
-/// row.
+/// pane-last-col (30: under Zellij 0.46's default `pane_frame_style
+/// "titles"`, a `size=32 borderless=true` pane that is not on the right edge
+/// keeps column 31 for the boundary, so its content is columns `0..=30`) on
+/// both the header row and the focused card's row.
 ///
 /// A 41-outer-width sweep and live mid-session resizes were also run during
 /// the investigation and found zero gap at every point; those aren't kept
@@ -992,8 +993,11 @@ fn rail_paints_every_column_of_its_pane() {
             .collect()
     }
 
+    // End of the painted run that starts at col 0: since Zellij 0.46 the
+    // sibling pane paints its own background, so "last painted col" overall
+    // would land in the sibling.
     fn last_painted_col(dump: &[(u16, vt100::Color, String)]) -> Option<u16> {
-        dump.iter().rev().find(|(_, bg, _)| !matches!(bg, vt100::Color::Default)).map(|(c, _, _)| *c)
+        dump.iter().take_while(|(_, bg, _)| !matches!(bg, vt100::Color::Default)).last().map(|(c, _, _)| *c)
     }
 
     fn fmt_dump(dump: &[(u16, vt100::Color, String)]) -> String {
@@ -1020,11 +1024,11 @@ fn rail_paints_every_column_of_its_pane() {
     let header_last = last_painted_col(&header_dump);
     let card_last = last_painted_col(&card_dump);
 
-    // The rail pane is `size=32 borderless=true`. Borderless means Zellij
-    // reserves no column for chrome, so the pane's on-screen column range as
-    // the OUTER terminal sees it should be exactly [0, 31] (32 columns), and
-    // column 32 onward belongs to the sibling content pane.
-    const EXPECTED_PANE_LAST_COL: u16 = 31; // 0-indexed; 32 columns total.
+    // The rail pane is `size=32 borderless=true`. Under the default
+    // `pane_frame_style "titles"` Zellij still reserves the pane's last column
+    // for the boundary to the sibling (`pane_content_offset` in
+    // zellij-server's tiled_panes), so the plugin gets 31 columns: [0, 30].
+    const EXPECTED_PANE_LAST_COL: u16 = 30; // 0-indexed; 31 content columns.
 
     eprintln!(
         "[e2e] header last painted col = {:?} (expected pane last col = {})",
@@ -1054,7 +1058,7 @@ fn rail_paints_every_column_of_its_pane() {
         header_last,
         Some(EXPECTED_PANE_LAST_COL),
         "VERDICT DATA: header row's last painted column is {header_last:?}, expected \
-         {EXPECTED_PANE_LAST_COL} (pane region's last column, size=32 borderless=true). \
+         {EXPECTED_PANE_LAST_COL} (pane content's last column, size=32 borderless=true). \
          If this is Some(n) with n < {EXPECTED_PANE_LAST_COL}, the plugin/harness paints \
          exactly up to col n and the remaining columns up to {EXPECTED_PANE_LAST_COL} are \
          unpainted WITHIN the pane region as this outer terminal sees it -> plugin \
