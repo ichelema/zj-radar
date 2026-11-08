@@ -595,16 +595,20 @@ mod tests {
     }
 
     #[test]
-    fn e2e_workflow_builds_the_zellij_rev_the_plugin_pins() {
+    fn workflows_build_the_zellij_rev_the_plugin_pins() {
         let manifest = include_str!("../Cargo.toml");
         let pin_line = manifest.lines().find(|l| l.trim_start().starts_with("zellij-tile")).unwrap();
         let rev =
             pin_line.split("rev = \"").nth(1).and_then(|r| r.split('"').next()).expect("zellij-tile pins a git rev");
-        let workflow = include_str!("../../../.github/workflows/e2e.yml");
-        assert!(
-            workflow.contains(&format!("ZELLIJ_REV: {rev}")),
-            "e2e.yml's ZELLIJ_REV must match the zellij-tile rev `{rev}`"
-        );
+        for (name, workflow) in [
+            ("e2e.yml", include_str!("../../../.github/workflows/e2e.yml")),
+            ("funnel.yml", include_str!("../../../.github/workflows/funnel.yml")),
+        ] {
+            assert!(
+                workflow.contains(&format!("ZELLIJ_REV: {rev}")),
+                "{name}'s ZELLIJ_REV must match the zellij-tile rev `{rev}`"
+            );
+        }
     }
 
     fn make_state_with_tabs(tab_specs: &[(usize, &str, bool)]) -> State {

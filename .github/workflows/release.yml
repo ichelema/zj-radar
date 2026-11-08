@@ -189,11 +189,9 @@ jobs:
   # a release until this job is green.
   verify-funnel:
     needs: release
-    runs-on: ubuntu-latest
-    container: ubuntu:24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run the fresh-machine funnel against the published assets
-        env:
-          ZJ_RADAR_VERSION: ${{ github.ref_name }}
-        run: bash scripts/funnel.sh
+    uses: ./.github/workflows/funnel.yml
+    with:
+      version: ${{ github.ref_name }}
+    permissions:
+      contents: read
+      issues: write

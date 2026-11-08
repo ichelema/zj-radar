@@ -27,14 +27,23 @@ apt-get update -qq >/dev/null
 apt-get install -y -qq curl ca-certificates python3 >/dev/null 2>&1 \
     || { echo "FAIL: apt-get install of funnel prerequisites (curl/ca-certificates/python3)"; exit 1; }
 
-case "$(uname -m)" in
-    aarch64|arm64) zellij_triple="aarch64-unknown-linux-musl" ;;
-    x86_64)        zellij_triple="x86_64-unknown-linux-musl" ;;
-    *) echo "FAIL: unsupported arch $(uname -m)"; exit 1 ;;
-esac
-curl -LsSf "https://github.com/zellij-org/zellij/releases/download/${ZELLIJ_VERSION}/zellij-${zellij_triple}.tar.gz" \
-    | tar xz -C /usr/local/bin \
-    || { echo "FAIL: download/extract of zellij ${ZELLIJ_VERSION}"; exit 1; }
+# ZELLIJ_BIN: a prebuilt zellij to use instead of the ${ZELLIJ_VERSION} release
+# download. funnel.yml passes the ZELLIJ_REV build while Zellij 0.46 has no
+# release binary (ICH-430).
+if [ -n "${ZELLIJ_BIN:-}" ]; then
+    install -m 0755 "$ZELLIJ_BIN" /usr/local/bin/zellij \
+        || { echo "FAIL: install of zellij from ${ZELLIJ_BIN}"; exit 1; }
+else
+    case "$(uname -m)" in
+        aarch64|arm64) zellij_triple="aarch64-unknown-linux-musl" ;;
+        x86_64)        zellij_triple="x86_64-unknown-linux-musl" ;;
+        *) echo "FAIL: unsupported arch $(uname -m)"; exit 1 ;;
+    esac
+    curl -LsSf "https://github.com/zellij-org/zellij/releases/download/${ZELLIJ_VERSION}/zellij-${zellij_triple}.tar.gz" \
+        | tar xz -C /usr/local/bin \
+        || { echo "FAIL: download/extract of zellij ${ZELLIJ_VERSION}"; exit 1; }
+fi
+echo "zellij: $(zellij --version)"
 
 # ── README step 1: the installer ─────────────────────────────────────────────
 if [ -n "${ZJ_RADAR_VERSION:-}" ]; then
@@ -64,6 +73,10 @@ check "doctor: producer is the only missing item" \
 # ── README step 3: launch — rail must come up live, naming must follow cd ────
 mkdir -p "$HOME/.config/zellij"
 printf 'show_release_notes false\nshow_startup_tips false\n' >> "$HOME/.config/zellij/config.kdl"
+# Zellij 0.46's first-run desktop wizard covers the pane and eats the `cd`
+# below; a stranger dismisses it by hand, the driver cannot.
+mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/zellij"
+printf '{"flags":["SetupNeverShow"]}' > "${XDG_DATA_HOME:-$HOME/.local/share}/zellij/desktop_integration.json"
 python3 "$(dirname "$0")/drive_zellij.py"
 
 check "rail rendered (RADAR header)" grep -aq 'RADAR' /tmp/typescript

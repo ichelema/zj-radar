@@ -16,12 +16,46 @@ on:
         description: "Release tag to test (empty = latest)"
         required: false
         default: ""
+  # release.yml's verify-funnel job runs this against the tag it publishes.
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
+env:
+  # Zellij 0.46 (the floor the plugin needs) has no release binary yet, so the
+  # funnel runs the same git build as e2e.yml. Once 0.46 ships: drop the
+  # `zellij` job and ZELLIJ_BIN, and bump ZELLIJ_VERSION in scripts/funnel.sh
+  # (ICH-430).
+  ZELLIJ_REV: 43c8710b3a9845f60d5a567c7410fc1197fabb66
+
 jobs:
+  # Built on the host runner (the container has no Rust); the binary runs in
+  # the ubuntu:24.04 container below, same glibc as ubuntu-latest. The cache
+  # key is e2e.yml's, so either workflow can reuse the other's build.
+  zellij:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4
+        id: zellij-cache
+        with:
+          path: ~/zellij-git
+          key: zellij-git-${{ runner.os }}-${{ env.ZELLIJ_REV }}
+      - name: build zellij ${{ env.ZELLIJ_REV }}
+        if: steps.zellij-cache.outputs.cache-hit != 'true'
+        run: cargo install --locked --git https://github.com/zellij-org/zellij --rev "$ZELLIJ_REV" zellij --root ~/zellij-git
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zellij-git
+          path: ~/zellij-git/bin/zellij
+
   funnel:
+    needs: zellij
     runs-on: ubuntu-latest
     container: ubuntu:24.04   # pristine userland: no preinstalled zellij, clean HOME
     permissions:
@@ -29,9 +63,14 @@ jobs:
       issues: write   # nightly-failure-issue (scheduled runs only)
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: zellij-git
+          path: /tmp/zellij-git
       - name: Run the fresh-machine funnel
         env:
           ZJ_RADAR_VERSION: ${{ inputs.version }}
+          ZELLIJ_BIN: /tmp/zellij-git/zellij
         run: bash scripts/funnel.sh
       - name: file a failure issue (nightly visibility)
         if: failure() && github.event_name == 'schedule'
