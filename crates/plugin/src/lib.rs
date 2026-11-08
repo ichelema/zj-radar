@@ -252,6 +252,13 @@ impl State {
                     show_pane_with_id(PaneId::Terminal(pane_id), false, true);
                 }
                 Effect::ResolveCwd { pane_ids } => self.resolve_cwd(pane_ids),
+                Effect::ResolveRepo { cwd } => {
+                    let context = BTreeMap::from([
+                        ("zj_radar".to_string(), "repo".to_string()),
+                        ("cwd".to_string(), cwd.clone()),
+                    ]);
+                    run_command(&["git", "-C", &cwd, "remote", "get-url", "origin"], context);
+                }
                 Effect::CloseSelf => close_self(),
                 Effect::Notify { key, title, body, unless_focused } => {
                     // Every per-tab instance emits this same effect for the
@@ -415,6 +422,8 @@ impl ZellijPlugin for State {
             // One pane's attention moved; unlike `PaneUpdate` it reaches the
             // instances of hidden tabs too (ledger edges, counts).
             EventType::PaneAttentionChanged,
+            // The git remote reads behind tab names (`Effect::ResolveRepo`).
+            EventType::RunCommandResult,
             // Replaces `SessionUpdate`: stock zj-radar never calls the
             // blocking `get_session_list()` host fn that's the ONLY thing
             // that repopulates `SessionUpdate`'s peer list in zellij 0.44.3
@@ -607,6 +616,15 @@ impl ZellijPlugin for State {
                     return self.handle_outcome(outcome);
                 }
                 false // plugin panes: nothing observed, nothing to repaint
+            }
+            Event::RunCommandResult(exit_code, stdout, _stderr, mut context) => {
+                if context.get("zj_radar").map(String::as_str) != Some("repo") {
+                    return false; // the desktop-notification commands: no result to read
+                }
+                let Some(cwd) = context.remove("cwd") else { return false };
+                let url = String::from_utf8_lossy(&stdout);
+                let outcome = self.runtime.repo_resolved(cwd, (exit_code == Some(0)).then_some(&*url));
+                self.handle_outcome(outcome)
             }
             Event::PaneAttentionChanged(PaneId::Terminal(id), attention) => {
                 let outcome = self.runtime.attention_changed(id, native_attention(attention));

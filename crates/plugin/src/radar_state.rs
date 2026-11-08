@@ -252,6 +252,12 @@ pub(crate) struct RadarState {
     tabs: Vec<RadarTab>,
     tab_panes: HashMap<usize, Vec<TerminalPane>>,
     pane_cwd: HashMap<u32, String>,
+    /// Project name from each cwd's git `origin` remote, read once per cwd
+    /// (`None` while the read is in flight, or when there is no remote).
+    repo_names: HashMap<String, Option<String>>,
+    /// Cwds whose remote should be read (`Effect::ResolveRepo`), drained by
+    /// the runtime after every event (`take_repo_lookups`).
+    repo_lookups: Vec<String>,
     namer: TabNamer,
     /// The stable identity of the one tab this sidebar instance may rename.
     /// Resolved once by correlating this plugin pane's manifest position with
@@ -1005,6 +1011,26 @@ impl RadarState {
         self.command.has_done_awaiting_recede()
     }
 
+    /// A cwd's remote read came back (`name` is `None` without a remote).
+    pub(crate) fn repo_resolved(
+        &mut self,
+        cwd: String,
+        name: Option<String>,
+        naming: config::NamingMode,
+    ) -> RadarChange {
+        // The cwd basename may already name the tab and would stick over the
+        // remote's name (`TabNamer`'s stickiness): let it re-pick once.
+        if let (Some(_), Some(id)) = (&name, self.naming_tab_id) {
+            self.namer.repick(id);
+        }
+        self.repo_names.insert(cwd, name);
+        RadarChange { renames: self.rename_tabs(naming), ..RadarChange::default() }
+    }
+
+    pub(crate) fn take_repo_lookups(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.repo_lookups)
+    }
+
     pub(crate) fn recompute_renames(&mut self, naming: config::NamingMode) -> Vec<TabRename> {
         self.rename_tabs(naming)
     }
@@ -1391,13 +1417,20 @@ impl RadarState {
             return Vec::new();
         };
         let facts = [self.tab_facts(tab)];
+        // One remote read per new cwd of this instance's own tab, never more.
+        for cwd in facts[0].panes.iter().filter_map(|p| p.cwd.as_ref()) {
+            if !self.repo_names.contains_key(cwd) {
+                self.repo_names.insert(cwd.clone(), None);
+                self.repo_lookups.push(cwd.clone());
+            }
+        }
         self.namer.rename(&facts, naming_mode)
     }
 
     /// Join one tab's pane topology, status observations, and known cwds into
-    /// the resolved [`TabFacts`] the [`TabNamer`] consumes. `repo` is sourced
-    /// from the *status* store only (commands carry no repo); the raw
-    /// `cwd`/`title` are processed inside the namer.
+    /// the resolved [`TabFacts`] the [`TabNamer`] consumes. `repo` is the cwd's
+    /// git remote name, else the *status* store's (commands carry no repo); the
+    /// raw `cwd`/`title` are processed inside the namer.
     fn tab_facts(&self, tab: &RadarTab) -> TabFacts {
         let empty = Vec::new();
         let panes = self.tab_panes.get(&tab.position).unwrap_or(&empty);
@@ -1407,7 +1440,11 @@ impl RadarState {
             panes: panes
                 .iter()
                 .map(|p| PaneFacts {
-                    repo: self.status.get(p.id).map(|s| s.repo.clone()),
+                    repo: self
+                        .pane_cwd
+                        .get(&p.id)
+                        .and_then(|cwd| self.repo_names.get(cwd).cloned().flatten())
+                        .or_else(|| self.status.get(p.id).map(|s| s.repo.clone())),
                     cwd: self.pane_cwd.get(&p.id).cloned(),
                     title: p.title.clone(),
                     focused: p.focused_in_tab,

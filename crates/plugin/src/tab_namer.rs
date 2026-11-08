@@ -18,7 +18,8 @@ use crate::radar_state::TabId;
 use std::collections::HashMap;
 
 /// The naming facts for one pane, resolved by the caller. `repo` is the only
-/// fact this module cannot derive itself (it comes from the status store); the
+/// fact this module cannot derive itself (the project name from the cwd's git
+/// remote, [`repo_from_remote`], else a pushed status's repo); the
 /// raw `cwd` and `title` are processed here (worktree resolution, basename,
 /// activity-prefix stripping). `repo` may be `Some("")` — the empty filter lives
 /// in [`name_candidates`], matching the pre-extraction behavior.
@@ -61,6 +62,8 @@ pub(crate) struct TabNamer {
     /// The basis for stickiness: a name is "ours" while `applied[id] ==` the
     /// tab's current name.
     applied: HashMap<TabId, String>,
+    /// Tabs whose next `rename` ignores stickiness ([`TabNamer::repick`]).
+    repick: std::collections::HashSet<TabId>,
 }
 
 impl TabNamer {
@@ -79,11 +82,12 @@ impl TabNamer {
         let mut out = Vec::new();
         for tab in tabs {
             let ours = self.applied.get(&tab.id) == Some(&tab.name);
+            let repick = self.repick.remove(&tab.id);
             // Stickiness: a name we applied stays put as long as some pane still
             // justifies it, so moving focus between panes in different repos does
             // not flip the tab name. We only re-pick once no pane supports it
             // (e.g. the pane that named the tab closed).
-            if ours && name_supported(&tab.panes, &tab.name) {
+            if ours && !repick && name_supported(&tab.panes, &tab.name) {
                 continue;
             }
             // Sanitized exactly like the tab intake sanitizes host names: what
@@ -112,6 +116,13 @@ impl TabNamer {
     /// which always carries the full current tab set.
     pub(crate) fn retain_tabs(&mut self, live: &std::collections::HashSet<TabId>) {
         self.applied.retain(|id, _| live.contains(id));
+        self.repick.retain(|id| live.contains(id));
+    }
+
+    /// Skip stickiness on this tab's next `rename`: a better candidate has
+    /// arrived (a git remote name) for a name this module applied.
+    pub(crate) fn repick(&mut self, id: TabId) {
+        self.repick.insert(id);
     }
 
     #[cfg(test)]
@@ -226,8 +237,32 @@ fn strip_activity_prefix(title: &str) -> &str {
     }
 }
 
+/// The project name in a git remote URL: its last path segment, without a
+/// trailing `/` or `.git` (`git@github.com:o/r.git`, `https://h/o/r/`,
+/// `ssh://h:22/o/r.git` → `r`). `None` for an empty URL. `url` is
+/// `git remote get-url origin` output, so it is sanitized like a tab name.
+pub(crate) fn repo_from_remote(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/');
+    let last = url.rsplit(['/', ':']).next()?;
+    let name = last.strip_suffix(".git").unwrap_or(last);
+    let name = crate::payload::sanitize(name, crate::payload::MAX_TAB_NAME_CHARS);
+    (!name.is_empty()).then_some(name)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repo_from_remote_takes_the_last_segment() {
+        use super::repo_from_remote;
+        assert_eq!(repo_from_remote("git@github.com:o/r.git\n").as_deref(), Some("r"));
+        assert_eq!(repo_from_remote("https://h/o/r").as_deref(), Some("r"));
+        assert_eq!(repo_from_remote("https://h/o/r/").as_deref(), Some("r"));
+        assert_eq!(repo_from_remote("ssh://h:22/o/r.git").as_deref(), Some("r"));
+        assert_eq!(repo_from_remote("/srv/git/zj-radar.git").as_deref(), Some("zj-radar"));
+        assert_eq!(repo_from_remote(""), None);
+        assert_eq!(repo_from_remote("   "), None);
+    }
+
     use super::*;
 
     /// Build a pane carrying just a repo (unfocused unless `focused`).

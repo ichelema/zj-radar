@@ -43,8 +43,9 @@ No wasm build is needed for typical work: the plugin's domain modules and
 - **Format with `just fmt`** (`cargo fmt --all`, config in `rustfmt.toml`);
   `just ci` and CI fail on unformatted code.
 - **Push-driven, never poll-driven.** No polling, no blocking host queries on
-  any per-event or per-tick path. The one exception is the once-per-pane
-  `Effect::ResolveCwd` naming bootstrap. See
+  any per-event or per-tick path. Two exceptions, both for tab naming: the
+  once-per-pane `Effect::ResolveCwd` bootstrap, and the once-per-cwd async
+  `git remote get-url origin` read (`Effect::ResolveRepo`). See
   [`docs/smart-tabs-postmortem.md`](docs/smart-tabs-postmortem.md).
 - **Rail lockstep.** Emitted ANSI and the click-target map stay in 1:1 line
   correspondence, structurally (`CONTEXT.md` → *Lockstep*).

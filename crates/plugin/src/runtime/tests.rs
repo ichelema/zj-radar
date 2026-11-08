@@ -567,6 +567,30 @@ fn panes_changed_emits_resolve_cwd_effect_for_new_panes() {
 }
 
 #[test]
+fn the_git_remote_names_the_tab_once_per_cwd() {
+    let mut runtime = runtime_with_config(config::Config { naming: NamingMode::Managed, ..config::Config::default() });
+    runtime.tabs_changed(vec![tab(0, "Tab #1", true)]);
+    runtime.own_plugin_tab_changed(Some(0));
+    runtime.radar.set_tab_panes_for_position(0, vec![pane(7)]);
+    let lookup = Effect::ResolveRepo { cwd: "/work/wt-3".into() };
+    assert!(runtime.cwd_changed(7, "/work/wt-3".into()).effects.contains(&lookup));
+    // Zellij echoes the basename rename before the remote read is back.
+    runtime.tabs_changed(vec![tab(0, "wt-3", true)]);
+    assert!(!runtime.cwd_changed(7, "/work/wt-3".into()).effects.contains(&lookup), "one read per cwd");
+
+    let named = runtime.repo_resolved("/work/wt-3".into(), Some("git@github.com:o/zj-radar.git\n"));
+    assert_eq!(
+        named.effects,
+        vec![Effect::RenameTab { tab_id: TabId::new(1), name: "zj-radar".into() }],
+        "the remote's name replaces the applied basename"
+    );
+    runtime.tabs_changed(vec![tab(0, "zj-radar", true)]);
+    // No remote (a plain dir, or git failed): the cwd basename stands.
+    let plain = runtime.repo_resolved("/work/wt-3".into(), None);
+    assert_eq!(plain.effects, vec![Effect::RenameTab { tab_id: TabId::new(1), name: "wt-3".into() }]);
+}
+
+#[test]
 fn cwd_change_renames_default_named_tab_and_command_uses_cwd() {
     let mut runtime = runtime_with_config(config::Config {
         naming: NamingMode::Managed,
@@ -579,7 +603,13 @@ fn cwd_change_renames_default_named_tab_and_command_uses_cwd() {
 
     let rename = runtime.cwd_changed(7, "/work/myrepo".into());
 
-    assert_eq!(rename.effects, vec![Effect::RenameTab { tab_id: TabId::new(1), name: "myrepo".into() }]);
+    assert_eq!(
+        rename.effects,
+        vec![
+            Effect::RenameTab { tab_id: TabId::new(1), name: "myrepo".into() },
+            Effect::ResolveRepo { cwd: "/work/myrepo".into() },
+        ]
+    );
     assert_eq!(runtime.radar.applied_name(TabId::new(1)), Some("myrepo"));
 
     let command = vec!["cargo".to_string(), "test".to_string()];

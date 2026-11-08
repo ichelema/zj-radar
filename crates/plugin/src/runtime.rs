@@ -188,6 +188,13 @@ pub(crate) enum Effect {
     ResolveCwd {
         pane_ids: Vec<u32>,
     },
+    /// Read `cwd`'s git `origin` remote URL with an async `run_command`; the
+    /// `RunCommandResult` comes back as `repo_resolved`. Once per cwd and
+    /// instance (`RadarState::repo_names`) — the second exception to the
+    /// push-driven rule, after `ResolveCwd`.
+    ResolveRepo {
+        cwd: String,
+    },
     /// Close this plugin's own pane. Emitted by the onboarding floating pane
     /// after permission is granted — it has served its purpose. Needs no Zellij
     /// permission (`close_self` is always allowed).
@@ -1430,6 +1437,13 @@ impl PluginRuntime {
         self.project(vec![], change, crate::clock::now_epoch_s())
     }
 
+    /// A `ResolveRepo` read came back: `url` is the remote URL on success.
+    pub(crate) fn repo_resolved(&mut self, cwd: String, url: Option<&str>) -> Outcome {
+        let name = url.and_then(crate::tab_namer::repo_from_remote);
+        let change = self.radar.repo_resolved(cwd, name, self.config.naming);
+        self.project(vec![], change, crate::clock::now_epoch_s())
+    }
+
     /// `PaneAttentionChanged` — see `RadarState::attention_changed`.
     pub(crate) fn attention_changed(&mut self, pane_id: u32, attention: crate::attention::PaneAttention) -> Outcome {
         let render = self.radar.attention_changed(pane_id, attention, self.tick);
@@ -1920,6 +1934,7 @@ impl PluginRuntime {
         if !c.cwd_bootstrap.is_empty() {
             fx.push(Effect::ResolveCwd { pane_ids: c.cwd_bootstrap });
         }
+        fx.extend(self.radar.take_repo_lookups().into_iter().map(|cwd| Effect::ResolveRepo { cwd }));
         self.arm_timer_if_needed(now_epoch_s, &mut fx);
         if c.settle {
             fx.extend(self.notify_effects());

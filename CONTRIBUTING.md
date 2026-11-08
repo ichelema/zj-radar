@@ -25,7 +25,8 @@ the core.
 
 - **Push-driven, never poll-driven.** Status arrives over `zellij pipe`; the
   plugin makes no blocking host queries on any per-event or per-tick path.
-  The one exception is a single `get_pane_cwd` per new pane, for tab naming.
+  Two exceptions, both for tab naming: a single `get_pane_cwd` per new pane,
+  and one async `git remote get-url origin` per new cwd.
   Polling melted the predecessor ([postmortem](docs/smart-tabs-postmortem.md));
   a PR that reintroduces it will not be accepted.
 - **Rail lockstep.** The emitted ANSI and the click-target map stay in 1:1
