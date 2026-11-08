@@ -271,11 +271,13 @@ pub(crate) enum Effect {
         preempt: bool,
     },
     /// Commit a cross-session cycle selection: switch to `name` and, once
-    /// there, jump straight to the tab that needs attention (if any).
-    /// Emitted by `timer` when `Sessions::tick` reports an idle commit.
+    /// there, jump straight to the tab (or pane) that needs attention, if any.
+    /// Emitted by `timer` when `Sessions::tick` reports an idle commit, and
+    /// by a click on a peer line.
     SwitchSession {
         name: String,
         tab_position: Option<usize>,
+        pane_id: Option<u32>,
     },
     /// Delete every on-disk presence file whose `session_name` matches
     /// `name` — all of them, since a name can have multiple pid-keyed
@@ -900,8 +902,12 @@ impl PluginRuntime {
         // be free to decay to Slow on this same pass rather than one fire
         // late.
         let session_commit = self.sessions.tick();
-        if let Some(CommitTarget { name, attention_tab_position }) = session_commit {
-            effects.push(Effect::SwitchSession { name, tab_position: attention_tab_position });
+        if let Some(CommitTarget { name, attention_tab_position, attention_pane_id }) = session_commit {
+            effects.push(Effect::SwitchSession {
+                name,
+                tab_position: attention_tab_position,
+                pane_id: attention_pane_id,
+            });
         }
         // Capture before re-arming: an in-flight permission request must repaint
         // the needs_permission screen each tick until the user answers.
@@ -975,7 +981,7 @@ impl PluginRuntime {
         // `RailTarget::for_session` sentinel encoding back into the
         // `Option<usize>` the effect needs — see both docs.
         let effect = if let Some(name) = target.session.clone() {
-            Effect::SwitchSession { name, tab_position: target.session_tab_position() }
+            Effect::SwitchSession { name, tab_position: target.session_tab_position(), pane_id: target.pane_id }
         } else if let Some(pane_id) = target.pane_id {
             Effect::ShowPane { pane_id }
         } else {
@@ -1268,6 +1274,15 @@ impl PluginRuntime {
         self.last_presence = None;
         self.presence_gen = None;
         self.project(vec![], RadarChange::default(), self.last_now_epoch_s)
+    }
+
+    /// `GlobalAttentionUpdate`: every other session on this Zellij server,
+    /// already converted to the badge's `Presence` shape. From the first one
+    /// on, peers come from here and presence-file reads no longer feed them.
+    pub(crate) fn global_attention_changed(&mut self, peers: Vec<Presence>) -> Outcome {
+        self.sessions.set_show_trees(self.config.session_tree);
+        let change = RadarChange { render: self.sessions.update_global(peers), ..RadarChange::default() };
+        self.project(vec![], change, self.last_now_epoch_s)
     }
 
     pub(crate) fn presences_changed(&mut self, raw: Vec<(String, u64)>) -> Outcome {

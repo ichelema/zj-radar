@@ -1122,7 +1122,7 @@ fn session_cycle_commits_via_switch_session_effect_on_idle_tick() {
     let tick = rt.timer_fast(PermissionProbe::default()); // the next, quiet Fast tick
     assert!(
         tick.effects.iter().any(|e| matches!(
-            e, Effect::SwitchSession { name, tab_position: Some(1) } if name == "alpha"
+            e, Effect::SwitchSession { name, tab_position: Some(1), pane_id: None } if name == "alpha"
         )),
         "idle tick commits the pending selection, got {:?}",
         tick.effects
@@ -1170,6 +1170,37 @@ fn empty_local_session_shows_the_peer_tree_only_with_session_tree_on() {
 }
 
 #[test]
+fn a_global_attention_peer_click_focuses_its_waiting_pane() {
+    // Same layout as `session_tree_moves_peer_lines_below_the_local_cards`,
+    // with the peer from `GlobalAttentionUpdate` instead of a presence file.
+    let mut rt = runtime_with_granted_permission();
+    rt.config.session_tree = true;
+    rt.tabs_changed(vec![tab(0, "team", false)]);
+    let peer = crate::attention::PeerSession {
+        name: "alpha".into(),
+        needs_you: 1,
+        items: vec![crate::attention::PeerItem {
+            pane_id: 7,
+            tab_id: 3,
+            tab_name: "api".into(),
+            attention: crate::attention::PaneAttention {
+                status: Status::Pending,
+                source: crate::attention::Source::Program,
+                app: Some("claude-code".into()),
+                ..Default::default()
+            },
+        }],
+        ..Default::default()
+    };
+    assert!(rt.global_attention_changed(vec![peer.presence()]).render);
+    rt.render(100, 80);
+    assert_eq!(
+        rt.mouse_click(4, 0).effects,
+        vec![Effect::SwitchSession { name: "alpha".into(), tab_position: None, pane_id: Some(7) }]
+    );
+}
+
+#[test]
 fn session_tree_moves_peer_lines_below_the_local_cards() {
     // Same bookkeeping as `clicking_a_session_line_emits_switch_session`, tree
     // on: line 0 = title, 1 = rule, 2 = own "work" heading, 3 = local tab,
@@ -1184,7 +1215,10 @@ fn session_tree_moves_peer_lines_below_the_local_cards() {
 
     assert_eq!(rt.mouse_click(2, 0), Outcome::default(), "own heading is click-inert");
     let peer_click = rt.mouse_click(4, 0);
-    assert_eq!(peer_click.effects, vec![Effect::SwitchSession { name: "alpha".into(), tab_position: Some(2) }]);
+    assert_eq!(
+        peer_click.effects,
+        vec![Effect::SwitchSession { name: "alpha".into(), tab_position: Some(2), pane_id: None }]
+    );
 }
 
 #[test]
@@ -1210,7 +1244,10 @@ fn clicking_a_session_line_emits_switch_session() {
     assert_eq!(own_click, Outcome::default(), "the own-session badge line has no click target, got {:?}", own_click);
 
     let peer_click = rt.mouse_click(3, 0);
-    assert_eq!(peer_click.effects, vec![Effect::SwitchSession { name: "alpha".into(), tab_position: Some(2) }]);
+    assert_eq!(
+        peer_click.effects,
+        vec![Effect::SwitchSession { name: "alpha".into(), tab_position: Some(2), pane_id: None }]
+    );
 }
 
 #[test]
@@ -1234,7 +1271,7 @@ fn left_click_on_stale_badge_glyph_dismisses_but_the_row_body_still_switches() {
     let (start_col, _) = rt.last_rendered.hotspot_at_line(3).expect("stale peer badge must carry a dismiss glyph");
 
     let body = rt.mouse_click(3, start_col - 1);
-    assert_eq!(body.effects, vec![Effect::SwitchSession { name: "alpha".into(), tab_position: None }]);
+    assert_eq!(body.effects, vec![Effect::SwitchSession { name: "alpha".into(), tab_position: None, pane_id: None }]);
     let dismiss = rt.mouse_click(3, start_col);
     assert_eq!(dismiss.effects, vec![Effect::DismissPresence { name: "alpha".into() }]);
     assert!(dismiss.render, "dismiss removes the stale peer locally at once");

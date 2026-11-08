@@ -3887,6 +3887,7 @@ fn stale_badge_entry(
         running,
         attention,
         attention_tab_position,
+        attention_pane_id: None,
         is_current,
         selected,
         stale,
@@ -3958,6 +3959,27 @@ fn peer_session_tree_lists_tabs_and_agents_with_tab_targets() {
         assert_eq!(target.session.as_deref(), Some("review"));
         assert_eq!(target.session_tab_position(), Some(2));
     }
+}
+
+#[test]
+fn peer_lines_with_pane_ids_focus_the_pane_not_a_tab() {
+    use crate::presence::{PresencePane, PresenceTab};
+    let mut peer = badge_entry("review", false, 1, 1, None, false);
+    peer.attention_pane_id = Some(9);
+    let pane = |id, label: &str| PresencePane {
+        pane_id: Some(id),
+        kind: "claude".into(),
+        status: "pending".into(),
+        label: label.into(),
+        ..Default::default()
+    };
+    peer.tabs = vec![PresenceTab { position: 0, name: "t".into(), panes: vec![pane(9, "a"), pane(4, "b")] }];
+    let targets: Vec<(Option<u32>, Option<usize>)> = render_peer_children(&peer, usize::MAX, &ro(36, 18))
+        .iter()
+        .map(|l| l.target.as_ref().map(|t| (t.pane_id, t.session_tab_position())).unwrap())
+        .collect();
+    // The tab line takes its first pane.
+    assert_eq!(targets, vec![(Some(9), None), (Some(9), None), (Some(4), None)]);
 }
 
 #[test]

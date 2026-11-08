@@ -95,6 +95,9 @@ pub(crate) struct BadgeEntry {
     pub running: usize,
     pub attention: usize,
     pub attention_tab_position: Option<usize>,
+    /// The pane to focus on arrival when no tab position is known
+    /// ([`attention_pane`]).
+    pub attention_pane_id: Option<u32>,
     pub is_current: bool,
     pub selected: bool,
     pub stale: bool,
@@ -107,6 +110,18 @@ pub(crate) struct BadgeEntry {
 pub(crate) struct CommitTarget {
     pub name: String,
     pub attention_tab_position: Option<usize>,
+    pub attention_pane_id: Option<u32>,
+}
+
+/// The first pane waiting on the user in a peer's tree — the arrival focus
+/// for a peer from `GlobalAttentionUpdate`, which knows pane ids but not tab
+/// positions. `None` when a tab position is already known.
+fn attention_pane(p: &Presence) -> Option<u32> {
+    if p.attention_tab_position.is_some() {
+        return None;
+    }
+    let panes = p.tabs.iter().flat_map(|t| &t.panes);
+    panes.filter(|pane| crate::status::Status::from_wire(&pane.status).needs_you()).find_map(|pane| pane.pane_id)
 }
 
 /// A pending (not yet committed) cycle selection. `name` identifies the
@@ -142,9 +157,22 @@ pub(crate) struct Sessions {
     /// and the render key — so a peer's label edges never repaint a rail
     /// that doesn't draw them. Peers publish trees unconditionally (v1).
     show_trees: bool,
+    /// Peers come from Zellij's `GlobalAttentionUpdate`: presence-file reads
+    /// stop feeding `peers` once the first one lands.
+    global: bool,
 }
 
 impl Sessions {
+    /// Replace the peer set with every other session Zellij reports
+    /// (`attention::PeerSession::presence`). Zellij tracks liveness, so
+    /// every entry is fresh. Returns whether the badge changed.
+    pub(crate) fn update_global(&mut self, peers: Vec<Presence>) -> bool {
+        let before = self.badge();
+        self.global = true;
+        self.peers = peers.into_iter().map(|presence| Peer { presence, age_secs: 0 }).collect();
+        self.badge() != before
+    }
+
     /// Sync the local `session_tree` option. Returns whether the badge changed.
     pub(crate) fn set_show_trees(&mut self, on: bool) -> bool {
         if self.show_trees == on {
@@ -164,6 +192,9 @@ impl Sessions {
     /// past [`DEAD_AFTER_SECS`] never lands in `peers`, and its name is
     /// reported in the returned [`PresenceUpdate::dead`] instead.
     pub(crate) fn update_presences(&mut self, raw: Vec<(String, u64)>) -> PresenceUpdate {
+        if self.global {
+            return PresenceUpdate { changed: false, dead: Vec::new() };
+        }
         let before = self.badge();
         // WHY: presence files are keyed by server pid on disk, not by
         // session name. A session killed and recreated under the same name
@@ -326,6 +357,7 @@ impl Sessions {
         Some(CommitTarget {
             name: entry.presence.session_name.clone(),
             attention_tab_position: entry.presence.attention_tab_position,
+            attention_pane_id: attention_pane(entry.presence),
         })
     }
 
@@ -343,6 +375,7 @@ impl Sessions {
                 running: s.presence.running,
                 attention: s.presence.attention,
                 attention_tab_position: s.presence.attention_tab_position,
+                attention_pane_id: attention_pane(s.presence),
                 is_current: s.is_current,
                 selected: selected_name == Some(s.presence.session_name.as_str()),
                 stale: s.stale,
@@ -440,6 +473,50 @@ mod tests {
             ]}]
         });
         (json.to_string(), 0)
+    }
+
+    fn global_peer(name: &str, needs_you_pane: Option<u32>) -> Presence {
+        use crate::presence::{PresencePane, PresenceTab};
+        let panes = needs_you_pane
+            .map(|id| PresencePane {
+                pane_id: Some(id),
+                kind: "claude".into(),
+                status: "pending".into(),
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
+        Presence {
+            session_name: name.into(),
+            attention: needs_you_pane.map_or(0, |_| 1),
+            tabs: vec![PresenceTab { panes, ..Default::default() }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn global_peers_replace_presence_files_and_focus_the_waiting_pane() {
+        let mut s = Sessions::default();
+        s.set_own(own("work"));
+        s.update_presences(vec![presence("stale-file", 0, 0)]);
+        assert!(s.update_global(vec![global_peer("alpha", Some(42))]));
+        assert!(!s.update_presences(vec![presence("file-peer", 0, 1)]).changed, "files no longer feed peers");
+        let badge = s.badge();
+        let names: Vec<&str> = badge.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, vec!["work", "alpha"]);
+        assert_eq!(badge[1].attention_pane_id, Some(42));
+        s.cycle(Direction::Next);
+        s.tick();
+        let t = s.tick().unwrap();
+        assert_eq!((t.name.as_str(), t.attention_tab_position, t.attention_pane_id), ("alpha", None, Some(42)));
+    }
+
+    #[test]
+    fn a_known_tab_position_wins_over_the_attention_pane() {
+        let mut p = global_peer("alpha", Some(42));
+        p.attention_tab_position = Some(1);
+        assert_eq!(attention_pane(&p), None);
+        assert_eq!(attention_pane(&global_peer("beta", None)), None);
     }
 
     #[test]

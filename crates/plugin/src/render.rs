@@ -1823,8 +1823,10 @@ fn render_session_badge(entries: &[BadgeEntry], opts: &RenderOpts) -> Vec<Line> 
                     format!("{} {}", Seg::new(marker_color, marker), label_seg)
                 },
             );
-            let target =
-                (!entry.is_current).then(|| RailTarget::for_session(entry.name.clone(), entry.attention_tab_position));
+            let target = (!entry.is_current).then(|| RailTarget {
+                pane_id: entry.attention_pane_id,
+                ..RailTarget::for_session(entry.name.clone(), entry.attention_tab_position)
+            });
             let line = Line::new(text, target, LineBg::Rail);
             let hotspot_color = if entry.selected { accent } else { &stale };
             hotspot.finish(line, hotspot_color)
@@ -1860,7 +1862,14 @@ fn render_peer_children(entry: &BadgeEntry, budget: usize, opts: &RenderOpts) ->
         .enumerate()
         .map(|(i, &(t, pane))| {
             let tab = &entry.tabs[t];
-            let target = RailTarget::for_session(entry.name.clone(), Some(tab.position));
+            // A pane id (a tab line takes its first pane's) focuses that pane
+            // in the peer; only without one does the tab position steer.
+            let pane_id = match pane {
+                Some(p) => tab.panes[p].pane_id,
+                None => tab.panes.first().and_then(|p| p.pane_id),
+            };
+            let tab_position = if pane_id.is_some() { None } else { Some(tab.position) };
+            let target = RailTarget { pane_id, ..RailTarget::for_session(entry.name.clone(), tab_position) };
             let text = match pane {
                 None => {
                     let connector = if Some(t) == last_tab { "└" } else { "├" };

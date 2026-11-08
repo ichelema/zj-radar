@@ -105,7 +105,7 @@ pub struct IsolatedEnvironment {
 
 impl IsolatedEnvironment {
     fn new() -> Self {
-        Self {
+        let env = Self {
             root: EnvironmentRoot::Owned(
                 tempfile::TempDir::new().expect("failed to create isolated Zellij environment"),
             ),
@@ -115,7 +115,20 @@ impl IsolatedEnvironment {
                     .tempdir_in("/tmp")
                     .expect("failed to create isolated Zellij socket dir"),
             ),
-        }
+        };
+        // Zellij ≥ 0.46 opens its desktop-setup wizard over the terminal pane
+        // of a home where it is not the default terminal yet, swallowing every
+        // `write-chars` meant for the shell. Mark the setup as never-show.
+        let data_dir = env.data_home().join("zellij");
+        std::fs::create_dir_all(&data_dir).expect("failed to create isolated Zellij data dir");
+        std::fs::write(data_dir.join("desktop_integration.json"), r#"{"flags":["SetupNeverShow"]}"#)
+            .expect("failed to write isolated Zellij desktop-integration state");
+        // Release notes and startup tips cover the pane the same way.
+        let config_dir = env.config_home().join("zellij");
+        std::fs::create_dir_all(&config_dir).expect("failed to create isolated Zellij config dir");
+        std::fs::write(config_dir.join("config.kdl"), "show_release_notes false\nshow_startup_tips false\n")
+            .expect("failed to write isolated Zellij config");
+        env
     }
 
     fn shared(&self) -> Self {
@@ -248,6 +261,8 @@ impl ZellijSession {
         // --new-session-with-layout creates a new session even from inside another
         // zellij session (unlike plain --session which tries to attach).
         let mut cmd = CommandBuilder::new("zellij");
+        let config = isolated.config_home().join("zellij").join("config.kdl");
+        cmd.args(["--config", config.to_str().unwrap()]);
         cmd.args(["--session", name, "--new-session-with-layout", layout_path.to_str().unwrap()]);
         // Prevent inheriting the outer session's env vars.
         cmd.env_remove("ZELLIJ");
@@ -363,6 +378,16 @@ impl ZellijSession {
         eprintln!("[e2e] warn: could not parse ZPID from dump-screen; defaulting to 0");
         eprintln!("[e2e] dump-screen was: {:?}", &screen[..screen.len().min(300)]);
         0
+    }
+
+    /// Emit an OSC 7501 program-status sequence from the focused terminal pane
+    /// (`printf` typed into the shell), so Zellij's own attention tracking
+    /// sees it — the native path, unlike `pipe_status`. `body` is the
+    /// `:`-separated pair list; `msg`/`title` values must be base64.
+    pub fn emit_program_status(&self, body: &str) {
+        let cmd = format!(r"printf '\033]7501;%s\033\\' '{body}'");
+        let _ = self.isolated.command("zellij").args(["--session", &self.name, "action", "write-chars", &cmd]).output();
+        let _ = self.isolated.command("zellij").args(["--session", &self.name, "action", "write", "13"]).output();
     }
 
     /// Move focus to the next pane in the tab, discover its pane ID via

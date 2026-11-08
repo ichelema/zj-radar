@@ -290,9 +290,9 @@ impl State {
                     let outcome = self.runtime.presences_changed(raw);
                     render |= self.handle_outcome(outcome);
                 }
-                Effect::SwitchSession { name, tab_position } => match tab_position {
-                    Some(pos) => switch_session_with_focus(&name, Some(pos), None),
-                    None => switch_session(Some(&name)),
+                Effect::SwitchSession { name, tab_position, pane_id } => match (tab_position, pane_id) {
+                    (None, None) => switch_session(Some(&name)),
+                    _ => switch_session_with_focus(&name, tab_position, pane_id.map(|id| (id, false))),
                 },
                 Effect::DismissPresence { name } => {
                     // The predicate parses each candidate file the same way
@@ -404,6 +404,9 @@ impl ZellijPlugin for State {
             EventType::Timer,
             EventType::Mouse,
             EventType::PermissionRequestResult,
+            // Every other session on this server, with counts and the panes
+            // that want attention: the cross-session badge's peers.
+            EventType::GlobalAttentionUpdate,
             // Replaces `SessionUpdate`: stock zj-radar never calls the
             // blocking `get_session_list()` host fn that's the ONLY thing
             // that repopulates `SessionUpdate`'s peer list in zellij 0.44.3
@@ -509,6 +512,38 @@ impl ZellijPlugin for State {
                     })
                     .collect();
                 let outcome = self.runtime.panes_changed(radar_state::PaneUpdate::from_raw(raw));
+                self.handle_outcome(outcome)
+            }
+            Event::GlobalAttentionUpdate(global) => {
+                let peers = global
+                    .sessions
+                    .into_iter()
+                    .filter(|s| !s.is_current)
+                    .map(|s| {
+                        let counts = s.attention.counts;
+                        attention::PeerSession {
+                            working: counts.working,
+                            needs_you: counts.needs_you + counts.failed,
+                            items: s
+                                .attention
+                                .items
+                                .into_iter()
+                                .filter_map(|item| match item.pane_id {
+                                    PaneId::Terminal(pane_id) => Some(attention::PeerItem {
+                                        pane_id,
+                                        tab_id: item.tab_id,
+                                        tab_name: item.tab_name,
+                                        attention: native_attention(item.attention),
+                                    }),
+                                    PaneId::Plugin(_) => None,
+                                })
+                                .collect(),
+                            name: s.name,
+                        }
+                        .presence()
+                    })
+                    .collect();
+                let outcome = self.runtime.global_attention_changed(peers);
                 self.handle_outcome(outcome)
             }
             Event::Timer(elapsed_s) => {
