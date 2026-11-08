@@ -498,7 +498,7 @@ mod tests {
         // too — `layout::empty_tab_bodies` itself is tested in `layout.rs`.
         let layout = "layout {\n    plugin location=\"radar\"\n    tab focus=true\n}\n";
         let perms = format!(
-            "\"{wasm_path}\" {{\n    ReadApplicationState\n    ReadCliPipes\n    ChangeApplicationState\n    RunCommands\n}}\n"
+            "\"{wasm_path}\" {{\n    ReadApplicationState\n    ReadCliPipes\n    ChangeApplicationState\n    RunCommands\n    ReadPaneContents\n}}\n"
         );
         let env = ZellijEnv {
             config_text: None,

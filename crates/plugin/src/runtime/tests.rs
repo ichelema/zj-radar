@@ -47,20 +47,20 @@ impl PluginRuntime {
     /// explicit epoch to `timer` directly are exactly the ones where the
     /// epoch value is load-bearing (virtual time, or a deliberately shifted
     /// clock) — they're meant to stand out.
-    fn timer_now(&mut self, permission: PermissionProbe, elapsed: f64) -> Outcome {
-        self.timer(permission, elapsed, crate::clock::now_epoch_s())
+    fn timer_now(&mut self, elapsed: f64) -> Outcome {
+        self.timer(elapsed, crate::clock::now_epoch_s())
     }
 
     /// Test shorthand: deliver a live Fast fire (elapsed ~1s) — how every
     /// test that isn't about the stale-fire dedup drives the tick entry
     /// point. Dedup tests pass explicit elapsed values via `timer_now`.
-    fn timer_fast(&mut self, permission: PermissionProbe) -> Outcome {
-        self.timer_now(permission, Cadence::Fast.seconds())
+    fn timer_fast(&mut self) -> Outcome {
+        self.timer_now(Cadence::Fast.seconds())
     }
 
     /// Test shorthand: deliver a live Slow fire (elapsed ~60s).
-    fn timer_slow(&mut self, permission: PermissionProbe) -> Outcome {
-        self.timer_now(permission, Cadence::Slow.seconds())
+    fn timer_slow(&mut self) -> Outcome {
+        self.timer_now(Cadence::Slow.seconds())
     }
 
     /// Test shorthand: `pane_id`'s native attention moved to `status`.
@@ -70,9 +70,9 @@ impl PluginRuntime {
 }
 
 #[test]
-fn load_requests_permission_for_owner() {
+fn load_requests_permission() {
     let mut runtime = PluginRuntime::default();
-    let outcome = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: true });
+    let outcome = runtime.load(config());
 
     assert_eq!(runtime.permission, PermissionState::Requesting);
     assert_eq!(
@@ -88,264 +88,60 @@ fn load_requests_permission_for_owner() {
 }
 
 #[test]
-fn load_denied_marker_records_denial_without_requesting_permission() {
-    let mut runtime = PluginRuntime::default();
-    let outcome =
-        runtime.load(config(), PermissionProbe { marker: Some(PermissionMarker::Denied), lock_acquired: false });
-
-    assert!(!runtime.permission.granted());
-    assert!(matches!(runtime.permission, PermissionState::Resolved { .. }));
-    // A denied rail never receives a manifest, so it never learns of a
-    // terminal neighbor and stays selectable (see `desired_selectable`).
-    assert_eq!(outcome, Outcome { render: false, effects: vec![Effect::SetSelectable(true)] });
-}
-
-#[test]
-fn denied_rail_with_running_work_never_arms_the_timer() {
+fn denied_rail_with_running_work_stops_ticking() {
     // A denied rail receives none of the state events that clear domain work
     // (they need ReadApplicationState), so a `Running` row can never finish —
-    // arming Fast for it would pin 1 Hz ticks and repaints forever behind the
-    // static needs-permission face.
+    // re-arming Fast for it would pin 1 Hz ticks and repaints forever behind
+    // the static needs-permission face.
     let mut runtime = PluginRuntime::default();
     set_status(&mut runtime.radar, 9, Status::Running, "working", 7);
-    let outcome =
-        runtime.load(config(), PermissionProbe { marker: Some(PermissionMarker::Denied), lock_acquired: false });
+    let _ = runtime.load(config());
+    let _ = runtime.permission_result(false);
 
     assert!(runtime.permission.denied());
     assert!(runtime.radar.needs_fast_ticks());
+    let tick = runtime.timer_fast();
     assert!(
-        !outcome.effects.iter().any(|e| matches!(e, Effect::SetTimeout(_))),
+        !tick.effects.iter().any(|e| matches!(e, Effect::SetTimeout(_))),
         "denied rail must not tick for work it can never observe finishing"
     );
 }
 
-// The exhaustive probe→decision/state truth table now lives in
-// `permission.rs` (`on_load_truth_table` et al.), tested directly against
-// the state machine. Runtime tests below assert only on the derived effects.
-
 #[test]
-fn onboarding_pane_requests_even_without_lock_and_closes_on_grant() {
-    // The onboarding floating pane is the dedicated, legible prompt host. It
-    // must request permission regardless of the session lock (a sidebar peer
-    // may hold it), so Zellij renders its grant prompt on the focused float.
-    let onboarding = config::Config { role: config::Role::Onboarding, ..config() };
-    let mut runtime = PluginRuntime::default();
-    let load = runtime.load(onboarding, PermissionProbe { marker: None, lock_acquired: false });
-    assert_eq!(runtime.permission, PermissionState::Requesting);
-    assert!(load.effects.contains(&Effect::RequestPermission));
-
-    // Once the user grants via that prompt, the onboarding pane removes itself.
-    let granted = runtime.permission_result(true);
-    assert!(granted.effects.contains(&Effect::CloseSelf));
-}
-
-#[test]
-fn sidebar_grant_does_not_close_the_pane() {
-    let mut runtime = runtime_with_config(config());
-    runtime.record_permission_request_started();
-    let granted = runtime.permission_result(true);
-    assert!(!granted.effects.contains(&Effect::CloseSelf));
-}
-
-#[test]
-fn deferring_rail_never_requests_until_marker_lands() {
-    // In the onboarding layout the rail defers: it must NOT fire its own
-    // request even though it could own the lock — that would steal Zellij's
-    // prompt binding from the floating onboarding pane.
-    let deferring = config::Config { defer_permission: true, ..config() };
-    let mut runtime = PluginRuntime::default();
-    let load = runtime.load(
-        deferring,
-        // Even WITH the lock available, a deferring rail must wait.
-        PermissionProbe { marker: None, lock_acquired: true },
-    );
-    assert!(!load.effects.contains(&Effect::RequestPermission));
-    assert_eq!(runtime.permission, PermissionState::WaitingForPeer { ticks: 0 });
-
-    // A later tick that (re)acquires the lock still must not request —
-    // only a landed Granted marker may unblock it.
-    let tick = runtime.timer_fast(PermissionProbe { marker: None, lock_acquired: true });
-    assert!(!tick.effects.contains(&Effect::RequestPermission));
-
-    // The float's granted marker finally lets it request (auto-resolves).
-    let granted_tick =
-        runtime.timer_fast(PermissionProbe { marker: Some(PermissionMarker::Granted), lock_acquired: false });
-    assert!(granted_tick.effects.contains(&Effect::RequestPermission));
-}
-
-#[test]
-fn peer_waits_then_requests_after_granted_marker() {
-    let mut runtime = PluginRuntime::default();
-    let load = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: false });
-    assert_eq!(runtime.permission, PermissionState::WaitingForPeer { ticks: 0 });
-    // Selectable, not passive: no manifest has shown a terminal neighbor yet.
-    assert_eq!(load.effects, vec![Effect::SetTimeout(Cadence::Fast), Effect::SetSelectable(true)]);
-
-    let timer = runtime.timer_fast(PermissionProbe { marker: Some(PermissionMarker::Granted), lock_acquired: false });
-
-    assert!(timer.render);
-    assert_eq!(runtime.permission, PermissionState::Requesting);
-    assert!(!runtime.permission.is_waiting());
-    // The promoted peer is now an owner with an in-flight request, so it also
-    // arms the needs_permission heartbeat until the user answers — and
-    // immediately starts heartbeating the lock it now effectively owns.
-    // No `SetSelectable`: the rail was declared selectable at load and the
-    // promotion keeps it so — the sync emits on change only.
-    assert_eq!(
-        timer.effects,
-        vec![Effect::RequestPermission, Effect::HeartbeatPermissionLock, Effect::SetTimeout(Cadence::Fast),]
-    );
-}
-
-#[test]
-fn requesting_instance_heartbeats_the_lock_each_tick_and_stops_when_answered() {
-    // In-flight request: every tick refreshes the shared lock so waiting
-    // peers can't reclaim it from under the live prompt.
-    let mut runtime = PluginRuntime::default();
-    let load = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: true });
-    assert!(load.effects.contains(&Effect::RequestPermission));
-    let tick = runtime.timer_fast(PermissionProbe { marker: None, lock_acquired: false });
-    assert!(
-        tick.effects.contains(&Effect::HeartbeatPermissionLock),
-        "an in-flight request must heartbeat the lock; effects = {:?}",
-        tick.effects,
-    );
-
-    // A merely WAITING peer never heartbeats — a stale lock is exactly the
-    // signal its patience escalation relies on.
-    let mut waiting = PluginRuntime::default();
-    let deferring = config::Config { defer_permission: true, ..config() };
-    let _ = waiting.load(deferring, PermissionProbe { marker: None, lock_acquired: false });
-    let waiting_tick = waiting.timer_fast(PermissionProbe { marker: None, lock_acquired: false });
-    assert!(!waiting_tick.effects.contains(&Effect::HeartbeatPermissionLock));
-
-    // Answered: the heartbeat stops with the request.
-    let _ = runtime.permission_result(true);
-    let after = runtime.timer_fast(PermissionProbe { marker: None, lock_acquired: false });
-    assert!(!after.effects.contains(&Effect::HeartbeatPermissionLock));
-}
-
-#[test]
-fn stranded_deferring_rail_escalates_and_requests_after_patience() {
-    // The resurrect deadlock: a session rebuilt from a cached onboarding
-    // layout has defer_permission rails but no float — no marker will ever
-    // land. Once patience runs out AND the (stale) lock is reclaimed, the
-    // rail must fire its own request instead of waiting forever.
-    let deferring = config::Config { defer_permission: true, ..config() };
-    let mut runtime = PluginRuntime::default();
-    let _ = runtime.load(deferring, PermissionProbe { marker: None, lock_acquired: true });
-    runtime.permission = PermissionState::WaitingForPeer { ticks: crate::permission::DEFER_PATIENCE_TICKS - 1 };
-    let tick = runtime.timer_fast(PermissionProbe { marker: None, lock_acquired: true });
-    assert!(
-        tick.effects.contains(&Effect::RequestPermission),
-        "patience exhausted + reclaimed lock must self-elect; effects = {:?}",
-        tick.effects,
-    );
-    assert_eq!(runtime.permission, PermissionState::Requesting);
-}
-
-#[test]
-fn owner_paints_needs_permission_while_request_in_flight() {
-    // Fresh first-run owner: it requests permission and must keep a paint
-    // trigger alive until the user answers. Pre-grant, Zellij delivers no
-    // state events (they need ReadApplicationState), so without this the
+fn rail_paints_needs_permission_while_request_in_flight() {
+    // Pre-grant, Zellij delivers no state events (they need
+    // ReadApplicationState), so without the load-armed timer the
     // needs_permission screen never gets a render trigger and the rail sits
     // blank — the bug this guards.
     let mut runtime = PluginRuntime::default();
-    let load = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: true });
-    assert!(
-        load.effects.contains(&Effect::SetTimeout(Cadence::Fast)),
-        "owner must arm a timer so the needs_permission screen gets a paint trigger",
-    );
+    let _ = runtime.load(config());
 
-    // The tick repaints while still awaiting the user's y/n — even with no
-    // marker, no reclaimed lock, and no agent work to report.
-    let tick = runtime.timer_fast(PermissionProbe { marker: None, lock_acquired: false });
-    assert!(tick.render, "owner repaints needs_permission while its request is in-flight",);
+    // The tick repaints while still awaiting the user's y/n, with no agent
+    // work to report.
+    let tick = runtime.timer_fast();
+    assert!(tick.render, "rail repaints needs_permission while its request is in-flight",);
     assert!(!runtime.permission.granted());
 
     // Once the user answers, the heartbeat stops: a granted, idle rail must
     // not spin a timer forever.
     let _ = runtime.permission_result(true);
-    let after = runtime.timer_fast(PermissionProbe { marker: None, lock_acquired: false });
+    let after = runtime.timer_fast();
     assert!(!after.render, "granted idle rail must not keep repainting");
     assert!(!after.effects.contains(&Effect::SetTimeout(Cadence::Fast)));
 }
 
 #[test]
-fn waiting_peer_self_promotes_when_it_reclaims_the_lock() {
-    // A peer waiting on the owner's marker re-probes each timer. If the
-    // owner died and the peer reclaimed the now-stale lock, the refreshed
-    // probe reports lock_acquired with no marker — the peer must take over
-    // the prompt rather than wait forever.
-    let mut runtime = PluginRuntime::default();
-    let _ = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: false });
-    assert_eq!(runtime.permission, PermissionState::WaitingForPeer { ticks: 0 });
-
-    let timer = runtime.timer_fast(PermissionProbe { marker: None, lock_acquired: true });
-
-    assert_eq!(runtime.permission, PermissionState::Requesting);
-    assert!(!runtime.permission.is_waiting());
-    assert!(timer.effects.contains(&Effect::RequestPermission));
-}
-
-#[test]
-fn probe_is_wanted_only_while_waiting_on_a_peer() {
-    // The wasm glue stat-reads the marker file (and attempts the lock) each
-    // tick ONLY while the machine can still consume the probe. Once a request
-    // is in-flight or the state resolves, `on_timer` ignores it — so the
-    // per-tick disk probe must stop (N tabs were reading N files/sec forever).
-    let mut runtime = PluginRuntime::default();
-    let _ = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: false });
-    assert_eq!(runtime.permission, PermissionState::WaitingForPeer { ticks: 0 });
-    assert!(runtime.wants_permission_probe(), "a waiting peer must keep probing");
-
-    // Still waiting after an undecided tick: the probe stays wanted — this is
-    // what lets a peer eventually reclaim a dead owner's stale lock.
-    let _ = runtime.timer_fast(PermissionProbe { marker: None, lock_acquired: false });
-    assert!(runtime.wants_permission_probe(), "an undecided tick must keep probing");
-
-    // Promoted to an in-flight request: settled from the probe's point of view.
-    let _ = runtime.timer_fast(PermissionProbe { marker: None, lock_acquired: true });
-    assert_eq!(runtime.permission, PermissionState::Requesting);
-    assert!(!runtime.wants_permission_probe(), "an in-flight request ignores the probe");
-
-    // Resolved: terminal — the probe is never wanted again.
-    let _ = runtime.permission_result(true);
-    assert!(!runtime.wants_permission_probe(), "a resolved state ignores the probe");
-}
-
-#[test]
-fn probe_stays_wanted_for_a_deferring_rail_past_its_patience() {
-    // The stranded deferring rail relies on the per-tick re-probe to notice a
-    // reclaimable stale lock long after DEFER_PATIENCE_TICKS. Gating the disk
-    // probe must not starve that escalation path.
-    let deferring = config::Config { defer_permission: true, ..config() };
-    let mut runtime = PluginRuntime::default();
-    let _ = runtime.load(deferring, PermissionProbe { marker: None, lock_acquired: false });
-    runtime.permission = PermissionState::WaitingForPeer { ticks: crate::permission::DEFER_PATIENCE_TICKS + 5 };
-    assert!(runtime.wants_permission_probe(), "an impatient deferring waiter still needs fresh probes to escalate",);
-}
-
-#[test]
-fn permission_result_persists_marker_and_updates_selectability() {
+fn permission_result_updates_selectability() {
     let mut runtime = PluginRuntime::default();
     runtime.record_permission_request_started();
 
     let outcome = runtime.permission_result(true);
 
     assert!(runtime.permission.granted());
-    assert!(matches!(runtime.permission, PermissionState::Resolved { .. }));
     // The first sync declares the state explicitly — and with no manifest
     // yet, that state is selectable. The flip to passive is the manifest's
     // job (`rail_turns_passive_only_once_a_terminal_pane_shares_its_tab`).
-    assert_eq!(
-        outcome,
-        Outcome {
-            render: true,
-            effects: vec![Effect::PersistPermissionMarker(PermissionMarker::Granted), Effect::SetSelectable(true),],
-        }
-    );
+    assert_eq!(outcome, Outcome { render: true, effects: vec![Effect::SetSelectable(true)] });
 }
 
 #[test]
@@ -548,7 +344,7 @@ fn no_tabs_with_history_renders_ledger_not_scanning() {
         theme: None,
         native: HashMap::new(),
     });
-    assert!(!runtime.radar.ledger_is_empty(), "setup: ledger must be seeded");
+    assert!(!runtime.radar.ledger().is_empty(), "setup: ledger must be seeded");
 
     // The tab itself closes too — zero tabs, but history remains.
     runtime.tabs_changed(vec![]);
@@ -570,7 +366,7 @@ fn ledger_false_hides_history_live_without_dropping_it() {
     assert!(off.render, "a ledger toggle repaints");
     let ansi = rt.render(24, 40);
     assert!(!ansi.contains("earlier"), "ledger false draws no section: {ansi:?}");
-    assert!(!rt.radar.ledger_is_empty(), "off only hides: the ring is still recorded");
+    assert!(!rt.radar.ledger().is_empty(), "off only hides: the ring is still recorded");
 
     rt.config_pipe(r#"{"ledger":"true"}"#);
     assert!(rt.render(24, 40).contains("earlier"), "flipping back on shows the history");
@@ -760,13 +556,13 @@ fn session_cycle_commits_via_switch_session_effect_on_idle_tick() {
     // The Fast fire covering the tap itself must not commit (the
     // taps-since-last-fire flag resets the deadline instead) — only the
     // NEXT, fully quiet fire may.
-    let covering = rt.timer_fast(PermissionProbe::default());
+    let covering = rt.timer_fast();
     assert!(
         !covering.effects.iter().any(|e| matches!(e, Effect::SwitchSession { .. })),
         "the fire covering the tap must not commit, got {:?}",
         covering.effects
     );
-    let tick = rt.timer_fast(PermissionProbe::default()); // the next, quiet Fast tick
+    let tick = rt.timer_fast(); // the next, quiet Fast tick
     assert!(
         tick.effects.iter().any(|e| matches!(
             e, Effect::SwitchSession { name, tab_position: Some(1), pane_id: None } if name == "alpha"
@@ -1102,7 +898,7 @@ fn two_tab_runtime_with_running_panes() -> PluginRuntime {
     rt.push(5, Status::Running);
     rt.push(7, Status::Running);
     // Arm the timer chain the way a first tick would.
-    rt.timer_fast(PermissionProbe::default());
+    rt.timer_fast();
     rt
 }
 
@@ -1114,7 +910,7 @@ fn render_gate_vetoes_repaints_whose_drawn_content_is_unchanged() {
     // request another repaint — while a tick-driven frame (`force_render`)
     // and a genuine content change still do.
     let mut rt = runtime_with_config(config());
-    rt.permission = crate::permission::PermissionState::Resolved { granted: true };
+    rt.permission = PermissionState::Resolved { granted: true };
     rt.tabs_changed(vec![tab(0, "work", true)]);
 
     let mut live = HashSet::new();
@@ -1134,7 +930,7 @@ fn render_gate_vetoes_repaints_whose_drawn_content_is_unchanged() {
     // Tick-driven frames bypass the gate (spinner/ages animate off now_tick).
     set_status(&mut rt.radar, 7, Status::Running, "working", rt.tick);
     let _ = rt.render(30, 40);
-    let tick = rt.timer_fast(PermissionProbe::default());
+    let tick = rt.timer_fast();
     assert!(tick.render, "animation tick renders even with identical rows");
 
     // A genuine content change still passes the gate.
@@ -1232,7 +1028,7 @@ fn backgrounded_done_lets_the_timer_quiesce() {
     // Done doesn't pin it awake.
     let mut extra = 0;
     while rt.timer_chain.armed().is_some() {
-        rt.timer_fast(PermissionProbe::default());
+        rt.timer_fast();
         extra += 1;
         assert!(extra < 4, "timer must quiesce for a backgrounded Done, not tick forever");
     }
@@ -1263,13 +1059,13 @@ fn flash_keeps_fast_timer_until_cleared() {
 
     // The flash (armed through tick 2) is still active at tick 1, so the
     // timer must not disarm yet.
-    rt.timer_fast(PermissionProbe::default());
+    rt.timer_fast();
     assert_eq!(rt.tick, 1);
     assert!(rt.timer_chain.armed().is_some(), "flash still active at tick 1 — timer must stay armed");
 
     // Tick 2: the flash window has just elapsed (`now_tick < flash_until`,
     // and `flash_until == 2`).
-    rt.timer_fast(PermissionProbe::default());
+    rt.timer_fast();
     assert_eq!(rt.tick, 2);
     assert!(!rt.radar.has_active_flash(rt.tick), "flash window has elapsed by tick 2");
 
@@ -1278,7 +1074,7 @@ fn flash_keeps_fast_timer_until_cleared() {
     // settles to the Slow heartbeat (the same 1h-saturating cadence the
     // ledger uses) rather than disarming outright.
     for _ in 0..3 {
-        rt.timer_fast(PermissionProbe::default());
+        rt.timer_fast();
     }
     assert!(!rt.timer_should_continue(), "nothing needs the Fast loop");
     assert_eq!(
@@ -1369,7 +1165,7 @@ fn idle_with_fresh_history_arms_slow_and_repaints() {
     // The slow fire itself must render — it exists precisely to repaint
     // the ledger's ages. A genuine Slow fire (elapsed ~60s), because the
     // repaint clause keys on the fire that landed, not on `desired_cadence`.
-    let tick = rt.timer_slow(PermissionProbe::default());
+    let tick = rt.timer_slow();
     assert!(tick.render, "a slow fire renders to repaint ledger ages");
 }
 
@@ -1433,7 +1229,7 @@ fn spinning_runtime() -> PluginRuntime {
 const FRAME_S: f64 = 0.25;
 
 fn fire(rt: &mut PluginRuntime, elapsed_s: f64) -> Outcome {
-    rt.timer(PermissionProbe::default(), elapsed_s, crate::clock::now_epoch_s())
+    rt.timer(elapsed_s, crate::clock::now_epoch_s())
 }
 
 #[test]
@@ -1568,7 +1364,7 @@ fn live_fast_fire_processes_then_stale_slow_fire_is_swallowed() {
 
     // The live fast fire (elapsed ~1s) ticks and re-arms exactly once.
     let tick_before = rt.tick;
-    let live = rt.timer_now(PermissionProbe::default(), 1.0);
+    let live = rt.timer_now(1.0);
     assert_eq!(rt.tick, tick_before + 1, "the live fast fire ticks");
     let rearms = live.effects.iter().filter(|e| matches!(e, Effect::SetTimeout(_))).count();
     assert_eq!(rearms, 1, "the live fire re-arms exactly once, got {:?}", live.effects);
@@ -1579,13 +1375,13 @@ fn live_fast_fire_processes_then_stale_slow_fire_is_swallowed() {
     // effects, the live arm untouched. Ticking it would re-arm a
     // second persistent chain.
     let tick_before = rt.tick;
-    let stale = rt.timer_now(PermissionProbe::default(), 60.0);
+    let stale = rt.timer_now(60.0);
     assert_eq!(stale, Outcome::none(), "a stale slow fire must be swallowed whole");
     assert_eq!(rt.tick, tick_before, "a swallowed fire must not advance the tick");
     assert_eq!(rt.timer_chain.armed(), Some(Cadence::Fast), "a swallowed fire must not disturb the live arm");
 
     // Steady state: exactly one chain remains and keeps ticking.
-    let next = rt.timer_now(PermissionProbe::default(), 1.0);
+    let next = rt.timer_now(1.0);
     assert_eq!(rt.tick, tick_before + 1, "the surviving chain keeps ticking");
     assert!(
         next.effects.contains(&Effect::SetTimeout(Cadence::Fast)),
@@ -1603,13 +1399,13 @@ fn stale_slow_fire_landing_first_is_swallowed() {
     let mut rt = slow_armed_then_fast_topup();
 
     let tick_before = rt.tick;
-    let stale = rt.timer_now(PermissionProbe::default(), 60.0);
+    let stale = rt.timer_now(60.0);
     assert_eq!(stale, Outcome::none(), "a stale slow fire must be swallowed whole");
     assert_eq!(rt.tick, tick_before, "a swallowed fire must not advance the tick");
     assert_eq!(rt.timer_chain.armed(), Some(Cadence::Fast), "a swallowed fire must not disturb the live arm");
 
     // The surviving fast fire ticks normally and re-arms exactly once.
-    let live = rt.timer_now(PermissionProbe::default(), 1.0);
+    let live = rt.timer_now(1.0);
     assert_eq!(rt.tick, tick_before + 1, "the live fire ticks");
     let rearms = live.effects.iter().filter(|e| matches!(e, Effect::SetTimeout(_))).count();
     assert_eq!(rearms, 1, "the live fire re-arms exactly once, got {:?}", live.effects);
@@ -1627,7 +1423,7 @@ fn lone_slow_fire_processes_as_the_live_chain() {
     rt.tabs_changed(vec![]); // arms Slow: the only fire in flight
     assert_eq!(rt.timer_chain.armed(), Some(Cadence::Slow));
 
-    let tick = rt.timer_now(PermissionProbe::default(), 60.0);
+    let tick = rt.timer_now(60.0);
     assert!(tick.render, "the lone slow fire processes and repaints ledger ages");
     assert!(
         tick.effects.contains(&Effect::SetTimeout(Cadence::Slow)),
@@ -1735,7 +1531,7 @@ mod timer_chain_fuzz {
                 match step {
                     Step::Fire => {
                         if let Some(elapsed) = sim.pop() {
-                            let out = rt.timer(PermissionProbe::default(), elapsed, sim.now_epoch_s());
+                            let out = rt.timer(elapsed, sim.now_epoch_s());
                             sim.schedule_from(&out.effects);
                         }
                     }
@@ -1779,7 +1575,7 @@ mod timer_chain_fuzz {
                     drained = true;
                     break;
                 };
-                let out = rt.timer(PermissionProbe::default(), elapsed, sim.now_epoch_s());
+                let out = rt.timer(elapsed, sim.now_epoch_s());
                 sim.schedule_from(&out.effects);
             }
             prop_assert!(
@@ -1829,7 +1625,7 @@ fn hidden_rail_ticks_its_state_but_never_paints() {
     assert_eq!(hide, Outcome::none(), "going dark is silent: nothing to paint, nothing to write");
 
     for _ in 0..2 {
-        let tick = rt.timer_fast(PermissionProbe::default());
+        let tick = rt.timer_fast();
         assert!(!tick.render, "a hidden rail never paints a tick frame");
         assert!(
             tick.effects.contains(&Effect::SetTimeout(Cadence::Fast)),
@@ -1847,14 +1643,14 @@ fn reveal_repaints_once_even_when_the_rows_did_not_change() {
     // dark. A reveal must paint regardless of the key compare.
     let mut rt = painted_runtime();
     rt.visibility_changed(false);
-    assert!(!rt.timer_fast(PermissionProbe::default()).render);
+    assert!(!rt.timer_fast().render);
 
     let reveal = rt.visibility_changed(true);
     assert!(reveal.render, "reveal repaints the frame that was skipped");
 
     let again = rt.visibility_changed(true);
     assert_eq!(again, Outcome::none(), "a repeated Visible(true) is a no-op");
-    assert!(rt.timer_fast(PermissionProbe::default()).render, "visible again: tick frames paint as before");
+    assert!(rt.timer_fast().render, "visible again: tick frames paint as before");
 }
 
 #[test]
@@ -1865,14 +1661,14 @@ fn a_manifest_proves_the_rail_visible() {
     // paints again.
     let mut rt = painted_runtime();
     rt.visibility_changed(false);
-    assert!(!rt.timer_fast(PermissionProbe::default()).render);
+    assert!(!rt.timer_fast().render);
 
     rt.tabs_changed(vec![tab(0, "a", true)]);
-    assert!(rt.timer_fast(PermissionProbe::default()).render, "a TabUpdate un-hides the rail");
+    assert!(rt.timer_fast().render, "a TabUpdate un-hides the rail");
 
     rt.visibility_changed(false);
     rt.panes_changed(manifest_with_pane_7());
-    assert!(rt.timer_fast(PermissionProbe::default()).render, "a PaneUpdate un-hides the rail");
+    assert!(rt.timer_fast().render, "a PaneUpdate un-hides the rail");
 }
 
 // ── Selectability: the rail is passive only once it has a terminal neighbor ──
@@ -1902,23 +1698,11 @@ fn manifest(tab_panes: HashMap<usize, Vec<TerminalPane>>) -> PaneUpdate {
 }
 
 #[test]
-fn load_declares_the_rail_selectable_before_any_manifest_arrives() {
-    // A peer holds the prompt, so this instance has no request in flight —
-    // the OLD code emitted `SetSelectable(false)` right here, which is
-    // exactly what closed a rail-only tab. Load must declare the pane
-    // selectable and wait for evidence of a terminal neighbor.
-    let mut runtime = PluginRuntime::default();
-    let outcome = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: false });
-    assert!(runtime.permission.is_waiting());
-    assert_eq!(selectable_effects(&outcome), vec![true]);
-}
-
-#[test]
 fn rail_turns_passive_only_once_a_terminal_pane_shares_its_tab() {
-    // Declared selectable at load (peer-waiting arm), then granted out of
-    // band — the steady state of every rail after first-run coordination.
+    // Declared selectable at load, then granted — the steady state of every
+    // rail after the first run.
     let mut runtime = PluginRuntime::default();
-    runtime.load(config(), PermissionProbe { marker: None, lock_acquired: false });
+    runtime.load(config());
     runtime.permission = PermissionState::Resolved { granted: true };
     runtime.tabs_changed(vec![tab(0, "Tab #1", true)]);
     runtime.own_plugin_tab_changed(Some(0));
@@ -1962,7 +1746,7 @@ fn requesting_rail_stays_selectable_despite_a_terminal_neighbor() {
     // Zellij's y/n prompt is tied to the requesting pane — it must remain
     // focusable until the answer lands, terminal neighbor or not.
     let mut runtime = PluginRuntime::default();
-    let load = runtime.load(config(), PermissionProbe { marker: None, lock_acquired: true });
+    let load = runtime.load(config());
     assert!(runtime.permission.is_requesting());
     assert_eq!(selectable_effects(&load), vec![true]);
 
@@ -1980,7 +1764,7 @@ fn granted_rail_in_a_rail_only_tab_stays_selectable_after_the_prompt() {
     // The grant resolves while the rail is still the tab's only pane: the
     // prompt is gone, but there is still nothing else to focus — no flip.
     let mut runtime = PluginRuntime::default();
-    runtime.load(config(), PermissionProbe { marker: None, lock_acquired: true });
+    runtime.load(config());
     runtime.own_plugin_tab_changed(Some(0));
     runtime.panes_changed(manifest(HashMap::from([(0, vec![])])));
 

@@ -12,9 +12,9 @@
 //! (`lib.rs`) call this — at every entry point that owns an epoch, plus
 //! render (age formatting).
 
-/// Wall-clock seconds since the Unix epoch. Proven to work in wasm32-wasip1
-/// (session_files.rs uses SystemTime). Free function so RadarState/store tests
-/// can pass literal epochs instead.
+/// Wall-clock seconds since the Unix epoch (`SystemTime` works in
+/// wasm32-wasip1). Free function so RadarState tests can pass literal epochs
+/// instead.
 pub(crate) fn now_epoch_s() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

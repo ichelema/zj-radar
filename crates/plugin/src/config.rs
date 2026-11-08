@@ -52,30 +52,6 @@ impl Density {
     }
 }
 
-/// Which face this plugin instance plays. A normal launch is all `Sidebar`
-/// instances (the pinned rail). The first-run onboarding *floating* pane sets
-/// `role "onboarding"` so it owns Zellij's permission prompt — legibly, because
-/// a floating pane is framed and sized (the prompt is illegible in the small
-/// borderless rail; Zellij #4749) — then closes itself once granted.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Role {
-    /// Default: the pinned left rail.
-    #[default]
-    Sidebar,
-    /// Transient floating pane that exists only to host the grant prompt.
-    Onboarding,
-}
-
-impl Role {
-    pub fn from_config(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "onboarding" => Some(Role::Onboarding),
-            "sidebar" => Some(Role::Sidebar),
-            _ => None,
-        }
-    }
-}
-
 /// Which escape hatch the `needs_permission` face may honestly advertise. The
 /// rail can't know how it was installed, and the two install flows differ in
 /// what's actually bound: `run`-owned configs bake a Ctrl-y keybind that
@@ -163,7 +139,6 @@ pub struct Config {
     pub header: bool,
     pub glyphs: crate::status::GlyphSet,
     pub density: Density,
-    pub role: Role,
     /// Which grant escape hatch the needs-permission face advertises.
     pub grant_hint: GrantHint,
     /// Whether the footer advertises the `alt-[n] jump` chord.
@@ -173,10 +148,6 @@ pub struct Config {
     /// Whether the `─ earlier ─` completion ledger renders. Display-only: the
     /// ring is recorded either way.
     pub ledger: bool,
-    /// Set on the onboarding layout's rail instances: never fire our own
-    /// permission request — wait for the floating onboarding pane to win the
-    /// grant, so Zellij binds its prompt to the float, not the rail.
-    pub defer_permission: bool,
     /// Expand the cross-session badge into a session tree: each peer's tabs
     /// and agent rows under its heading (`render::render_peer_children`).
     /// Opt-in: off keeps the compact one-line-per-session badge.
@@ -204,12 +175,10 @@ impl Default for Config {
             header: true,
             glyphs: crate::status::GlyphSet::default(),
             density: Density::default(),
-            role: Role::default(),
             grant_hint: GrantHint::default(),
             jump_hint: JumpHint::default(),
             task_lines: TaskLines::default(),
             ledger: true,
-            defer_permission: false,
             session_tree: false,
             show_mode: false,
             spinner_fps: DEFAULT_SPINNER_FPS,
@@ -283,13 +252,11 @@ config_fields! {
     naming:     "naming"     => NamingMode::from_config,
     density:    "density"    => Density::from_config,
     glyphs:     "glyphs"     => crate::status::GlyphSet::from_config,
-    role:       "role"       => Role::from_config,
     grant_hint: "grant_hint" => GrantHint::from_config,
     jump_hint:  "jump_hint"  => JumpHint::from_config,
     task_lines: "task_lines" => TaskLines::from_config,
     header:              "header"              => parse_bool,
     ledger:              "ledger"              => parse_bool,
-    defer_permission:    "defer_permission"    => parse_bool,
     session_tree:        "session_tree"        => parse_bool,
     show_mode:           "show_mode"           => parse_bool,
     spinner_fps:         "spinner_fps"         => parse_fps,
@@ -352,24 +319,6 @@ mod tests {
         let over = format!(r#"{{"naming":"{}"}}"#, "x".repeat(crate::payload::MAX_PAYLOAD_BYTES));
         assert!(over.len() > crate::payload::MAX_PAYLOAD_BYTES, "sanity: fixture exceeds the cap");
         assert!(overrides_from_json(&over).is_none());
-    }
-
-    #[test]
-    fn role_parses_and_defaults_to_sidebar() {
-        assert_eq!(Config::default().role, Role::Sidebar);
-        assert_eq!(Config::from_map(&map(&[])).role, Role::Sidebar);
-        assert_eq!(Config::from_map(&map(&[("role", "onboarding")])).role, Role::Onboarding);
-        assert_eq!(Config::from_map(&map(&[("role", "ONBOARDING")])).role, Role::Onboarding);
-        // unknown → default Sidebar
-        assert_eq!(Config::from_map(&map(&[("role", "wat")])).role, Role::Sidebar);
-    }
-
-    #[test]
-    fn defer_permission_parses_and_defaults_false() {
-        assert!(!Config::default().defer_permission);
-        assert!(Config::from_map(&map(&[("defer_permission", "true")])).defer_permission);
-        // garbage → keeps default (false)
-        assert!(!Config::from_map(&map(&[("defer_permission", "maybe")])).defer_permission);
     }
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {

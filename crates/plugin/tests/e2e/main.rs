@@ -899,72 +899,31 @@ fn native_attention_reaches_background_tab_instances() {
     assert!(converged, "CONVERGENCE: tab two's instance does NOT show tab one's agent. tab-two rail:\n{tab2}");
 }
 
-/// The auto-dispatch onboarding path (`zj-radar run` on a LIVE attach): attaching
-/// applies no layout, so the onboarding float never auto-opens — instead `run`
-/// dispatches `launch-or-focus-plugin <wasm> --floating -c role=onboarding` to the
-/// running session. This is the ONE runtime claim the host unit tests can't cover:
-/// that the dispatched float actually RENDERS and hosts Zellij's grant prompt on a
-/// live server. We prove it end-to-end by reproducing the attach steady state (an
-/// ungranted, deferring rail with no float), dispatching exactly what `run` sends,
-/// and answering the resulting grant prompt.
-///
-/// The assertion is wording-independent by construction: a deferring rail NEVER
-/// calls `request_permission`, so the only thing that can produce a grantable
-/// prompt is the dispatched onboarding float. Therefore if pressing `y` makes the
-/// rail's `needs_permission` face clear (grant landed → marker → the rail's URL
-/// inherits it), the float must have opened and rendered its prompt. We re-press
-/// each poll to absorb the float-open → prompt-focus → grant → marker → timer-tick
-/// latency, mirroring the re-issue-under-`wait_until` pattern the click test uses.
+/// The first-run grant path: with no cached grant, the rail itself calls
+/// `request_permission` at load (no onboarding float, no deferral), so Zellij
+/// shows its prompt in the rail pane. `ZellijSession::start` answers it the
+/// way a user would (focus the rail, press `y`); the rail must then come up
+/// past the `needs_permission` face, and the prompt must have listed every
+/// requested permission, `ReadPaneContents` included.
 #[test]
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
-fn dispatched_grant_float_enables_ungranted_attached_session() {
-    use std::time::Duration;
+fn ungranted_rail_is_enabled_by_its_own_prompt() {
     let wasm = plugin_wasm_path();
     assert!(
         wasm.exists(),
         "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
     );
 
-    // Ungranted: an isolated HOME with NO grant reproduces "attached, never
-    // granted"; a deferring rail with no float is the attach steady state.
-    let temp_home = isolated_temp_home();
-    let session_name = format!("zjr_grantfloat_{}", std::process::id());
-    let layout = deferring_rail_layout(&wasm);
-    let session = ZellijSession::start(&session_name, &layout, &wasm, temp_home);
-    eprintln!("[e2e] ungranted deferring rail loaded");
+    // Ungranted: an isolated HOME with nothing in permissions.kdl.
+    let session_name = format!("zjr_grant_{}", std::process::id());
+    let session = ZellijSession::start(&session_name, &sidebar_layout(&wasm), &wasm, isolated_temp_home());
 
-    // Precondition: the ungranted rail shows the needs_permission face — a
-    // dead-end WITHOUT the dispatch (no float ever opened, nothing to grant).
-    let ungranted = session.wait_for_sidebar(32, "needs permission", Duration::from_secs(10));
-    let pre = sidebar_region(&session.screen(), 32);
-    eprintln!("[e2e] pre-dispatch sidebar (32 cols):\n{}", pre);
-    assert!(ungranted, "precondition: an ungranted deferring rail must show 'needs permission';\nsidebar:\n{pre}");
-
-    // Dispatch EXACTLY what `run` sends on a live attach — `grant_float_args`
-    // minus the `--session <s> action` prefix the harness's `action()` adds.
-    let wasm_abs = wasm.canonicalize().unwrap_or_else(|_| wasm.clone());
-    let url = format!("file:{}", wasm_abs.display());
-    session.run_action(&[
-        "launch-or-focus-plugin", &url, "--floating", "--move-to-focused-tab", "--configuration", "role=onboarding",
-    ]);
-    eprintln!("[e2e] dispatched onboarding float: {url}");
-
-    // Convergence proves the float opened, rendered, and hosted the grant prompt.
-    let enabled = session.wait_until(Duration::from_secs(20), |s| {
-        s.press("y");
-        !sidebar_region(&s.screen(), 32).contains("needs permission")
-    });
-    let post = sidebar_region(&session.screen(), 32);
-    eprintln!("[e2e] post-grant sidebar (32 cols):\n{}", post);
-    assert!(
-        enabled,
-        "dispatching the onboarding float on a LIVE session must open a grant \
-         prompt whose 'y' clears the rail's needs_permission face (the deferring \
-         rail can't self-grant, so this can only come from the dispatched float);\n\
-         sidebar:\n{post}"
-    );
-
-    eprintln!("[e2e] PASS: auto-dispatched grant float rendered and enabled the rail");
+    let pty = session.pty_text();
+    assert!(pty.contains("Allow? (y/n)"), "an ungranted rail must prompt from its own pane");
+    assert!(pty.contains("Read pane contents"), "the prompt must request ReadPaneContents");
+    let rail = sidebar_region(&session.screen(), 32);
+    eprintln!("[e2e] post-grant sidebar (32 cols):\n{rail}");
+    assert!(!rail.contains("needs permission"), "the answered prompt must enable the rail;\nsidebar:\n{rail}");
 }
 
 /// Regression pin: the rail paints every column of its pane, not just most of

@@ -7,8 +7,7 @@
 //! that retires a card); `entries`/`format_age` via
 //! the rail's bottom region (`render::render_bottom` through
 //! `RadarState::ledger_lines`); `any_unsaturated`/`SATURATE_S` via
-//! `PluginRuntime::desired_cadence` (the Slow-vs-disarm cadence pick); and
-//! `is_empty` via `PluginRuntime::render`'s onboarding-vs-rail choice.
+//! `PluginRuntime::desired_cadence` (the Slow-vs-disarm cadence pick).
 
 use crate::payload::{sanitize, MAX_MSG_CHARS, MAX_TAB_NAME_CHARS};
 use crate::radar_state::TabId;
@@ -98,9 +97,7 @@ impl Ledger {
         self.entries.iter()
     }
 
-    /// Consumed (via `RadarState::ledger_is_empty`) by `PluginRuntime::render`:
-    /// zero tracked tabs AND an empty ledger is the only state that shows the
-    /// onboarding face instead of the rail.
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

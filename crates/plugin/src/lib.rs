@@ -3,8 +3,7 @@
 //! # Shape
 //! - [`State`] is the per-tab plugin instance Zellij loads. It owns a
 //!   [`runtime::PluginRuntime`] (the host-testable state machine — pure apart
-//!   from wall-clock reads via `clock::now_epoch_s`) and a
-//!   [`session_files::SessionFiles`] (permission-marker persistence).
+//!   from wall-clock reads via `clock::now_epoch_s`).
 //! - The `#[cfg(target_arch = "wasm32")] impl ZellijPlugin for State` block is the
 //!   only code that touches the Zellij host API; everything it calls is pure logic
 //!   in the modules below. Host tests exercise that logic without a wasm build.
@@ -35,7 +34,6 @@ mod control;
 mod hooks_manifest_tests;
 mod ledger;
 mod mode;
-mod permission;
 mod presence;
 mod radar_state;
 #[cfg(test)]
@@ -43,7 +41,6 @@ mod reference_tests;
 mod render;
 mod rollup;
 mod runtime;
-mod session_files;
 mod sessions;
 mod tab_namer;
 #[cfg(test)]
@@ -58,12 +55,9 @@ use radar_state::{RadarTab, TabId};
 #[cfg(test)]
 use rollup::TabRow;
 use runtime::PluginRuntime;
-use session_files::SessionFiles;
 
 #[cfg(target_arch = "wasm32")]
 use runtime::Effect;
-#[cfg(target_arch = "wasm32")]
-use session_files::SessionFileIds;
 #[cfg(target_arch = "wasm32")]
 use std::collections::BTreeMap;
 #[cfg(target_arch = "wasm32")]
@@ -119,8 +113,6 @@ fn theme_palette(colors: &Styling) -> Option<theme::DerivedColors> {
 #[derive(Default)]
 pub struct State {
     runtime: PluginRuntime,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    session_files: SessionFiles,
     #[cfg(target_arch = "wasm32")]
     plugin_id: Option<u32>,
 }
@@ -166,7 +158,7 @@ impl State {
     /// produce misleading results.
     #[cfg(test)]
     fn render_at(&mut self, width: usize) {
-        self.runtime.permission = crate::permission::PermissionState::Resolved { granted: true };
+        self.runtime.permission = crate::runtime::PermissionState::Resolved { granted: true };
         let height = if self.runtime.last_render_height == 0 {
             self.runtime.natural_height(width)
         } else {
@@ -221,11 +213,11 @@ impl State {
                     PermissionType::ReadCliPipes,
                     PermissionType::ChangeApplicationState,
                     PermissionType::RunCommands,
+                    // Without it Zellij strips the command text from attention.
+                    PermissionType::ReadPaneContents,
                 ]),
                 Effect::SetSelectable(selectable) => set_selectable(selectable),
                 Effect::SetTimeout(cadence) => set_timeout(cadence.seconds()),
-                Effect::PersistPermissionMarker(marker) => self.session_files.persist_permission_marker(marker),
-                Effect::HeartbeatPermissionLock => self.session_files.heartbeat_permission_lock(),
                 Effect::RenameTab { tab_id, name } => rename_tab_with_id(tab_id.raw() as u64, &name),
                 Effect::SwitchTab { position } => switch_tab_to(position as u32 + 1),
                 Effect::ShowPane { pane_id } => {
@@ -239,7 +231,6 @@ impl State {
                     ]);
                     run_command(&["git", "-C", &cwd, "remote", "get-url", "origin"], context);
                 }
-                Effect::CloseSelf => close_self(),
                 Effect::SwitchSession { name, tab_position, pane_id } => match (tab_position, pane_id) {
                     (None, None) => switch_session(Some(&name)),
                     _ => switch_session_with_focus(&name, tab_position, pane_id.map(|id| (id, false))),
@@ -357,9 +348,7 @@ impl ZellijPlugin for State {
         ]);
         let ids = get_plugin_ids();
         self.plugin_id = Some(ids.plugin_id);
-        let session = SessionFiles::open(SessionFileIds { plugin_id: ids.plugin_id, zellij_pid: ids.zellij_pid });
-        self.session_files = session.files;
-        let outcome = self.runtime.load(config::Config::from_map(&config), session.permission);
+        let outcome = self.runtime.load(config::Config::from_map(&config));
         self.handle_outcome(outcome);
     }
 
@@ -457,12 +446,6 @@ impl ZellijPlugin for State {
                 self.handle_outcome(outcome)
             }
             Event::Timer(elapsed_s) => {
-                // Re-probe (marker + lock) each tick — but only while the
-                // permission machine is still waiting on a peer, so it can take
-                // over a prompt whose owner died holding a now-stale lock. Once
-                // the state settles (request in-flight or resolved) the runtime
-                // ignores the probe, so skip the disk reads: with one instance
-                // per tab, probing forever is N marker reads per second.
                 // Upstream documents `elapsed_s` only as the timer-expiry
                 // payload: elapsed seconds since the `set_timeout` call, which
                 // for a fired one-shot is ~= the duration it was armed with —
@@ -470,12 +453,7 @@ impl ZellijPlugin for State {
                 // needs: its 5s stale-fire threshold discriminates a ~1s (Fast)
                 // arm from a ~60s (Slow) one with wide margin either way, so
                 // scheduler jitter can't flip the classification.
-                let probe = if self.runtime.wants_permission_probe() {
-                    self.session_files.refresh_permission_probe()
-                } else {
-                    crate::permission::PermissionProbe::default()
-                };
-                let outcome = self.runtime.timer(probe, elapsed_s, crate::clock::now_epoch_s());
+                let outcome = self.runtime.timer(elapsed_s, crate::clock::now_epoch_s());
                 self.handle_outcome(outcome)
             }
             Event::Mouse(Mouse::LeftClick(line, col)) => {
@@ -1107,7 +1085,7 @@ mod tests {
         // 2 idle tabs, permission granted, render at width 80.
         // header=2 lines (Compact), tab 0 at line 2.
         let mut state = make_state_with_tabs(&[(0, "first", false), (1, "second", false)]);
-        state.runtime.permission = crate::permission::PermissionState::Resolved { granted: true };
+        state.runtime.permission = crate::runtime::PermissionState::Resolved { granted: true };
         let _ = state.runtime.render(100, 80);
         // line 2 is the first tab content row (lines 0-1 are the header)
         let outcome = state.runtime.mouse_click(2, 0);
@@ -1117,7 +1095,7 @@ mod tests {
     #[test]
     fn mouse_click_without_permission_is_inert() {
         let mut state = make_state_with_tabs(&[(0, "first", false), (1, "second", false)]);
-        state.runtime.permission = crate::permission::PermissionState::default();
+        state.runtime.permission = crate::runtime::PermissionState::default();
         let _ = state.runtime.render(100, 80);
         assert!(state.runtime.mouse_click(2, 0).effects.is_empty());
     }
@@ -1148,7 +1126,7 @@ mod tests {
                 state.runtime.radar.set_tab_panes_for_position(i, vec![pane(i as u32)]);
             }
             // Render through the production path at the given width; this populates last_rendered.
-            state.runtime.permission = crate::permission::PermissionState::Resolved { granted: true };
+            state.runtime.permission = crate::runtime::PermissionState::Resolved { granted: true };
             let ansi = state.runtime.render(200, width);
             let rail_lines = ansi.matches('\n').count();
             // For every drawn line, target_at_line must resolve to a real tab or None.

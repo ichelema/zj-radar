@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn full_block_is_already_granted() {
         let existing = format!(
-            "\"{WASM}\" {{\n    RunCommands\n    ChangeApplicationState\n    ReadCliPipes\n    ReadApplicationState\n}}\n"
+            "\"{WASM}\" {{\n    RunCommands\n    ReadPaneContents\n    ChangeApplicationState\n    ReadCliPipes\n    ReadApplicationState\n}}\n"
         );
         assert_eq!(merge_grant(Some(&existing), WASM), Ok(Preseed::AlreadyGranted));
     }
@@ -171,7 +171,7 @@ mod tests {
         // block can precede a later full one — the pair is already granted.
         let existing = format!(
             "\"{WASM}\" {{\n    ReadApplicationState\n}}\n\
-             \"{WASM}\" {{\n    ReadApplicationState\n    ReadCliPipes\n    ChangeApplicationState\n    RunCommands\n}}\n"
+             \"{WASM}\" {{\n    ReadApplicationState\n    ReadCliPipes\n    ChangeApplicationState\n    RunCommands\n    ReadPaneContents\n}}\n"
         );
         assert_eq!(merge_grant(Some(&existing), WASM), Ok(Preseed::AlreadyGranted));
     }

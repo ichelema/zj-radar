@@ -124,8 +124,8 @@ pub(crate) fn grant_float_args(session: &str, wasm_path: &Path) -> Vec<String> {
 
 /// Every permission the plugin requests on load — keep in lockstep with the
 /// `Effect::RequestPermission` list in `crates/plugin/src/lib.rs`.
-pub(crate) const REQUIRED_PLUGIN_PERMISSIONS: [&str; 4] =
-    ["ReadApplicationState", "ReadCliPipes", "ChangeApplicationState", "RunCommands"];
+pub(crate) const REQUIRED_PLUGIN_PERMISSIONS: [&str; 5] =
+    ["ReadApplicationState", "ReadCliPipes", "ChangeApplicationState", "RunCommands", "ReadPaneContents"];
 
 /// True iff `permissions.kdl`'s EFFECTIVE grant for `wasm_abs_path` covers the
 /// full permission set the plugin requests. Zellij keys grants by the literal
@@ -839,6 +839,7 @@ mod tests {
     ReadCliPipes
     ChangeApplicationState
     RunCommands
+    ReadPaneContents
 }
 "#;
 
@@ -884,7 +885,7 @@ mod tests {
         // The file holds KDL strings: a path with `"` or `\` is keyed in its
         // escaped spelling, so the raw path must never be what's matched.
         let p = r#"/x/we"ird\zj_radar.wasm"#;
-        let perms = "ReadApplicationState; ReadCliPipes; ChangeApplicationState; RunCommands";
+        let perms = "ReadApplicationState; ReadCliPipes; ChangeApplicationState; RunCommands; ReadPaneContents";
         let escaped = format!(r#""/x/we\"ird\\zj_radar.wasm" {{ {perms} }}"#);
         assert!(escaped.parse::<kdl::KdlDocument>().is_ok(), "fixture must be valid KDL: {escaped}");
         assert!(wasm_is_granted(&escaped, p));
@@ -911,7 +912,7 @@ mod tests {
         // re-prompts on the trailing partial entry.
         let p = "/x/zj_radar.wasm";
         let full = format!(
-            "\"{p}\" {{\n    ReadApplicationState\n    ReadCliPipes\n    ChangeApplicationState\n    RunCommands\n}}\n"
+            "\"{p}\" {{\n    ReadApplicationState\n    ReadCliPipes\n    ChangeApplicationState\n    RunCommands\n    ReadPaneContents\n}}\n"
         );
         let partial = format!("\"{p}\" {{\n    ReadApplicationState\n}}\n");
         assert!(wasm_is_granted(&format!("{partial}{full}"), p), "stale partial + later full = granted");
@@ -924,8 +925,9 @@ mod tests {
         // header line. Misreading it used to swallow the NEXT entry's lines
         // as this block's grant set.
         let p = "/x/zj_radar.wasm";
-        let inline_full =
-            format!("\"{p}\" {{ ReadApplicationState; ReadCliPipes; ChangeApplicationState; RunCommands }}\n");
+        let inline_full = format!(
+            "\"{p}\" {{ ReadApplicationState; ReadCliPipes; ChangeApplicationState; RunCommands; ReadPaneContents }}\n"
+        );
         assert!(wasm_is_granted(&inline_full, p), "inline full block is a grant");
         let inline_partial_then_foreign = format!(
             "\"{p}\" {{ ReadApplicationState }}\n\

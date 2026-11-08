@@ -321,30 +321,29 @@ impl ZellijSession {
     /// Gives up after 30 seconds.
     fn wait_until_ready(&self) {
         let deadline = Instant::now() + Duration::from_secs(30);
-        let mut perm_sent = false;
 
         while Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(400));
             let text = self.pty_text();
 
-            // Handle permission prompt (fallback if permissions.kdl wasn't read).
-            if !perm_sent
-                && (text.contains("Grant") || text.contains("Allow") || text.contains("y/n") || text.contains("Deny"))
-            {
-                if let Ok(mut w) = self.pty_writer.lock() {
-                    let _ = w.write_all(b"y");
-                    let _ = w.flush();
-                }
-                perm_sent = true;
-                continue;
-            }
-
             // The plugin renders " RADAR" as its header line in all states
-            // (both the onboarding screen and the tab-row view).
+            // (both the onboarding screen and the tab-row view). Checked first:
+            // the PTY buffer accumulates, so prompt text lingers after a grant.
             if text.contains(" RADAR") {
                 // Extra beat so the plugin finishes its initial render cycle.
                 std::thread::sleep(Duration::from_millis(500));
                 return;
+            }
+
+            // Ungranted: Zellij shows its prompt in the rail pane instead of
+            // the plugin's render, but focus starts on the shell. Every harness
+            // layout puts the rail on the left, so focus it and answer.
+            if text.contains("Allow? (y/n)") {
+                self.run_action(&["move-focus", "left"]);
+                if let Ok(mut w) = self.pty_writer.lock() {
+                    let _ = w.write_all(b"y");
+                    let _ = w.flush();
+                }
             }
         }
         panic!(
@@ -820,6 +819,7 @@ pub fn pre_grant_permissions(wasm: &Path) -> IsolatedEnvironment {
     ReadCliPipes
     ChangeApplicationState
     RunCommands
+    ReadPaneContents
 }}
 "#,
             wasm = wasm_str
@@ -838,30 +838,6 @@ pub fn pre_grant_permissions(wasm: &Path) -> IsolatedEnvironment {
 /// with it reproduces "attached but never granted" (nothing in `permissions.kdl`).
 pub fn isolated_temp_home() -> IsolatedEnvironment {
     IsolatedEnvironment::new()
-}
-
-/// A rail layout whose plugin DEFERS permission (`defer_permission "true"`) and
-/// carries NO onboarding float — reproducing an attached, ungranted session
-/// (attach applies no layout, so the float never auto-opens). The deferring rail
-/// renders `needs_permission` without ever calling `request_permission`, so it
-/// never triggers the harness's auto-grant; the ungranted state stays put until a
-/// test dispatches the grant float itself.
-pub fn deferring_rail_layout(plugin_wasm: &Path) -> String {
-    let wasm_abs = plugin_wasm.canonicalize().unwrap_or_else(|_| plugin_wasm.to_path_buf());
-    format!(
-        r#"layout {{
-    cwd "/tmp"
-    pane split_direction="vertical" {{
-        pane size=32 borderless=true {{
-            plugin location="file:{wasm}" {{
-                defer_permission "true"
-            }}
-        }}
-        pane
-    }}
-}}"#,
-        wasm = wasm_abs.display()
-    )
 }
 
 /// Build a KDL layout that pins the zj-radar plugin in a 32-column left sidebar.

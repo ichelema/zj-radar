@@ -718,7 +718,7 @@ fn pending_and_running_never_ledger() {
     // Both panes close.
     radar.panes_changed(native_update(vec![]), 5, config::NamingMode::Off);
 
-    assert!(radar.ledger_is_empty(), "Running/Pending carry nothing to ledger — only Done/Error recede");
+    assert!(radar.ledger().is_empty(), "Running/Pending carry nothing to ledger — only Done/Error recede");
 }
 
 #[test]

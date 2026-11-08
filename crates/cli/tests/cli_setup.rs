@@ -1046,7 +1046,7 @@ fn setup_zellij_skips_grant_hint_when_already_granted() {
                 &perms_path,
                 format!(
                     "\"{}\" {{\n    ReadApplicationState\n    ReadCliPipes\n    \
-                     ChangeApplicationState\n    RunCommands\n}}\n",
+                     ChangeApplicationState\n    RunCommands\n    ReadPaneContents\n}}\n",
                     wasm_dest.display()
                 ),
             )
@@ -1127,8 +1127,8 @@ fn preseed_install(seed_permissions: Option<&str>) -> (TempDir, TempDir, String,
     (config_dir, home, stdout, stderr)
 }
 
-const FULL_PERMISSION_SET: [&str; 4] =
-    ["ReadApplicationState", "ReadCliPipes", "ChangeApplicationState", "RunCommands"];
+const FULL_PERMISSION_SET: [&str; 5] =
+    ["ReadApplicationState", "ReadCliPipes", "ChangeApplicationState", "RunCommands", "ReadPaneContents"];
 
 #[test]
 fn setup_zellij_preseeds_grant_on_install() {

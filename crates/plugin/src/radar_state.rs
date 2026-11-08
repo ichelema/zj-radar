@@ -649,17 +649,6 @@ impl RadarState {
         })
     }
 
-    /// The zero-state routing gate: `PluginRuntime::render` shows the minimal
-    /// scanning face only when there are no tracked tabs AND no completion
-    /// history — a session with zero live tabs but a non-empty ledger still
-    /// renders `render_rail`'s header + bottom region (spec §9's floor).
-    /// Unlike `ledger_lines`, this asks `RadarState` directly rather than the
-    /// prepared `Vec<LedgerLine>` — the routing decision happens before
-    /// `RenderOpts` is built.
-    pub(crate) fn ledger_is_empty(&self) -> bool {
-        self.ledger.is_empty()
-    }
-
     /// Arm the tab-level ping flash for the tab holding `pane_id`, if it is
     /// still seated in one: the live not-Pending → Pending edge, the "make
     /// the user aware" signal.

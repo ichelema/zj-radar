@@ -9,8 +9,8 @@
 //! directly and assert on the returned `Outcome` — no Zellij needed.
 //!
 //! # Event entry points
-//! - [`load`](PluginRuntime::load) — first run: seed config, begin the
-//!   permission flow.
+//! - [`load`](PluginRuntime::load) — first run: seed config, request
+//!   permissions.
 //! - [`tabs_changed`](PluginRuntime::tabs_changed) /
 //!   [`panes_changed`](PluginRuntime::panes_changed) /
 //!   [`cwd_changed`](PluginRuntime::cwd_changed) — Zellij topology updates.
@@ -31,7 +31,7 @@
 //! - [`global_attention_changed`](PluginRuntime::global_attention_changed) —
 //!   every other session, from Zellij's `GlobalAttentionUpdate`.
 //! - [`timer`](PluginRuntime::timer) — periodic tick (animation +
-//!   permission-flow coordination + cross-session cycle commit).
+//!   needs-permission repaint + cross-session cycle commit).
 //! - [`mouse_click`](PluginRuntime::mouse_click) — resolved against the cached
 //!   [`RenderedRail`] for click-to-switch.
 //! - [`mouse_right_click`](PluginRuntime::mouse_right_click) — the
@@ -41,7 +41,6 @@
 
 use crate::config;
 use crate::control::Verb;
-use crate::permission::{PermissionMarker, PermissionPolicy, PermissionProbe, PermissionState, Transition};
 use crate::presence::Presence;
 use crate::radar_state::{Direction, PaneUpdate, RadarChange, RadarState, RadarTab, TabId};
 use crate::render::{self, RenderedRail};
@@ -91,12 +90,47 @@ const SUBTICK_SLACK_S: f64 = 0.05;
 /// one — see [`PluginRuntime::timer`].
 const STALE_FIRE_ELAPSED_S: f64 = 5.0;
 
+/// Our permission request: every instance requests at `load`, and Zellij
+/// answers `Granted` from its cache when `zj-radar setup` pre-wrote the grant
+/// (`setup/preseed.rs`), so only an ungranted first run shows a prompt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PermissionState {
+    /// Before `load`: not granted, not requesting.
+    #[default]
+    Unprompted,
+    /// Our request is in flight; the pane is selectable and each tick
+    /// repaints the needs-permission face until Zellij answers.
+    Requesting,
+    /// Terminal: Zellij (or the user) answered.
+    Resolved { granted: bool },
+}
+
+impl PermissionState {
+    /// True once permission is granted (gates clicks, pipes, and the live rail).
+    pub(crate) fn granted(&self) -> bool {
+        matches!(self, PermissionState::Resolved { granted: true })
+    }
+
+    /// True once permission is definitively denied: the rail is a static
+    /// needs-permission face and the events that clear domain work never
+    /// arrive, so the cadence disarms fully (see `desired_cadence`).
+    pub(crate) fn denied(&self) -> bool {
+        matches!(self, PermissionState::Resolved { granted: false })
+    }
+
+    /// True only while our request is in flight: the tick repaints the
+    /// needs-permission face, holds Fast cadence, and keeps the pane
+    /// selectable (the user must be able to reach Zellij's y/n prompt).
+    pub(crate) fn is_requesting(&self) -> bool {
+        matches!(self, PermissionState::Requesting)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Effect {
     RequestPermission,
     SetSelectable(bool),
     SetTimeout(Cadence),
-    PersistPermissionMarker(PermissionMarker),
     RenameTab {
         tab_id: TabId,
         name: String,
@@ -126,16 +160,6 @@ pub(crate) enum Effect {
     ResolveRepo {
         cwd: String,
     },
-    /// Close this plugin's own pane. Emitted by the onboarding floating pane
-    /// after permission is granted — it has served its purpose. Needs no Zellij
-    /// permission (`close_self` is always allowed).
-    CloseSelf,
-    /// Refresh the shared permission lock's mtime. Emitted each tick while this
-    /// instance's own request is in-flight (`Requesting`), so waiting peers
-    /// never see the lock go stale while a user is still looking at a live
-    /// prompt — `reclaim_if_stale` (and with it the deferring rails' patience
-    /// escalation) only ever fires once the prompt-owner is actually gone.
-    HeartbeatPermissionLock,
     /// Commit a cross-session cycle selection: switch to `name` and, once
     /// there, jump straight to the tab (or pane) that needs attention, if any.
     /// Emitted by `timer` when `Sessions::tick` reports an idle commit, and
@@ -285,7 +309,7 @@ pub(crate) struct PluginRuntime {
     /// tick rate stays ~1 Hz no matter the frame rate (see `timer`).
     subtick_elapsed_s: f64,
     /// The one-shot `SetTimeout` chain — see [`TimerChain`]. Every arm goes
-    /// through `arm_timer_if_needed` (`begin_permission_flow` and `project`
+    /// through `arm_timer_if_needed` (`load` and `project`
     /// both arm through it); every fire retires through `timer`.
     timer_chain: TimerChain,
     pub(crate) last_render_height: usize,
@@ -415,13 +439,23 @@ fn presence_counts(rows: &[TabRow]) -> (usize, usize, Option<usize>) {
 }
 
 impl PluginRuntime {
-    pub(crate) fn load(&mut self, config: config::Config, permission: PermissionProbe) -> Outcome {
+    pub(crate) fn load(&mut self, config: config::Config) -> Outcome {
         self.config = config;
         self.sessions.set_show_trees(self.config.session_tree);
-        // Load's single clock capture, stored eagerly (and reused by
-        // `begin_permission_flow`'s arm below, keeping one "now" per event).
+        // Load's single clock capture, stored eagerly (and reused by the arm
+        // below, keeping one "now" per event).
         self.last_now_epoch_s = crate::clock::now_epoch_s();
-        self.begin_permission_flow(permission)
+        self.permission = PermissionState::Requesting;
+        let mut effects = vec![Effect::RequestPermission];
+        // Pre-grant Zellij withholds the state events that would otherwise
+        // trigger a paint (they need ReadApplicationState), so this timer is
+        // the only thing that gets the needs_permission screen onto the rail.
+        self.arm_timer_if_needed(self.last_now_epoch_s, &mut effects);
+        // Load always declares the sidebar's selectability — and before any
+        // manifest it can only be *selectable*: going passive here is what
+        // closed a rail-only tab (`desired_selectable`).
+        self.sync_selectable(&mut effects);
+        Outcome::with_effects(false, effects)
     }
 
     pub(crate) fn build_rows(&self) -> std::rc::Rc<Vec<TabRow>> {
@@ -430,9 +464,7 @@ impl PluginRuntime {
 
     pub(crate) fn own_plugin_tab_changed(&mut self, position: Option<usize>) {
         self.own_tab_position = position;
-        if self.config.role == config::Role::Sidebar {
-            self.radar.own_plugin_tab_changed(position);
-        }
+        self.radar.own_plugin_tab_changed(position);
     }
 
     /// Whether the rail pane should be selectable right now — THE rule, as a
@@ -505,12 +537,9 @@ impl PluginRuntime {
     /// (`runtime/tests.rs`'s `FireSim`) passes its own advancing epoch, so
     /// the wall-clock-keyed gates in here move in lockstep with simulated
     /// fires without any clock to mock.
-    pub(crate) fn timer(&mut self, permission: PermissionProbe, elapsed_s: f64, now_epoch_s: u64) -> Outcome {
+    pub(crate) fn timer(&mut self, elapsed_s: f64, now_epoch_s: u64) -> Outcome {
         // Retire one in-flight fire; a stale one (see `TimerChain::on_fire`)
-        // is swallowed whole. A swallowed fire skips
-        // `check_deferred_permission_request`: safe, because an overlap only
-        // exists while a newer chain is live, whose next fire runs it within
-        // ~1s.
+        // is swallowed whole.
         if let Fire::Stale = self.timer_chain.on_fire(elapsed_s) {
             return Outcome::none();
         }
@@ -543,13 +572,6 @@ impl PluginRuntime {
         // (cadence decision, re-arm via project) sees the same "now".
         let now = now_epoch_s;
         let mut effects = Vec::new();
-        let permission_changed = self.check_deferred_permission_request(permission, &mut effects);
-        // Our own request is in-flight (including one this very tick just
-        // fired): keep the shared lock fresh so no waiting peer reclaims it
-        // out from under a live prompt.
-        if self.permission.is_requesting() {
-            effects.push(Effect::HeartbeatPermissionLock);
-        }
         self.tick += 1;
         self.radar.timer(self.tick);
         // BEFORE re-arming below, commit an idle cycle selection if one is
@@ -568,8 +590,7 @@ impl PluginRuntime {
         // Capture before re-arming: an in-flight permission request must repaint
         // the needs_permission screen each tick until the user answers.
         let awaiting_permission = self.permission.is_requesting();
-        let render = permission_changed
-            || awaiting_permission
+        let render = awaiting_permission
             || self.timer_should_continue()
             // A Slow fire exists to repaint ledger ages — even when nothing
             // else changed, `format_age` output may have moved.
@@ -849,33 +870,13 @@ impl PluginRuntime {
         }
     }
 
-    /// True while [`timer`](Self::timer) still consumes a fresh
-    /// [`PermissionProbe`] — i.e. the permission machine is waiting on a peer's
-    /// marker/lock. Once a request is in-flight or the state is resolved,
-    /// `on_timer` ignores the probe entirely, so the host glue can skip the
-    /// per-tick marker read + lock attempt (N tabs were stat-reading N files
-    /// per second forever) and pass `PermissionProbe::default()` instead.
-    pub(crate) fn wants_permission_probe(&self) -> bool {
-        self.permission.is_waiting()
-    }
-
     pub(crate) fn permission_result(&mut self, granted: bool) -> Outcome {
         self.record_permission_result(granted);
-        let mut effects = vec![Effect::PersistPermissionMarker(if granted {
-            PermissionMarker::Granted
-        } else {
-            PermissionMarker::Denied
-        })];
+        let mut effects = Vec::new();
         // The prompt just resolved, so the rail may go passive — IF a
         // terminal neighbor is known (`desired_selectable`); a rail-only tab
         // keeps it reachable.
         self.sync_selectable(&mut effects);
-        // The onboarding pane exists only to host the grant prompt. Once granted
-        // — and the grant is cached by plugin URL, so the rail inherits it — it
-        // removes itself, leaving the user with just the rail.
-        if granted && self.config.role == config::Role::Onboarding {
-            effects.push(Effect::CloseSelf);
-        }
         Outcome::with_effects(true, effects)
     }
 
@@ -994,15 +995,14 @@ impl PluginRuntime {
         render::body_line_count(&tabrows, &self.shown_ledger(), &opts)
     }
 
-    /// Test-only: force the in-flight `Requesting` state without driving the
-    /// full probe flow. Production reaches `Requesting` via `on_load`/`on_timer`.
+    /// Test-only: force the in-flight `Requesting` state without a `load`.
     #[cfg(test)]
     pub(crate) fn record_permission_request_started(&mut self) {
         self.permission = PermissionState::Requesting;
     }
 
     pub(crate) fn record_permission_result(&mut self, granted: bool) {
-        self.permission.on_result(granted);
+        self.permission = PermissionState::Resolved { granted };
     }
 
     #[cfg(test)]
@@ -1014,57 +1014,6 @@ impl PluginRuntime {
     #[cfg(test)]
     pub(crate) fn tab_position_at_line(&self, line: isize) -> Option<usize> {
         self.target_at_line(line).map(|(pos, _)| pos)
-    }
-
-    /// Collapse the two config flags into the permission module's policy. The
-    /// precedence (onboarding wins, then defer, else the lock dance) lives here,
-    /// so `permission.rs` never imports `Config` and the dead
-    /// `Onboarding && defer` combination is unrepresentable downstream.
-    fn permission_policy(&self) -> PermissionPolicy {
-        if self.config.role == config::Role::Onboarding {
-            PermissionPolicy::OnboardingPane
-        } else if self.config.defer_permission {
-            PermissionPolicy::Deferring
-        } else {
-            PermissionPolicy::LockCoordinated
-        }
-    }
-
-    fn begin_permission_flow(&mut self, probe: PermissionProbe) -> Outcome {
-        let policy = self.permission_policy();
-        let mut effects = Vec::new();
-        // Only a fresh request needs the host's permission prompt; a marker-driven
-        // resolution or a wait emit no permission effect here.
-        if self.permission.on_load(&probe, policy) == Transition::Requested {
-            effects.push(Effect::RequestPermission);
-        }
-        // Arm a timer whenever a decision is still outstanding — either we're
-        // waiting on a peer's marker, or our own request is in-flight. Pre-grant
-        // Zellij withholds the state events that would otherwise trigger a paint
-        // (they need ReadApplicationState), so this timer is the only thing that
-        // gets the needs_permission screen onto the rail. `last_now_epoch_s`
-        // is the capture `load` (this fn's sole caller) took at entry — not a
-        // second clock read, so the whole load event sees a single "now".
-        self.arm_timer_if_needed(self.last_now_epoch_s, &mut effects);
-        // Load always declares the sidebar's selectability, every arm — and
-        // before any manifest it can only be *selectable*: going passive here
-        // is what closed a rail-only tab (`desired_selectable`).
-        self.sync_selectable(&mut effects);
-        Outcome::with_effects(false, effects)
-    }
-
-    fn check_deferred_permission_request(&mut self, probe: PermissionProbe, effects: &mut Vec<Effect>) -> bool {
-        let policy = self.permission_policy();
-        // `on_timer` is inert unless we're waiting on a peer; a decision landing
-        // (marker arrived, or we reclaimed a stale lock — see session_files)
-        // refreshes selectability. `Requested` additionally fires the prompt.
-        match self.permission.on_timer(&probe, policy) {
-            Transition::Requested => effects.push(Effect::RequestPermission),
-            Transition::Resolved { .. } => {}
-            Transition::NoChange | Transition::StillWaiting => return false,
-        }
-        self.sync_selectable(effects);
-        true
     }
 
     /// Spec §10 cadence function. Fast (1s) while anything tick-windowed is
@@ -1081,8 +1030,7 @@ impl PluginRuntime {
         if self.permission.denied() {
             return None;
         }
-        if self.permission.is_waiting()
-            || self.permission.is_requesting()
+        if self.permission.is_requesting()
             || self.timer_should_continue()
             // A pending cross-session cycle selection needs the idle-commit
             // in `timer` to fire promptly, not wait out a Slow (or fully
@@ -1141,12 +1089,12 @@ impl PluginRuntime {
     }
 
     /// The sole projection from a domain [`RadarChange`] to host [`Effect`]s.
-    /// `fx` is a caller-supplied seed so the `timer` handler's permission
+    /// `fx` is a caller-supplied seed so the `timer` handler's session-switch
     /// effects come first, without a post-hoc splice. Canonical order: renames
     /// → cwd → `SetTimeout` (pinned by
     /// `project_emits_effects_in_canonical_order`). This is the only
     /// *domain-change* path that arms the timer
-    /// (the permission flow arms it separately in `begin_permission_flow`).
+    /// (`load` arms it separately).
     /// `TimerChain::arm` self-guards on the armed cadence and on whether
     /// there's anything to arm for, so calling it unconditionally here is a
     /// no-op wherever a handler has no pending work to arm for.

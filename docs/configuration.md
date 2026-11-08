@@ -52,8 +52,8 @@ Notes:
    unless option-as-alt is on. `zj-radar run` binds Alt-1..9 but does not set
    this, because it cannot verify the chord arrives.
 
-Three more keys (`role`, `grant_hint`, `defer_permission`) are set by
-`zj-radar run`'s generated layouts. Don't set them by hand.
+One more key (`grant_hint`) is set by `zj-radar run`'s generated layouts.
+Don't set it by hand.
 
 ## Runtime config
 
