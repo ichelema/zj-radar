@@ -69,10 +69,10 @@ pub struct ZellijSession {
 /// Who owns the on-disk lifetime of an isolated test environment.
 ///
 /// `start_sibling` needs a second Zellij session to use the SAME isolated root
-/// as an existing one (so both resolve to the same socket and Zellij cache dir
-/// — and thus the same plugin `/cache` mount — for presence files to actually
-/// cross), but exactly ONE of the two `ZellijSession`s must delete that root on
-/// Drop. `Owned` is the original `tempfile::TempDir` (deletes on drop);
+/// as an existing one (so both resolve to the same socket and Zellij cache
+/// dir, and attention can cross between them), but exactly ONE of the two
+/// `ZellijSession`s must delete that root on Drop. `Owned` is the original
+/// `tempfile::TempDir` (deletes on drop);
 /// `Shared` is just the path, borrowed from the owner and inert on drop.
 enum EnvironmentRoot {
     Owned(tempfile::TempDir),
@@ -223,13 +223,13 @@ impl ZellijSession {
     }
 
     /// Second session on the SAME server socket dir + cache as `self`, so the
-    /// two servers exchange `SessionUpdate` and share the plugin cache root.
+    /// two servers exchange `GlobalAttentionUpdate` and share the plugin cache root.
     ///
     /// Reuses `self`'s isolated root (not `isolated_temp_home()`) — same socket,
     /// permissions.kdl (no re-prompt), and Zellij cache dir, which is where
     /// zellij maps each plugin's `/cache` mount. Two sessions on different
     /// roots are intentionally invisible to one another; siblings share the
-    /// private server and plugin cache so presence files actually cross.
+    /// private server and plugin cache so attention actually crosses.
     ///
     /// The returned session does NOT own the isolated root — `self` does, and
     /// must outlive it (drop `self` last).

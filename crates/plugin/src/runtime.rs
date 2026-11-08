@@ -28,25 +28,22 @@
 //!   replaced `SessionUpdate` for learning this session's own name
 //!   (`SessionUpdate`'s peer list never populates without a plugin calling
 //!   the blocking `get_session_list()`, which stock zj-radar never does —
-//!   see `docs/design.md`, "Why not SessionUpdate"). Liveness itself no
-//!   longer comes from a Zellij-reported peer list at all: it's implicit in
-//!   which presence files `session_files::read_peer_presences` returns
-//!   (its mtime gate IS the liveness signal).
-//! - [`presences_changed`](PluginRuntime::presences_changed) — peer presence
-//!   files, freshly read from disk.
+//!   see `docs/design.md`, "Why not SessionUpdate").
+//! - [`global_attention_changed`](PluginRuntime::global_attention_changed) —
+//!   every other session, from Zellij's `GlobalAttentionUpdate`.
 //! - [`timer`](PluginRuntime::timer) — periodic tick (animation +
 //!   permission-flow coordination + cross-session cycle commit).
 //! - [`mouse_click`](PluginRuntime::mouse_click) — resolved against the cached
 //!   [`RenderedRail`] for click-to-switch.
 //! - [`mouse_right_click`](PluginRuntime::mouse_right_click) — the
-//!   acknowledge/dismiss verb, resolved against the same cached rail.
+//!   acknowledge verb, resolved against the same cached rail.
 //! - [`permission_result`](PluginRuntime::permission_result) — Zellij's grant /
 //!   deny verdict.
 
 use crate::config;
 use crate::control::Verb;
 use crate::permission::{PermissionMarker, PermissionPolicy, PermissionProbe, PermissionState, Transition};
-use crate::presence::{Presence, PresencePane, PresenceTab, MAX_LABEL_CHARS, MAX_PANES_PER_TAB, MAX_TABS};
+use crate::presence::Presence;
 use crate::radar_state::{Direction, PaneUpdate, RadarChange, RadarState, RadarTab, SnapshotWrite, TabId};
 use crate::render::{self, RenderedRail};
 use crate::rollup::{LedgerLine, TabRow};
@@ -94,65 +91,6 @@ const SUBTICK_SLACK_S: f64 = 0.05;
 /// for fast. Used only to decide which of two in-flight fires is the stale
 /// one — see [`PluginRuntime::timer`].
 const STALE_FIRE_ELAPSED_S: f64 = 5.0;
-
-/// Fast (1 Hz) ticks between peer-presence directory scans — see the gate in
-/// [`PluginRuntime::timer`]. Peers heartbeat every 60s and dim as stale at
-/// 90s, so 5s scan latency is invisible on the badge; only an active Alt+[/]
-/// cycle (`Sessions::wants_fast_cadence`) reads every tick. Slow (60s) fires
-/// scan unconditionally — they are already rarer than this interval.
-const PRESENCE_READ_TICK_INTERVAL: u64 = 5;
-
-/// Wall-clock seconds between own-presence liveness writes — the level
-/// trigger in [`PluginRuntime::project`] (the single presence-publish
-/// decision point): any pass re-emits the effect once the last write
-/// (`last_presence_write_epoch_s`) is at least this old. Must sit comfortably
-/// under `sessions::STALE_AFTER_SECS` (90s): peers dim a presence file whose
-/// mtime ages past that — and reap it as dead past
-/// `sessions::DEAD_AFTER_SECS`, a trust that rests entirely on this write
-/// guarantee — so 60s leaves a ~30s cushion for a skipped or
-/// scheduler-delayed fire. One Slow (60s) fire per window satisfies it
-/// exactly; a Fast-pinned session (a long-Running agent, a long
-/// command-origin build — no content edges, no Slow fires) satisfies it from
-/// its 1 Hz ticks, which is the whole point: keying the write on the Slow
-/// fire alone starved exactly the busiest sessions stale.
-const PRESENCE_HEARTBEAT_S: u64 = 60;
-
-/// How recent a sibling's presence write must be for a heartbeat to skip
-/// (`Effect::PersistPresence { unless_fresher_than: Some(_) }`) — the
-/// presence-writer token HOLDER's window (a non-holder uses
-/// [`PRESENCE_RESCUE_AFTER`]). Every instance stamps its own clock on a
-/// skip, so the holder's worst-case write gap is `PRESENCE_HEARTBEAT_S`
-/// plus this window. A quarter keeps that bound (75 s) under
-/// `sessions::STALE_AFTER_SECS` (90 s) with margin; a half would sit
-/// exactly on it.
-const PRESENCE_HEARTBEAT_SKIP: std::time::Duration = std::time::Duration::from_secs(PRESENCE_HEARTBEAT_S / 4);
-
-/// File age past which a NON-holder of the presence-writer token writes
-/// anyway — the rescue heartbeat (`SessionFiles::persist_presence`'s
-/// `rescue_after`). A non-holder's view of other tabs may be frozen (hidden
-/// rails get no manifests), so it must not overwrite a live holder; but if
-/// the holder has gone quiet (its instance died, or the token names a
-/// closed tab's rail and no tab has been activated since), the file must
-/// still not age into a reap. Set to the holder's own worst-case write gap
-/// (`PRESENCE_HEARTBEAT_S` plus the skip window), so a live holder never
-/// triggers a rescue, yet still under `sessions::STALE_AFTER_SECS`. A
-/// non-holder gets a write opportunity at least every
-/// `PRESENCE_HEARTBEAT_S` (a heartbeat, or a content edge — which for a
-/// non-holder is also only a rescue), so after holder loss the file ages at
-/// most `PRESENCE_RESCUE_AFTER + PRESENCE_HEARTBEAT_S` (135 s): it may dim
-/// briefly, but a live session is never reaped.
-pub(crate) const PRESENCE_RESCUE_AFTER: std::time::Duration =
-    std::time::Duration::from_secs(PRESENCE_HEARTBEAT_S + PRESENCE_HEARTBEAT_SKIP.as_secs());
-
-// The liveness ladder's safety argument IS this ordering — writes beat the
-// dim threshold even when a sibling's skip delays them by one window, and
-// dimming long precedes the file-deleting reap.
-const _: () = assert!(PRESENCE_HEARTBEAT_S + PRESENCE_HEARTBEAT_SKIP.as_secs() < crate::sessions::STALE_AFTER_SECS);
-const _: () = assert!(crate::sessions::STALE_AFTER_SECS < crate::sessions::DEAD_AFTER_SECS);
-// Rescue: never while a live holder keeps its cadence, always before a reap.
-const _: () = assert!(PRESENCE_HEARTBEAT_S < PRESENCE_RESCUE_AFTER.as_secs());
-const _: () = assert!(PRESENCE_RESCUE_AFTER.as_secs() < crate::sessions::STALE_AFTER_SECS);
-const _: () = assert!(PRESENCE_RESCUE_AFTER.as_secs() + PRESENCE_HEARTBEAT_S < crate::sessions::DEAD_AFTER_SECS);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Effect {
@@ -204,49 +142,6 @@ pub(crate) enum Effect {
     /// prompt — `reclaim_if_stale` (and with it the deferring rails' patience
     /// escalation) only ever fires once the prompt-owner is actually gone.
     HeartbeatPermissionLock,
-    /// Publish this session's own [`Presence`] for peer rails to read —
-    /// lib.rs does `files.persist_presence(unless_fresher_than, || runtime.presence_json())`.
-    /// Decided in one place, `project`: a presence *content* edge (a count
-    /// moved, the name was learned) passes `unless_fresher_than: None`; the
-    /// level-triggered liveness heartbeat ([`PRESENCE_HEARTBEAT_S`]) passes
-    /// `Some(window)`. The host gates both on the presence-writer token
-    /// (`Effect::ClaimPresenceWriter`): the holder writes a content edge
-    /// unconditionally and skips a heartbeat when the pid-keyed file's mtime
-    /// is younger than `window`; for a non-holder either is only a rescue,
-    /// written when the file is older than [`PRESENCE_RESCUE_AFTER`].
-    PersistPresence {
-        unless_fresher_than: Option<std::time::Duration>,
-    },
-    /// Re-read every peer session's presence file and feed the result back
-    /// through `presences_changed` — mirrors `ResolveCwd`'s
-    /// request/read-back pattern, except the read is gated on cadence (see
-    /// `timer`) rather than on a fresh set of pane ids: every Slow (60s)
-    /// fire — an idle rail's only event source, and the only way it ever
-    /// notices a peer went stale or dead — plus one scan per
-    /// `PRESENCE_READ_TICK_INTERVAL` Fast ticks (every tick mid-cycle).
-    ReadPresences,
-    /// Make this instance the session's presence *content* writer — lib.rs
-    /// does `files.claim_presence_writer(preempt)` (the
-    /// `zj-radar.<pid>.presence-writer` token, see its doc) and, on a
-    /// takeover, re-enters through
-    /// [`presence_writer_acquired`](PluginRuntime::presence_writer_acquired)
-    /// so the file gets THIS instance's view. Emitted whenever this rail is
-    /// the active view AND knows its session name (a nameless rail cannot
-    /// publish, so it must not hold the token): when the name is first
-    /// learned while visible and on a `Visible(true)` reveal (both
-    /// `preempt: true`), and on every `TabUpdate`/`PaneUpdate` (Zellij sends
-    /// those to the active tab's plugins only; `preempt: false`, so two
-    /// clients on different tabs don't ping-pong the token). Never at load
-    /// (no name yet), on going hidden, ticks or broadcasts. Emitted ahead of
-    /// `project`'s own `PersistPresence`, so the glue can skip that write
-    /// after a takeover already republished. Every manifest rather than only
-    /// transitions, so a rail that receives one ends up holding the token; a
-    /// claim of a token already held is one small read.
-    ClaimPresenceWriter {
-        /// Take the token even from a holder younger than
-        /// `session_files::PRESENCE_WRITER_TAKEOVER_FLOOR` (see there).
-        preempt: bool,
-    },
     /// Commit a cross-session cycle selection: switch to `name` and, once
     /// there, jump straight to the tab (or pane) that needs attention, if any.
     /// Emitted by `timer` when `Sessions::tick` reports an idle commit, and
@@ -255,24 +150,6 @@ pub(crate) enum Effect {
         name: String,
         tab_position: Option<usize>,
         pane_id: Option<u32>,
-    },
-    /// Delete every on-disk presence file whose `session_name` matches
-    /// `name` — all of them, since a name can have multiple pid-keyed
-    /// corpses (`sessions.rs`'s dedup doc) — except this session's own
-    /// live file, which `SessionFiles::remove_presences_matching` spares
-    /// by path identity, so even a dismiss of our own name (a dead corpse
-    /// of a restarted session) is safe. Emitted by `mouse_right_click`
-    /// right after `Sessions::dismiss` has already dropped the name from
-    /// THIS instance's in-memory roster (the instant-feedback half); this
-    /// is the on-disk half, so every peer's next Fast read converges too.
-    /// Also emitted by `presences_changed` for a name whose winning entry
-    /// aged past `sessions::DEAD_AFTER_SECS` — the auto-reap that keeps a
-    /// killed session from lingering dimmed until a plugin reload. Never
-    /// destructive to a live session: if the dismissed name is secretly
-    /// still alive, its next heartbeat/edge re-publishes a fresh presence
-    /// file and it simply reappears, fresh (see `Sessions::dismiss`).
-    DismissPresence {
-        name: String,
     },
     /// Re-broadcast a `zj_radar.status.v1` payload over the shared pipe —
     /// `payload` is already wire-encoded (`payload::to_wire`), ready to hand
@@ -444,33 +321,18 @@ pub(crate) struct PluginRuntime {
     sessions: Sessions,
     /// This session's own name, learned from `learn_session_name`
     /// (`Event::ModeUpdate`'s `ModeInfo.session_name`). Empty until Zellij's
-    /// first `ModeUpdate` lands — `project` withholds `Effect::PersistPresence`
-    /// while empty, since an unnamed presence file is useless to peers.
+    /// first `ModeUpdate` lands — `project` withholds the own badge row
+    /// while empty.
     own_session_name: String,
     /// The Zellij input mode from the latest `ModeUpdate` (`mode_changed`);
     /// `None` until the first one lands. Tracked whether or not `show_mode`
     /// is on, so a live toggle shows the current mode at once — but it reaches
     /// the render key and the footer only through [`shown_mode`](Self::shown_mode).
     mode: Option<crate::mode::Mode>,
-    /// The last own-`Presence` actually published, canonicalized with
-    /// `updated_epoch_s` zeroed before compare-and-cache — so `project` can
-    /// content-compare and emit `Effect::PersistPresence` only on a real
-    /// *content* edge, the same "write on edges only" rule `PersistSnapshot`
-    /// follows. Comparing the raw JSON (epoch included) would fire on every
-    /// Fast tick even with unchanged counts, since `last_now_epoch_s` moves
-    /// every second — mirrors `sessions.rs::set_own`, whose badge-derived
-    /// change check already excludes `updated_epoch_s` the same way. The
-    /// real epoch still reaches peers: it's stamped fresh into whatever
-    /// `presence_json()` returns when the host actually handles the effect,
-    /// so it reads as "epoch of the last content edge", not "epoch of the
-    /// last tick".
-    /// Held as an allocation-free fingerprint of the published content
-    /// (`own_presence_fingerprint`), not a cloned `Presence` tree.
-    last_presence: Option<u64>,
     /// The most recent `now_epoch_s` any entry point has captured. Reused
     /// (never re-read from the clock) by call paths that have no epoch of
-    /// their own to work with — `presence_json`, `learn_session_name`,
-    /// `presences_changed` — so a single event's "now" never forks in two
+    /// their own to work with — `learn_session_name`,
+    /// `global_attention_changed` — so a single event's "now" never forks in two
     /// directions.
     last_now_epoch_s: u64,
     /// A deferred snapshot write landed and hasn't been flushed yet — the
@@ -478,26 +340,12 @@ pub(crate) struct PluginRuntime {
     /// why). Set in `project`, consumed by `timer`'s flush — and cleared by
     /// any interleaving immediate persist, which supersedes it.
     snapshot_dirty: bool,
-    /// Epoch of the last `Effect::PersistPresence` emitted — content edge or
-    /// liveness heartbeat, both decided (and stamped) at `project`'s single
-    /// decision block, whose level trigger ([`PRESENCE_HEARTBEAT_S`])
-    /// measures from here. Records intent-to-write, not a confirmed write
-    /// (see that block's comment). `0` = never written, which correctly
-    /// reads as "long overdue" the moment a name is known.
-    last_presence_write_epoch_s: u64,
-    /// The tick of the last peer-presence directory scan (`None` = never) —
-    /// the Fast decimation gate in [`timer`](Self::timer) measures from
-    /// here, so a fresh instance's first Fast fire always scans. Stamped by
-    /// Slow scans too, so a Fast fire landing right after one waits out the
-    /// interval rather than re-reading a roster graded seconds ago.
-    last_presence_scan: Option<u64>,
-    /// The `radar.generation()` the own-`Presence` in `last_presence` was
-    /// derived at. Presence counts are a pure function of radar state, so an
-    /// event that didn't advance the generation can skip the whole derive —
-    /// under interpreted wasm that derive (a full `rows()` pass) was the bulk
-    /// of `project`'s per-event cost. `None` forces a recompute (start-up, or
-    /// a session-name change, which alters the presence *content* without
-    /// touching radar state).
+    /// The `radar.generation()` the own badge counts were derived at. They
+    /// are a pure function of radar state, so an event that didn't advance
+    /// the generation can skip the whole derive — under interpreted wasm that
+    /// derive (a full `rows()` pass) was the bulk of `project`'s per-event
+    /// cost. `None` forces a recompute (start-up, or a session-name change,
+    /// which alters the counts' identity without touching radar state).
     presence_gen: Option<u64>,
     /// Everything content-derived the last actual `render()` drew: rows,
     /// ledger lines, badge, theme, shown mode. Stamped by `render`, consulted by
@@ -522,11 +370,7 @@ pub(crate) struct PluginRuntime {
     /// client's *active* tab only, so receiving one proves this instance
     /// visible and clears the flag even if a `Visible(true)` was lost — a
     /// wrongly-hidden rail would be a stale screen, so the bias is toward
-    /// visible. The same events (a reveal, a manifest) are when a rail claims
-    /// the presence-writer token (`Effect::ClaimPresenceWriter`, once the
-    /// session name is known): a hidden rail's topology is frozen, so it
-    /// never claims, but it keeps a token it already holds — after a detach
-    /// the last-active rail goes on publishing.
+    /// visible.
     hidden: bool,
     /// The tab position the latest manifest located this plugin's own pane
     /// in (`None` until one has). Refreshed by `own_plugin_tab_changed` on
@@ -563,53 +407,7 @@ type RenderKey = (
     Option<crate::mode::Mode>,
 );
 
-/// Word-at-a-time multiply-rotate hasher (the rustc "Fx" scheme) for
-/// `own_presence_fingerprint`. SipHash's rounds are the dominant cost of the
-/// fingerprint under the wasm interpreter; this is an equality fingerprint
-/// over trusted, locally derived strings, so DoS resistance buys nothing.
-#[derive(Default)]
-struct FxHasher(u64);
-
-impl FxHasher {
-    const K: u64 = 0x517c_c1b7_2722_0a95;
-    fn add(&mut self, word: u64) {
-        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(Self::K);
-    }
-}
-
-impl std::hash::Hasher for FxHasher {
-    fn write(&mut self, bytes: &[u8]) {
-        // Length first, so zero-padded tails and chunk boundaries can't alias.
-        self.add(bytes.len() as u64);
-        let (chunks, remainder) = bytes.as_chunks::<8>();
-        for c in chunks {
-            self.add(u64::from_le_bytes(*c));
-        }
-        let mut tail = 0u64;
-        for (i, b) in remainder.iter().enumerate() {
-            tail |= u64::from(*b) << (8 * i);
-        }
-        self.add(tail);
-    }
-    fn write_u8(&mut self, n: u8) {
-        self.add(u64::from(n));
-    }
-    fn write_u32(&mut self, n: u32) {
-        self.add(u64::from(n));
-    }
-    fn write_u64(&mut self, n: u64) {
-        self.add(n);
-    }
-    fn write_usize(&mut self, n: usize) {
-        self.add(n as u64);
-    }
-    fn finish(&self) -> u64 {
-        self.0
-    }
-}
-
-/// The ONE derivation of presence's counts, shared by `own_presence` and its
-/// fingerprint so they cannot disagree. Presence is deliberately pane-level
+/// The ONE derivation of the own badge row's counts. They are deliberately pane-level
 /// while the rail itself remains tab-rolled-up. `rows()` is already
 /// constrained by the current pane topology, so a pre-topology payload or
 /// stale store id cannot inflate cross-session counts; command observations
@@ -637,30 +435,6 @@ fn presence_counts(rows: &[TabRow]) -> (usize, usize, Option<usize>) {
     (running, attention, attention_tab_position)
 }
 
-/// The panes a tab publishes in presence: tracked ones only (shells and
-/// Interactive panes are noise), status-origin ahead of commands so agents
-/// are never truncated behind a tab full of builds, capped per tab. Shared by
-/// `own_presence` and its fingerprint so the two cannot drift.
-fn presence_panes(row: &TabRow) -> impl Iterator<Item = &crate::rollup::PaneDisplay> {
-    let tracked = || row.display.panes.iter().filter(|p| p.status().is_some());
-    tracked()
-        .filter(|p| p.is_status_origin())
-        .chain(tracked().filter(|p| !p.is_status_origin()))
-        .take(MAX_PANES_PER_TAB)
-}
-
-/// Agents: the sticky task (falls back to the kind). Commands: the command
-/// line — stable for the command's life, unlike an agent's per-tool `msg`.
-fn presence_label(pane: &crate::rollup::PaneDisplay) -> &str {
-    if !pane.is_status_origin() {
-        pane.msg()
-    } else if pane.task().is_empty() {
-        pane.kind().as_source()
-    } else {
-        pane.task()
-    }
-}
-
 impl PluginRuntime {
     pub(crate) fn load(
         &mut self,
@@ -671,11 +445,7 @@ impl PluginRuntime {
         self.config = config;
         self.sessions.set_show_trees(self.config.session_tree);
         // Load's single clock capture, stored eagerly (and reused by
-        // `begin_permission_flow`'s arm below, keeping one "now" per event):
-        // `learn_session_name` — often the very next event in — has no
-        // epoch of its own and replays `last_now_epoch_s`, so without this
-        // seed the first presence write would go out stamped
-        // `updated_epoch_s: 0`.
+        // `begin_permission_flow`'s arm below, keeping one "now" per event).
         self.last_now_epoch_s = crate::clock::now_epoch_s();
         if let Some(raw) = snapshot {
             if let Some(tick) = self.radar.load_snapshot(raw) {
@@ -690,22 +460,7 @@ impl PluginRuntime {
         // Same level-triggered treatment for the remote set: a rehydrated
         // remote_commands extra re-kinds an already-promoted row immediately.
         self.radar.set_remote_commands(&self.config.remote_commands);
-        // No presence-writer claim here: the name is never known yet at load
-        // (it rides the first `ModeUpdate`), and a nameless holder would
-        // withhold every write — `learn_session_name` claims instead.
         self.begin_permission_flow(permission)
-    }
-
-    /// `Effect::ClaimPresenceWriter` for an active-view event, or nothing
-    /// when this instance cannot publish: `project` withholds every presence
-    /// write while `own_session_name` is empty, so a nameless holder (a rail
-    /// loaded in a background tab never receives `ModeUpdate`) would only
-    /// strand the token and drop the named active rail's edges.
-    fn presence_claim(&self, preempt: bool) -> Vec<Effect> {
-        if self.own_session_name.is_empty() {
-            return vec![];
-        }
-        vec![Effect::ClaimPresenceWriter { preempt }]
     }
 
     pub(crate) fn build_rows(&self) -> std::rc::Rc<Vec<TabRow>> {
@@ -761,7 +516,7 @@ impl PluginRuntime {
         if !had_naming_tab && self.radar.has_naming_tab() {
             change.renames = self.radar.recompute_renames(self.config.naming);
         }
-        self.project(self.presence_claim(false), change, crate::clock::now_epoch_s())
+        self.project(vec![], change, crate::clock::now_epoch_s())
     }
 
     pub(crate) fn panes_changed(&mut self, update: PaneUpdate) -> Outcome {
@@ -775,7 +530,7 @@ impl PluginRuntime {
         // entry for our own tab position IS a terminal neighbor. Latch only.
         self.own_tab_saw_terminal |=
             self.own_tab_position.is_some_and(|pos| update.tab_panes.get(&pos).is_some_and(|panes| !panes.is_empty()));
-        let mut effects = self.presence_claim(false); // the active view (see the effect)
+        let mut effects = Vec::new();
         self.sync_selectable(&mut effects);
         let change = self.radar.panes_changed(update, self.tick, now, self.config.naming);
         self.project(effects, change, now)
@@ -787,9 +542,8 @@ impl PluginRuntime {
     /// capture, taken by the caller like every store beneath already does —
     /// lib.rs passes `clock::now_epoch_s()`; the virtual-time harness
     /// (`runtime/tests.rs`'s `FireSim`) passes its own advancing epoch, so
-    /// the wall-clock-keyed gates in here (the presence heartbeat's level
-    /// trigger above all) move in lockstep with simulated fires without any
-    /// clock to mock.
+    /// the wall-clock-keyed gates in here move in lockstep with simulated
+    /// fires without any clock to mock.
     pub(crate) fn timer(&mut self, permission: PermissionProbe, elapsed_s: f64, now_epoch_s: u64) -> Outcome {
         // Retire one in-flight fire; a stale one (see `TimerChain::on_fire`)
         // is swallowed whole. A swallowed fire skips
@@ -841,31 +595,6 @@ impl PluginRuntime {
         // does, or a tab opened in that window would seed a rail missing the
         // change (why every instance, not just the owner: `RadarState::timer`).
         let store_changed = self.radar.timer(self.tick, now);
-        // Cross-session peers: re-read the directory on every Slow fire and
-        // on decimated Fast fires. The Slow fire is an idle rail's ONLY event
-        // source, and this scan is the only thing that ever re-grades a peer
-        // (`Sessions::update_presences` works off the age captured at read
-        // time) — so a rail that never scanned on Slow froze its badge at
-        // the last Fast-era read: killed peers stayed listed, never dimmed,
-        // never reaped, their files never unlinked, until something pinned
-        // the rail Fast again. One scan per minute is also the cheapest
-        // cadence on offer, so the "Slow exists solely to repaint ledger
-        // ages" economy argument never applied. Within Fast, the scan is
-        // decimated to one per `PRESENCE_READ_TICK_INTERVAL` ticks: peers
-        // heartbeat at 60s and dim at 90s, so a once-per-second directory
-        // read per instance (N tabs × N sessions of wasi stat+read) bought
-        // nothing — except mid-cycle (`wants_fast_cadence`), where the Alt+[/]
-        // selection UI wants the freshest roster every tick. Measured from the
-        // LAST scan (`last_presence_scan`), not the absolute tick, so a fresh
-        // instance's very first Fast fire always seeds the badge — it must
-        // not sit blank for up to a full interval on an arbitrary tick phase.
-        let scan_due = is_slow_fire
-            || self.sessions.wants_fast_cadence()
-            || self.last_presence_scan.is_none_or(|at| self.tick.saturating_sub(at) >= PRESENCE_READ_TICK_INTERVAL);
-        if scan_due {
-            self.last_presence_scan = Some(self.tick);
-            effects.push(Effect::ReadPresences);
-        }
         // BEFORE re-arming below, commit an idle cycle selection if one is
         // pending. Committing here — not after `project` re-arms — matters:
         // a commit clears `Sessions::wants_fast_cadence`, and the chain must
@@ -887,8 +616,7 @@ impl PluginRuntime {
             || store_changed
             || self.timer_should_continue()
             // A Slow fire exists to repaint ledger ages — even when nothing
-            // else changed, `format_age` output may have moved — and, since
-            // the peer scan rides it, to re-grade the badge.
+            // else changed, `format_age` output may have moved.
             // Keyed on the fire that actually landed, not `desired_cadence`:
             // the desire can have moved on (in either direction) between the
             // arm and the fire.
@@ -912,7 +640,7 @@ impl PluginRuntime {
     }
 
     /// A frame-only fire: nothing changed but the spinner's frame, so skip
-    /// every per-tick duty (store timers, presence scans, persists)
+    /// every per-tick duty (store timers, persists)
     /// and just re-arm and repaint. The repaint bypasses `project`'s rows-diff
     /// gate by construction — the rows are identical, the frame is not — and
     /// honors the visibility gate (a rail that went hidden mid-frame paints
@@ -932,7 +660,6 @@ impl PluginRuntime {
             // click instead of falling through to row navigation: the user
             // aimed at an action, not at the row behind it.
             return match action {
-                render::HotspotAction::DismissPresence { name } => self.dismiss_stale_session(name),
                 render::HotspotAction::Acknowledge { target } => {
                     Outcome::with_effects(false, self.acknowledge_pending_targets(&target))
                 }
@@ -959,25 +686,14 @@ impl PluginRuntime {
         Outcome::with_effects(false, vec![effect])
     }
 
-    /// Right-click: the rail's acknowledge/dismiss verb (left-click stays
-    /// pure navigation). Resolves the clicked line exactly like `mouse_click`
-    /// (same cached `RenderedRail`, same permission gate), then branches on
-    /// what the target resolved to:
-    ///
-    /// - **A peer-session badge line** (`session: Some(name)`) — dismiss a
-    ///   STALE cross-session entry, the manual complement to the
-    ///   `sessions::DEAD_AFTER_SECS` auto-reap, for a stale-not-yet-dead
-    ///   entry the user already knows is dead. This branch is untouched
-    ///   from before issue #5 and takes precedence: a session target never
-    ///   also carries a `pane_id`, but checking it first keeps the cases
-    ///   visibly exclusive rather than relying on that absence. Everything
-    ///   else about it — fresh peer / own line / no-op — is exactly as
-    ///   documented at `Effect::DismissPresence`.
-    /// - **A pane or tab row** — acknowledge a pending pane: see
-    ///   `acknowledge_pending_targets`. This is issue #5's fix for the
-    ///   completed-turn-ending-in-a-courtesy-question trap: `Pending` has no
-    ///   exit besides another broadcast, so a click that means "I saw it,
-    ///   stop asking" has to BE one.
+    /// Right-click: the rail's acknowledge verb (left-click stays pure
+    /// navigation). Resolves the clicked line exactly like `mouse_click`
+    /// (same cached `RenderedRail`, same permission gate), then acknowledges
+    /// a pending pane or tab row: see `acknowledge_pending_targets`. This is
+    /// issue #5's fix for the completed-turn-ending-in-a-courtesy-question
+    /// trap: `Pending` has no exit besides another broadcast, so a click that
+    /// means "I saw it, stop asking" has to BE one. A peer-session badge line
+    /// (`session: Some(_)`) is not a pane or tab: a no-op.
     pub(crate) fn mouse_right_click(&mut self, line: isize, _col: usize) -> Outcome {
         if !self.permission.granted() {
             return Outcome::none();
@@ -985,23 +701,10 @@ impl PluginRuntime {
         let Some(target) = self.last_rendered.target_at_line(line) else {
             return Outcome::none();
         };
-        // `.clone()`, not a move: a session-line miss falls through to the
-        // pane/tab branch below, which still needs the rest of `target`.
-        if let Some(name) = target.session.clone() {
-            return self.dismiss_stale_session(name);
-        }
-        Outcome::with_effects(false, self.acknowledge_pending_targets(&target))
-    }
-
-    /// Dismiss a peer only while the current badge still says it is stale.
-    /// Both the glyph and legacy right-click paths route here so a heartbeat
-    /// racing either gesture can never hide a healthy session.
-    fn dismiss_stale_session(&mut self, name: String) -> Outcome {
-        if !self.sessions.badge().iter().any(|b| b.name == name && b.stale) {
+        if target.session.is_some() {
             return Outcome::none();
         }
-        let render = self.sessions.dismiss(&name);
-        Outcome::with_effects(render, vec![Effect::DismissPresence { name }])
+        Outcome::with_effects(false, self.acknowledge_pending_targets(&target))
     }
 
     /// The pane-or-tab half of `mouse_right_click`: every pane a click on
@@ -1173,30 +876,21 @@ impl PluginRuntime {
     /// always re-projects, even a repeat of the already-known name:
     /// `ModeUpdate` fires on far more than name changes (any mode/keybind/
     /// pane-group change too), and letting `project`'s own idempotent
-    /// content-compares (`PersistPresence`'s cache, `Sessions::set_own`'s
-    /// badge diff) absorb the repeats is simpler, and no less correct, than
+    /// content-compare (`Sessions::set_own`'s badge diff) absorb the repeats is simpler, and no less correct, than
     /// hand-rolling an equality check here.
     fn learn_session_name(&mut self, name: Option<String>, change: RadarChange) -> Outcome {
         let Some(name) = name else {
             // Nameless: nothing to learn, but a shown mode may still repaint.
             return if change.render { self.project(vec![], change, self.last_now_epoch_s) } else { Outcome::none() };
         };
-        let first_name = self.own_session_name.is_empty() && !name.is_empty();
         if name != self.own_session_name {
-            // The name is presence *content* that no radar mutation tracks —
-            // drop the cached compare so `project` re-derives and re-publishes
+            // The name is the own row's identity, which no radar mutation
+            // tracks — drop the cached generation so `project` re-derives it
             // even though `radar.generation()` hasn't moved.
-            self.last_presence = None;
             self.presence_gen = None;
         }
         self.own_session_name = name;
-        // The moment this rail can publish, it claims the presence-writer
-        // token — `ModeUpdate` reaches the active tab's plugins only, so this
-        // is an active-view event, and a preempting one (it is the first
-        // claim this instance can make). A hidden rail's view is frozen, so
-        // it waits for a reveal or manifest.
-        let claim = if first_name && !self.hidden { self.presence_claim(true) } else { vec![] };
-        self.project(claim, change, self.last_now_epoch_s)
+        self.project(vec![], change, self.last_now_epoch_s)
     }
 
     /// `Event::Visible`: Zellij's word on whether this instance's tab is on
@@ -1209,157 +903,33 @@ impl PluginRuntime {
         if !(was_hidden && visible) {
             return Outcome::none(); // going dark, or already in that state
         }
-        // A reveal is a definitive active-view transition, so it preempts a
-        // young token (e.g. a quick switch back to the tab just left). A
-        // `Visible(true)` without a preceding hide (a rail loaded in a
-        // background tab counts as visible) deliberately does not claim here:
-        // Zellij pairs it with a `TabUpdate`, whose claim covers it.
         let change = RadarChange { render: true, force_render: true, ..RadarChange::default() };
-        self.project(self.presence_claim(true), change, self.last_now_epoch_s)
-    }
-
-    /// A fresh read of every peer session's presence file, each paired with
-    /// its file's mtime age in seconds (`Effect::ReadPresences`'s
-    /// read-back — `session_files::read_peer_presences`'s `age_secs`).
-    /// Renders only when the derived badge actually changed. Names whose
-    /// winning entry aged past `sessions::DEAD_AFTER_SECS` come back
-    /// already reaped from the badge, and each gets an
-    /// `Effect::DismissPresence` here so the on-disk file is unlinked too —
-    /// idempotent across the per-tab instances (every unlink after the
-    /// first finds nothing left matching). Unconditional, own name
-    /// included: a dead corpse can carry this session's name (pid-keyed
-    /// files — see `Sessions::ordered`'s collision note), and reaping it is
-    /// safe because the on-disk delete spares our own live file by *path*
-    /// identity (`SessionFiles::remove_presences_matching`'s own-file
-    /// exclusion), never by name.
-    /// The glue's read-back for `Effect::ClaimPresenceWriter` when the claim
-    /// took the token over: the presence file holds another instance's view
-    /// (possibly a frozen hidden one), so republish this instance's content
-    /// even though it did not move — drop the fingerprint cache and project,
-    /// which emits the content edge.
-    pub(crate) fn presence_writer_acquired(&mut self) -> Outcome {
-        self.last_presence = None;
-        self.presence_gen = None;
-        self.project(vec![], RadarChange::default(), self.last_now_epoch_s)
+        self.project(vec![], change, self.last_now_epoch_s)
     }
 
     /// `GlobalAttentionUpdate`: every other session on this Zellij server,
-    /// already converted to the badge's `Presence` shape. From the first one
-    /// on, peers come from here and presence-file reads no longer feed them.
+    /// already converted to the badge's `Presence` shape.
     pub(crate) fn global_attention_changed(&mut self, peers: Vec<Presence>) -> Outcome {
         self.sessions.set_show_trees(self.config.session_tree);
         let change = RadarChange { render: self.sessions.update_global(peers), ..RadarChange::default() };
         self.project(vec![], change, self.last_now_epoch_s)
     }
 
-    pub(crate) fn presences_changed(&mut self, raw: Vec<(String, u64)>) -> Outcome {
-        self.sessions.set_show_trees(self.config.session_tree);
-        let update = self.sessions.update_presences(raw);
-        let change = RadarChange { render: update.changed, ..RadarChange::default() };
-        let mut out = self.project(vec![], change, self.last_now_epoch_s);
-        for name in update.dead {
-            out.effects.push(Effect::DismissPresence { name });
-        }
-        out
-    }
-
-    /// This session's own `Presence`, derived from the same rows the rail
+    /// The own badge row's counts, derived from the same rows the rail
     /// renders (`radar.rows`) — never a separately-tracked count that could
     /// drift from what's on screen. `attention_tab_position` is the first
     /// (lowest-position) row that `needs_you()`, matching the position
-    /// `Sessions`/`BadgeEntry` expect for a same-repo jump-on-arrival.
-    fn own_presence(&self) -> Presence {
-        let rows = self.radar.rows(self.tick);
-        let (running, attention, attention_tab_position) = presence_counts(&rows);
+    /// `Sessions`/`BadgeEntry` expect for a same-repo jump-on-arrival. Counts
+    /// only (empty `tabs`): the current session's own tree is never rendered.
+    fn own_counts(&self) -> Presence {
+        let (running, attention, attention_tab_position) = presence_counts(&self.radar.rows(self.tick));
         Presence {
-            v: crate::presence::PRESENCE_VERSION,
             session_name: self.own_session_name.clone(),
             running,
             attention,
             attention_tab_position,
-            updated_epoch_s: self.last_now_epoch_s,
-            // Tracked panes only, ALWAYS — `session_tree` is display-only
-            // (peers strip trees on read, `Sessions::set_show_trees`). Shells
-            // and Interactive panes are excluded: noise for `zj-radar state`
-            // and an edge on every pane open/close. Status-origin panes sort
-            // ahead of commands (stable) before the cap, so agents are never
-            // truncated behind a tab full of builds.
-            tabs: rows
-                .iter()
-                .take(MAX_TABS)
-                .map(|row| PresenceTab {
-                    position: row.tab_position(),
-                    name: crate::payload::sanitize(&row.name, MAX_LABEL_CHARS),
-                    panes: presence_panes(row)
-                        .map(|pane| {
-                            let status_origin = pane.is_status_origin();
-                            PresencePane {
-                                pane_id: Some(pane.pane_id()),
-                                origin: Some(if status_origin { "status" } else { "command" }.to_string()),
-                                kind: pane.kind().as_source().to_string(),
-                                status: pane.render_status().as_wire().to_string(),
-                                label: crate::payload::sanitize(presence_label(pane), MAX_LABEL_CHARS),
-                            }
-                        })
-                        .collect(),
-                })
-                .collect(),
+            ..Presence::default()
         }
-    }
-
-    /// Counts-only own presence plus an allocation-free fingerprint of the
-    /// full published content. `project` runs this on every generation move
-    /// under the wasm interpreter, where building the tab tree (a dozen
-    /// `String`s per pane) was the whole cost of an edge that changes
-    /// nothing peers see (a msg-only relabel, a non-owner's status edge).
-    /// The fingerprint hashes the RAW fields of exactly the panes
-    /// `own_presence` would publish, in its order: equal raw input yields
-    /// equal sanitized output, so an unchanged fingerprint can never hide a
-    /// change; the converse (raw differs, sanitized equal) costs at most one
-    /// redundant write. The counts-only value is all `Sessions::set_own`
-    /// needs — the current session's own tree is never rendered.
-    ///
-    /// Every published `PresencePane`/`PresenceTab` field must be hashed
-    /// here; `presence_fingerprint_moves_exactly_when_published_content_does`
-    /// pins it.
-    fn own_presence_fingerprint(&self) -> (Presence, u64) {
-        use std::hash::Hash;
-        let rows = self.radar.rows(self.tick);
-        let mut h = FxHasher::default();
-        let (running, attention, attention_tab_position) = presence_counts(&rows);
-        for (i, r) in rows.iter().enumerate() {
-            if i < MAX_TABS {
-                (r.tab_position(), &r.name).hash(&mut h);
-                for pane in presence_panes(r) {
-                    (pane.pane_id(), pane.is_status_origin(), pane.kind().as_source(), pane.render_status().as_wire())
-                        .hash(&mut h);
-                    presence_label(pane).hash(&mut h);
-                }
-                // Tab boundary, so a pane moving between tabs is an edge.
-                0xffu8.hash(&mut h);
-            }
-        }
-        (running, attention, attention_tab_position).hash(&mut h);
-        let counts = Presence {
-            v: crate::presence::PRESENCE_VERSION,
-            session_name: self.own_session_name.clone(),
-            running,
-            attention,
-            attention_tab_position,
-            updated_epoch_s: self.last_now_epoch_s,
-            tabs: Vec::new(),
-        };
-        (counts, std::hash::Hasher::finish(&h))
-    }
-
-    /// JSON the host actually writes to disk on `Effect::PersistPresence` —
-    /// see `own_presence` for the field derivation. Only the wasm glue
-    /// (lib.rs) calls this in production; on a host build nothing here
-    /// invokes it (that wiring is still `project`'s `own_presence`
-    /// comparison), so it would otherwise read as dead code.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    pub(crate) fn presence_json(&self) -> String {
-        self.own_presence().to_json()
     }
 
     /// True while [`timer`](Self::timer) still consumes a fresh
@@ -1608,12 +1178,9 @@ impl PluginRuntime {
     }
 
     /// Spec §10 cadence function. Fast (1s) while anything tick-windowed is
-    /// live; Slow (60s) while ledger ages are still changing — or, once
-    /// `learn_session_name` has landed, forever. None — the battery
-    /// property's full-disarm state — therefore survives in exactly two
-    /// shapes: *pre-name* (no `ModeUpdate` has delivered a session name yet,
-    /// so there is no presence file whose liveness needs a heartbeat) and
-    /// *denied*. A *denied* rail disarms unconditionally: without
+    /// live; Slow (60s) while ledger ages are still changing; None — the
+    /// battery property's full-disarm state — otherwise. A *denied* rail
+    /// disarms unconditionally: without
     /// `ReadApplicationState` none of the events that clear domain work ever
     /// arrive, so a stale `Running` loaded from a snapshot would otherwise
     /// pin Fast ticks and repaints forever behind a static needs-permission
@@ -1622,8 +1189,6 @@ impl PluginRuntime {
     /// take epochs as arguments; this extends that discipline up through the
     /// runtime so one event never sees two different "now"s).
     fn desired_cadence(&self, now_epoch_s: u64) -> Option<Cadence> {
-        // The early return outranks the name check below by construction: a
-        // denied rail must fully disarm even though its name is known.
         if self.permission.denied() {
             return None;
         }
@@ -1636,29 +1201,10 @@ impl PluginRuntime {
             || self.sessions.wants_fast_cadence()
         {
             Some(self.fast_cadence())
-        } else if self.radar.ledger_any_unsaturated(now_epoch_s)
-            || self.radar.pending_wait_unsaturated(now_epoch_s)
-            // A known name means this session has published a presence file
-            // whose mtime is the signal peers read to tell fresh from stale
-            // (`sessions::STALE_AFTER_SECS`), and the level-triggered
-            // heartbeat (`PRESENCE_HEARTBEAT_S` in `project`) is the only
-            // writer keeping it fresh between content edges — with the timer
-            // as the only event source an idle session can count on to keep
-            // funneling passes through it. Fully disarming
-            // would freeze that mtime and get a still-alive idle session
-            // dimmed to stale on every peer's badge 90s later — and REAPED
-            // outright at `sessions::DEAD_AFTER_SECS`, since peers now
-            // trust an old mtime as death precisely because this heartbeat
-            // guarantees a live session never lets one age — so the chain
-            // must stay (at least) Slow-armed for as long as the name is
-            // known.
-            || !self.own_session_name.is_empty()
-        {
+        } else if self.radar.ledger_any_unsaturated(now_epoch_s) || self.radar.pending_wait_unsaturated(now_epoch_s) {
             // Slow ticks advance minute-granular ages (ledger rows' relative
             // ages, pending rows' `· Nm` wait tags — both freeze at 1h+
-            // saturation, which, before the name is learned, is what lets the
-            // timer disarm fully) and carry the peer-presence scan, an idle
-            // rail's only way to grade a peer stale or dead.
+            // saturation, which is what lets the timer disarm fully).
             Some(Cadence::Slow)
         } else {
             None
@@ -1713,7 +1259,7 @@ impl PluginRuntime {
     /// The sole projection from a domain [`RadarChange`] to host [`Effect`]s.
     /// `fx` is a caller-supplied seed so the `timer` handler's permission
     /// effects come first, without a post-hoc splice. Canonical order: renames
-    /// → snapshot → presence → cwd → `SetTimeout` (pinned by
+    /// → snapshot → cwd → `SetTimeout` (pinned by
     /// `project_emits_effects_in_canonical_order`). This is the only
     /// *domain-change* path that arms the timer
     /// (the permission flow arms it separately in `begin_permission_flow`).
@@ -1721,29 +1267,17 @@ impl PluginRuntime {
     /// there's anything to arm for, so calling it unconditionally here is a
     /// no-op wherever a handler has no pending work to arm for.
     ///
-    /// Also the single point deciding `Effect::PersistPresence` — content
-    /// edge OR overdue liveness heartbeat, one block, see the inline comment
-    /// — and the single point that stamps `last_presence_write_epoch_s` for
-    /// whichever reason won. Every domain-change entry point funnels through
-    /// here with its `now_epoch_s`, which this stores (`last_now_epoch_s`)
-    /// for the call paths that have no epoch of their own — `presence_json`,
-    /// `learn_session_name`, `presences_changed`. The freshly computed
-    /// own-`Presence` is content-compared against the last one published,
-    /// EXCLUDING `updated_epoch_s` (zeroed on both sides before the
-    /// compare/cache) — see `last_presence`'s doc for why a raw compare
-    /// would defeat the edge gate on Fast cadence. Withheld while
-    /// `own_session_name` is empty — a presence file with no name is useless
-    /// to peers — so it stays quiet until `learn_session_name` (also
-    /// routed through here) learns it.
+    /// Every domain-change entry point funnels through here with its
+    /// `now_epoch_s`, which this stores (`last_now_epoch_s`) for the call
+    /// paths that have no epoch of their own — `learn_session_name`,
+    /// `global_attention_changed`.
     ///
-    /// Same gate also feeds `Sessions::set_own` — the single path for own
-    /// counts into the OWN badge row (nothing else calls it).
-    /// Unlike `PersistPresence`, this is NOT
-    /// edge-gated by `last_presence`'s cache — `Sessions::set_own` already
-    /// does its own badge-derived content-compare and reports whether the
-    /// badge actually changed, so calling it every `project` pass (once the
-    /// name is known) is correct AND is what closes the gap where the own
-    /// row never updated as running/attention moved.
+    /// Also feeds `Sessions::set_own` — the single path for own counts into
+    /// the OWN badge row (nothing else calls it), once the name is known.
+    /// `Sessions::set_own` does its own badge-derived content-compare and
+    /// reports whether the badge actually changed, so calling it every pass
+    /// the radar generation moved is what keeps the own row live as
+    /// running/attention move.
     fn project(&mut self, mut fx: Vec<Effect>, c: RadarChange, now_epoch_s: u64) -> Outcome {
         self.last_now_epoch_s = now_epoch_s;
         fx.extend(self.effects_from_renames(c.renames));
@@ -1770,56 +1304,14 @@ impl PluginRuntime {
             }
         }
         let mut render = c.render;
-        // Own presence is a pure function of radar state (plus the session
-        // name, handled in `learn_session_name`), so re-derive it only when
-        // the radar generation moved — the derive is a full `rows()` pass,
-        // which every broadcast in an 8-tab session used to pay twice.
-        let mut content_moved = false;
+        // The own badge counts are a pure function of radar state (plus the
+        // session name, handled in `learn_session_name`), so re-derive them
+        // only when the radar generation moved — the derive is a full
+        // `rows()` pass, which every broadcast in an 8-tab session used to
+        // pay twice.
         if !self.own_session_name.is_empty() && self.presence_gen != Some(self.radar.generation()) {
             self.presence_gen = Some(self.radar.generation());
-            let (counts, fingerprint) = self.own_presence_fingerprint();
-            render |= self.sessions.set_own(counts);
-            if self.last_presence != Some(fingerprint) {
-                self.last_presence = Some(fingerprint);
-                content_moved = true;
-            }
-        }
-        // The ONE decision point for publishing presence: write on a real
-        // content edge (`content_moved`, the compare-and-cache above —
-        // `PersistSnapshot`'s "write on edges only" rule), OR heartbeat
-        // whenever the last write has aged past `PRESENCE_HEARTBEAT_S` —
-        // the liveness signal that keeps the file's mtime (the
-        // fresh/stale/dead grade peers read — `sessions::STALE_AFTER_SECS`/
-        // `DEAD_AFTER_SECS`) moving between content edges. Level-triggered
-        // on wall-clock age and entry-point-blind by design: a session
-        // pinned at Fast by a long-Running agent sees no Slow fire, and one
-        // whose content stops moving sees no edge, but every path funnels
-        // through here, so whichever event lands first past the threshold
-        // re-publishes. Deliberately OUTSIDE the generation gate above — the
-        // heartbeat must fire on unchanged content, the exact case the gate
-        // skips — and NOT gated on `hidden`: a detached session is alive,
-        // and a frozen mtime would get it dimmed and then reaped from every
-        // peer's badge. The heartbeat is instead deduplicated host-side by
-        // mtime (`unless_fresher_than`), since all N instances run this
-        // same clock against one pid-keyed file. The stamp records
-        // intent-to-write, not a confirmed write: lib.rs's persist is
-        // best-effort, and a failed one self-heals within the 90s staleness
-        // window (the next overdue pass re-publishes). Every instance whose
-        // content moved emits the edge; the host writes it only for the
-        // holder of the presence-writer token (`Effect::ClaimPresenceWriter`)
-        // — the most recently active rail, whose topology is the freshest. A
-        // non-holder's content edge or heartbeat is only a rescue
-        // (`PRESENCE_RESCUE_AFTER`), which is why stamping here is right for
-        // every instance: either kind is one write opportunity under that
-        // instance's role.
-        if !self.own_session_name.is_empty() {
-            if content_moved {
-                fx.push(Effect::PersistPresence { unless_fresher_than: None });
-                self.last_presence_write_epoch_s = now_epoch_s;
-            } else if now_epoch_s.saturating_sub(self.last_presence_write_epoch_s) >= PRESENCE_HEARTBEAT_S {
-                fx.push(Effect::PersistPresence { unless_fresher_than: Some(PRESENCE_HEARTBEAT_SKIP) });
-                self.last_presence_write_epoch_s = now_epoch_s;
-            }
+            render |= self.sessions.set_own(self.own_counts());
         }
         // Rows-diff render gate: Zellij delivers every broadcast and every
         // `CommandChanged` to every tab's instance, and most deliveries

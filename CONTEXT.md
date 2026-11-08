@@ -20,7 +20,7 @@ The exact grid is [`docs/rail-reference.md`](docs/rail-reference.md).
 The rail seam's output: `ansi` paired with a same-height target map and a
 same-height hotspot map. `target_at_line(line)` resolves a physical line to a
 `RailTarget`; `hotspot_at(line, col)` resolves a glyph cell to a
-`HotspotAction` (`Acknowledge` for `✓`, `DismissPresence` for `✕`). The runtime
+`HotspotAction` (`Acknowledge` for `✓`). The runtime
 caches the last `RenderedRail` and scores mouse clicks against it, so the rail
 the user sees is the rail clicks resolve on.
 
@@ -126,7 +126,7 @@ How often the one-shot timer re-fires (`PluginRuntime::desired_cadence`):
 Fast (1 Hz) while there is tick-windowed work, subdivided into spinner frames
 (`spinner_fps`) while a visible rail has full-speed work spinning — frames
 repaint, but the tick still runs once a second — Slow (once a minute) while only
-minute-granular ages change or a presence heartbeat is owed, and disarmed
+minute-granular ages change, and disarmed
 otherwise. Service rows, remote rows, and interactive rows never pin Fast.
 Trigger lists: design.md → *Timer and cadence*.
 
@@ -167,16 +167,12 @@ plugin pane, resolved to a stable `TabId`. The once-per-pane cwd bootstrap
 
 ## Cross-session presence
 
-How one session's rail learns another's counts and tab tree, and how
-`zj-radar state` reads the same files, without asking Zellij. Each
-plugin writes `zj-radar.presence.<zellij_pid>.json` into the shared `/cache`
-root (`session_files.rs`); peers read the directory on every Slow tick and on
-decimated Fast ticks, and feed `Sessions` (`sessions.rs`), pure state that
-derives the badge on demand.
-Liveness is the file's mtime, graded fresh (≤ 90 s) → stale (dimmed, skipped
-by cycling) → dead (≥ 300 s, reaped and unlinked). Badge order and cycling
-order come from one `ordered()`. The `✕` glyph is the manual dismiss. Detail:
-design.md → *Cross-session badge*.
+How one session's rail learns another's counts and tab tree: from Zellij's
+`GlobalAttentionUpdate`, converted by `attention::PeerSession::presence` into
+the `Presence` data carrier and fed to `Sessions` (`sessions.rs`), pure state
+that derives the badge on demand. Zellij owns peer liveness; this session's own
+row comes from its rail rows. Badge order and cycling order come from one
+`ordered()`. Detail: design.md → *Cross-session badge*.
 
 ## Setup analysis
 

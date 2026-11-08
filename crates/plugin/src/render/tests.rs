@@ -3860,7 +3860,7 @@ fn running_row_eases_to_slow_blink_after_long_runner_threshold() {
 /// Local test helper: field order matches `BadgeEntry`'s declaration EXCEPT
 /// `is_current` moves up next to `name` — the shape most test call sites
 /// read naturally ("work, current, 3 running, 0 attention, no attention tab,
-/// not selected, not stale").
+/// not selected").
 fn badge_entry(
     name: &str,
     is_current: bool,
@@ -3868,19 +3868,6 @@ fn badge_entry(
     attention: usize,
     attention_tab_position: Option<usize>,
     selected: bool,
-) -> BadgeEntry {
-    stale_badge_entry(name, is_current, running, attention, attention_tab_position, selected, false)
-}
-/// As `badge_entry`, with an explicit trailing `stale` flag — for the
-/// dimmed/clickable/skip-cycle pins.
-fn stale_badge_entry(
-    name: &str,
-    is_current: bool,
-    running: usize,
-    attention: usize,
-    attention_tab_position: Option<usize>,
-    selected: bool,
-    stale: bool,
 ) -> BadgeEntry {
     BadgeEntry {
         name: name.to_string(),
@@ -3890,7 +3877,6 @@ fn stale_badge_entry(
         attention_pane_id: None,
         is_current,
         selected,
-        stale,
         tabs: vec![],
     }
 }
@@ -4141,82 +4127,6 @@ fn badge_encodes_missing_attention_as_a_sentinel_not_tab_zero() {
     let lines = render_session_badge(&with_attention, &ro(24, 0));
     let t = lines[1].target.clone().expect("peer line is clickable");
     assert_eq!(t.session_tab_position(), Some(0), "attention genuinely at tab 0 must still resolve to Some(0)");
-}
-
-// -- Pinning: stale badge entries -------------------------------------------
-// A stale-but-not-yet-dead session dims on the badge rather than vanishing
-// (`Sessions`' fresh → stale → dead ladder; the reap itself lives in
-// sessions.rs — a dead entry never reaches this renderer). The renderer's
-// job is narrow: paint a stale entry in a receded color and keep its click
-// target — `Sessions::cycle` (sessions.rs's own tests) is what actually
-// keeps Alt+[/] from landing on it.
-
-#[test]
-fn stale_badge_entry_renders_dimmed_but_stays_clickable() {
-    let opts = ro(24, 0);
-    let idle_color = tc_fg(opts.theme.idle_text);
-    let stale_color = tc_fg(crate::theme::blend(opts.theme.idle_text, opts.theme.rail_bg, 0.5));
-
-    let entries =
-        vec![badge_entry("work", true, 0, 0, None, false), stale_badge_entry("alpha", false, 0, 0, None, false, true)];
-    let lines = render_session_badge(&entries, &opts);
-
-    // Still fully clickable — a click on a stale entry is a deliberate act;
-    // `entry.stale` only ever affects color, never the target.
-    let t = lines[1].target.clone().expect("a stale peer line must still be clickable");
-    assert_eq!(t.session.as_deref(), Some("alpha"));
-
-    // Its label paints in the receded stale color, not the ordinary muted
-    // idle_text every fresh line uses.
-    assert!(
-        lines[1].text.contains(&format!("{stale_color}alpha")),
-        "stale label must render in the receded stale color, got {:?}",
-        lines[1].text
-    );
-    assert!(
-        !lines[1].text.contains(&format!("{idle_color}alpha")),
-        "stale label must not render in the plain idle color, got {:?}",
-        lines[1].text
-    );
-}
-
-#[test]
-fn stale_entry_undims_once_superseded_by_a_fresh_entry() {
-    // The recreation case: the exact same name, now reported fresh, must
-    // render in the ordinary idle color again — nothing about a name alone
-    // pins a line to stale forever.
-    let opts = ro(24, 0);
-    let idle_color = tc_fg(opts.theme.idle_text);
-    let stale_color = tc_fg(crate::theme::blend(opts.theme.idle_text, opts.theme.rail_bg, 0.5));
-
-    let stale_entries =
-        vec![badge_entry("work", true, 0, 0, None, false), stale_badge_entry("alpha", false, 0, 0, None, false, true)];
-    let stale_lines = render_session_badge(&stale_entries, &opts);
-    assert!(stale_lines[1].text.contains(&format!("{stale_color}alpha")));
-
-    let fresh_entries = vec![
-        badge_entry("work", true, 0, 0, None, false),
-        badge_entry("alpha", false, 0, 0, None, false), // same name, now fresh
-    ];
-    let fresh_lines = render_session_badge(&fresh_entries, &opts);
-    assert!(
-        fresh_lines[1].text.contains(&format!("{idle_color}alpha")),
-        "a superseding fresh presence must undim the line back to the plain idle color"
-    );
-    assert!(!fresh_lines[1].text.contains(&format!("{stale_color}alpha")));
-}
-
-#[test]
-fn lone_fresh_own_entry_with_only_stale_peers_still_renders() {
-    // The single-session zero-line rule counts `entries.len()`, not fresh
-    // entries — a stale-but-not-yet-dead peer still counts toward the 2+
-    // threshold: it stays visible (dimmed) until the dead reap.
-    let entries =
-        vec![badge_entry("work", true, 0, 0, None, false), stale_badge_entry("alpha", false, 0, 0, None, false, true)];
-    assert!(
-        !render_session_badge(&entries, &ro(24, 0)).is_empty(),
-        "a lone fresh own-entry plus only stale peers must still render the badge"
-    );
 }
 
 // ── show_mode: the Zellij input mode, right-aligned on the tally line ──

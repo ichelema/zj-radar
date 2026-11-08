@@ -82,14 +82,14 @@ classification, `Kind`, the bounded pipe argv; shared by producer and plugin),
 │                                                                        │
 │  session_files.rs: SessionFiles                                        │
 │    per-session filesystem coordination across instances: snapshots,    │
-│    permission marker/lock, root fallback, pruning, presence files      │
+│    permission marker/lock, root fallback, pruning                        │
 │                                                                        │
 │  radar_state.rs / rollup.rs / tab_namer.rs: state + tab model          │
 │    StatusStore + CommandStore (over core's ObservationStore),          │
 │    roll_up(tab), TabNamer                                              │
 │                                                                        │
 │  ledger.rs / sessions.rs / presence.rs: completion ring;               │
-│    cross-session peer state and the presence record (§13)              │
+│    cross-session peer state and its data carrier (§13)                 │
 │                                                                        │
 │  control.rs / config.rs / theme.rs: cmd + config pipes, colors         │
 │  permission.rs / clock.rs: grant state machine, timer-chain            │
@@ -103,8 +103,7 @@ classification, `Kind`, the bounded pipe argv; shared by producer and plugin),
         │ Effects: SwitchTab, ShowPane, RenameTab, RequestPermission,
         │ SetTimeout(Fast|Slow), SetSelectable, PersistSnapshot,
         │ PersistPermissionMarker, HeartbeatPermissionLock, ResolveCwd,
-        │ PersistPresence, ClaimPresenceWriter, ReadPresences,
-        │ DismissPresence, SwitchSession, BroadcastStatus, CloseSelf
+        │ SwitchSession, BroadcastStatus, CloseSelf
         ▼
 ```
 
@@ -461,12 +460,10 @@ speeds or not at all (`PluginRuntime::desired_cadence`):
   elapsed, so a Fast↔Frame switch waits for the in-flight fire. Hidden rails,
   eased long-runners, and `spinner_fps 1` stay on plain Fast.
 - **Slow (once a minute)** once none of that holds but a minute-granular age
-  is still changing (an unsaturated ledger entry or pending wait tag), and
-  unconditionally while `own_session_name` is known, because the Slow tick's
-  heartbeat is what keeps the presence file's mtime fresh for peers (§13).
-- **Disarmed** in two shapes: pre-name (no `ModeUpdate` has delivered a
-  session name and every age has saturated) and denied (a permission-denied
-  rail disarms unconditionally, since no clearing event will ever arrive).
+  is still changing (an unsaturated ledger entry or pending wait tag).
+- **Disarmed** in two shapes: idle (every age has saturated) and denied (a
+  permission-denied rail disarms unconditionally, since no clearing event will
+  ever arrive).
 
 Service, remote, and interactive rows never pin Fast. A dev server, an ssh
 session, or an editor left open overnight costs zero ticks. A backgrounded `done`/`error`/`pending` row
@@ -513,7 +510,7 @@ keep repaints proportional to change:
 Underneath all four: `RadarState::generation` (bumped by every mutator of
 anything `rows()` reads) and the `rows()` memo keyed on `(generation, the
 tabs mid-flash)` — the tick reaches a row only through the ping flash.
-One roll-up per event, shared by the presence derive, the gate compare, and
+One roll-up per event, shared by the own-counts derive, the gate compare, and
 the render. A missed `touch()` is a stale-rail bug, not a slow one.
 `tools/wasm-fuel` measures every layer in the interpreter's own unit
 (`CONTRIBUTING.md` → *Measuring plugin cost*).
@@ -603,59 +600,20 @@ the rail shows the onboarding face.
 
 ## 13. Cross-session badge
 
-One session's rail shows counts for every other zj-radar session on the host,
-with click or cycle to switch, without ever calling Zellij's session list.
-Pure state in `sessions.rs`, file IO in `session_files.rs`, wiring in
-`runtime.rs`, render in `render.rs::render_session_badge` (headings) and
-`render_peer_children` (the `session_tree` tree).
-
-**Presence files.** Each plugin writes `zj-radar.presence.<zellij_pid>.json`
-(`v`, `session_name`, `running`, `attention`, `attention_tab_position`,
-`updated_epoch_s`, `tabs`) into the shared `/cache` root, temp-file plus atomic
-rename; the wire format is in [`producers.md`](producers.md#presence-file-and-state---json),
-the types in `crates/core/src/presence.rs`. Writes are content-edge-gated and
-withheld while `own_session_name` is empty. The gate compares a fingerprint
-over the published fields (`own_presence_fingerprint`, pinned by a lockstep
-test); the counts come from one `presence_counts` helper. `running` and
-`attention` count live status-origin panes only; command activity is excluded.
-The local rail's rows, header badge, and footer stay tab-level summaries.
-
-**Tabs are always published.** `tabs` is `[{position, name, panes: [{pane_id,
-origin, kind, status, label}]}]` over tracked panes (agents and observed
-commands), status-origin first so the 16-pane cap drops commands before
-agents. Caps are 64 tabs, 16 panes per tab, 96-char labels. `Presence::parse`
-truncates over-cap content and rejects the whole file if any field fails to
-survive `payload::sanitize` unchanged. `zj-radar state` is why the tree is
-unconditional: it is a public read surface, and `session_tree` is display-only.
-
-**Single writer: the presence-writer token.** Content must come from the rail
-with the freshest topology, and that is the most recently active one: Zellij
-sends `TabUpdate`/`PaneUpdate` only to the active tab's plugins, so a hidden
-rail's tab/pane view is frozen (a pane opened elsewhere after the user left is
-invisible to it). The token `zj-radar.<pid>.presence-writer` sits next to the
-presence file in the shared root and holds the writer's plugin id. A rail
-claims it (`Effect::ClaimPresenceWriter`) whenever it is the active view and
-knows its session name: when the name is first learned (`ModeUpdate`, which
-also reaches only the active tab), on `Visible(true)`, and on every manifest.
-A nameless rail never claims: presence writes are withheld without a name, so
-a rail loaded in a background tab (no `ModeUpdate` yet) holding the token
-would drop the active rail's edges. A claim of a token already held is one
-small read; a takeover rewrites the token and republishes the new holder's
-view (`PluginRuntime::presence_writer_acquired`), since the file holds another
-rail's, and the glue skips the batch's own content write after it. Every rail
-whose content fingerprint moved emits the content edge, and
-`SessionFiles::persist_presence` writes it only for the holder (one token read
-per edge). After a detach the last-active rail keeps the token, so a detached
-session keeps publishing status edges against its at-detach topology. Two
-clients on different tabs are both fresh, so either may hold it: a manifest
-claim leaves a foreign token younger than 5 s alone
-(`PRESENCE_WRITER_TAKEOVER_FLOOR`), which stops them trading it on every
-manifest, while a reveal or first naming preempts. The token is pid-scoped
-like the snapshot, so the snapshot sweep owns it and no presence read path
-ever sees it; because a stable holder never rewrites it, the sweep ages it by
-its session's presence file (heartbeated), not its own mtime. The cost is
-about +230k wasm fuel per real status edge on the writing rail (the tree
-serialize); non-holders pay the fingerprint and one token read.
+One session's rail shows counts for every other session on the Zellij server,
+with click or cycle to switch. Peers are pushed by Zellij 0.46's
+`GlobalAttentionUpdate`: `attention::PeerSession::presence` converts each peer
+to the `Presence` struct (`presence.rs`, from core), and
+`PluginRuntime::global_attention_changed` hands the set to
+`Sessions::update_global`. Zellij owns liveness: a session it reports is live,
+one it stops reporting is gone, so there is no file IO, no heartbeat, and no
+staleness grading. This session's own row is `Sessions::set_own`, fed with
+counts derived from the rail rows (`presence_counts`: live status-origin panes
+only; command activity is excluded) whenever the radar generation moves. The
+local rail's rows, header badge, and footer stay tab-level summaries. Pure
+state in `sessions.rs`, wiring in `runtime.rs`, render in
+`render.rs::render_session_badge` (headings) and `render_peer_children` (the
+`session_tree` tree).
 
 **Session tree (`session_tree`, display-only).** The option only decides
 whether this rail draws peers' trees. Off, `Sessions::set_show_trees` drops
@@ -667,71 +625,35 @@ they get only the height left after the planned cards and the bottom region
 (footer, plus the ledger when present), so a large peer can never fold a local
 tab or push the ledger off.
 
-**Liveness is the mtime, graded fresh → stale → dead.** A live session
-rewrites its file about every 60 s (`PRESENCE_HEARTBEAT_S`, a level trigger
-in `project` that bypasses the content gate and, unlike the snapshot, the
-visibility gate: a detached session is alive). Every tab's instance runs that
-clock against the one pid-keyed file, so the heartbeat is a
-`PersistPresence` with an `unless_fresher_than` window the host honors by
-stat. The token holder leaves a file younger than a quarter of the interval
-alone, which keeps its worst-case write gap (one period plus one window, 75 s)
-under the 90 s stale threshold; its content edges write unconditionally.
-Followers do heartbeat, but only as a rescue: a non-holder's heartbeat or
-content edge writes only when the file is older than `PRESENCE_RESCUE_AFTER`
-(75 s, the holder's worst-case gap), so a stale hidden view never overwrites a
-live holder, yet a session whose holder vanished (instance died, or a closed
-tab's rail with no tab activated since) still refreshes within 135 s: it may
-dim briefly but is never reaped. Peers read the directory on every
-Slow (60 s) tick, and on every fifth Fast tick except mid-cycle; the Slow read
-is what lets an idle rail grade a peer at all, since ages are captured at read
-time. `Sessions::update_presences` grades each file's age: fresh (≤ 90 s),
-stale (90–300 s: dimmed, unreachable
-by cycling since switching onto a dead session would have Zellij resurrect it
-as an empty zombie), dead (≥ 300 s, five missed heartbeats: reaped and the
-file unlinked via `Effect::DismissPresence`). Dimming stays twitchy because it
-is reversible; the reap waits for overwhelming evidence because it deletes a
-file. A false reap after a machine-sleep wake is harmless: the live session's
-next heartbeat republishes. The `✕` glyph is the manual dismiss for a
-stale-not-yet-dead entry. A 6 h sweep at `load()` deletes unparseable debris
-the reap cannot name.
-
 **Why not `SessionUpdate`.** E2E against Zellij 0.44.3 showed `SessionUpdate`
 only delivers peers after some plugin has called the blocking
-`get_session_list()`, which nothing here does and which would violate §1.
-Presence is peer-published and liveness is mtime-based; there is no roster to
-keep in sync. The session's own name arrives push-style via
-`Event::ModeUpdate`, and may legitimately be `None` before Zellij assigns one.
+`get_session_list()`, which nothing here does and which would violate §1. The
+session's own name arrives push-style via `Event::ModeUpdate`, and may
+legitimately be `None` before Zellij assigns one.
 
 **Badge.** `Sessions::badge()` is re-derived on every call. It renders zero
 lines while only the current session is known; from two entries on, one line
-per session in the order shared with cycling: current first, then fresh peers
-with attention by name, then the rest of the fresh peers, then stale peers (a
-stale attention count is not actionable, so staleness outranks attention).
-Each line shows the name plus running and attention counts when nonzero. The
-current line carries an accent `•` and no click target. A pending cycle
-selection renders bold; a stale entry renders dimmer with a `✕` hotspot.
+per session in the order shared with cycling: current first, then peers with
+attention by name, then the rest by name. Each line shows the name plus
+running and attention counts when nonzero. The current line carries an accent
+`•` and no click target. A pending cycle selection renders bold.
 
 **Hotspots.** The renderer attaches glyph metadata to the same `Line` records
-that derive ANSI and targets, so they cannot desynchronize. `✕` on a stale
-badge line; `✓` on a tab header or pane line with an unacknowledged
-status-origin Pending. Only the glyph's own cells trigger. Right-click keeps
-the same whole-row actions for parity but is blocked upstream
-([zellij#5350](https://github.com/zellij-org/zellij/issues/5350)).
+that derive ANSI and targets, so they cannot desynchronize. `✓` on a tab
+header or pane line with an unacknowledged status-origin Pending. Only the
+glyph's own cells trigger. Right-click keeps the same whole-row actions for
+parity but is blocked upstream ([zellij#5350](https://github.com/zellij-org/zellij/issues/5350)).
 
 **Cycling.** `session-next` / `session-prev` on the `cmd.v1` pipe advance a
-highlight through the shared order, wrapping, with stale peers excluded. A tap
+highlight through the shared order, wrapping. A tap
 only moves the highlight and sets a "tap landed" flag; `Sessions::tick` runs
 on every timer fire while a selection is pending, and a fire whose interval
 saw a tap clears the flag and skips. Only a fire whose whole interval was
 tap-free commits, so the commit lands at least one quiet interval after the
 last tap. The target is re-resolved by session name, never list position, so
-peers joining or leaving mid-cycle cannot retarget it; a selection that went
-stale is dropped. Landing back on the current session cancels. A commit emits
+peers joining or leaving mid-cycle cannot retarget it; a selection whose
+session vanished is dropped. Landing back on the current session cancels. A commit emits
 `Effect::SwitchSession { name, tab_position }`.
-
-**Degradation.** No writable shared root means no presence file, no peer
-reads, and no badge. Everything else is unaffected, the same way persistence
-being unavailable degrades only rehydration.
 
 ## 14. Setup analysis (CLI)
 

@@ -210,22 +210,14 @@ impl State {
 #[cfg(target_arch = "wasm32")]
 impl State {
     fn handle_outcome(&mut self, outcome: runtime::Outcome) -> bool {
-        let render = outcome.render;
-        self.handle_effects(outcome.effects) || render
+        self.handle_effects(outcome.effects);
+        outcome.render
     }
 
-    /// Returns whether any *re-entrant* outcome handled along the way (see
-    /// `Effect::ReadPresences`) wants a repaint. Most effects are
-    /// fire-and-forget host calls with nothing to report; `ResolveCwd`
-    /// deliberately drops its nested render flag (see `resolve_cwd`'s doc
-    /// comment) rather than folding it in here.
-    fn handle_effects(&mut self, effects: Vec<Effect>) -> bool {
-        let mut render = false;
-        // Set when a token takeover's re-entrant republish just wrote this
-        // instance's presence: a later `PersistPresence` in the same batch
-        // would serialize and write the identical tree again (the JSON is
-        // derived lazily from the same runtime state), so it is skipped.
-        let mut presence_republished = false;
+    /// Effects are fire-and-forget host calls with nothing to report;
+    /// `ResolveCwd` deliberately drops its nested render flag (see
+    /// `resolve_cwd`'s doc comment).
+    fn handle_effects(&mut self, effects: Vec<Effect>) {
         for effect in effects {
             match effect {
                 // Keep in lockstep with REQUIRED_PLUGIN_PERMISSIONS in
@@ -259,43 +251,10 @@ impl State {
                     run_command(&["git", "-C", &cwd, "remote", "get-url", "origin"], context);
                 }
                 Effect::CloseSelf => close_self(),
-                Effect::PersistPresence { .. } if presence_republished => {}
-                Effect::PersistPresence { unless_fresher_than } => {
-                    self.session_files.persist_presence(unless_fresher_than, runtime::PRESENCE_RESCUE_AFTER, || {
-                        self.runtime.presence_json()
-                    })
-                }
-                Effect::ClaimPresenceWriter { preempt } => {
-                    // A takeover means the file holds another instance's
-                    // (possibly frozen) view: republish ours, re-entrantly.
-                    // The runtime emits the claim ahead of `project`'s own
-                    // presence effect, so the flag covers the outer write.
-                    if self.session_files.claim_presence_writer(preempt) {
-                        let outcome = self.runtime.presence_writer_acquired();
-                        render |= self.handle_outcome(outcome);
-                        presence_republished = true;
-                    }
-                }
-                Effect::ReadPresences => {
-                    let raw =
-                        self.session_files.read_peer_presences().into_iter().map(|p| (p.json, p.age_secs)).collect();
-                    let outcome = self.runtime.presences_changed(raw);
-                    render |= self.handle_outcome(outcome);
-                }
                 Effect::SwitchSession { name, tab_position, pane_id } => match (tab_position, pane_id) {
                     (None, None) => switch_session(Some(&name)),
                     _ => switch_session_with_focus(&name, tab_position, pane_id.map(|id| (id, false))),
                 },
-                Effect::DismissPresence { name } => {
-                    // The predicate parses each candidate file the same way
-                    // the read path does (`Presence::parse`), so a dismiss
-                    // matches names exactly as leniently as the badge that
-                    // showed them — while `remove_presences_matching` itself
-                    // stays parse-agnostic (see its doc for the layering).
-                    self.session_files.remove_presences_matching(|json| {
-                        crate::presence::Presence::parse(json).is_some_and(|p| p.session_name == name)
-                    });
-                }
                 Effect::BroadcastStatus { payload } => {
                     // Same delivery every CLI producer already uses
                     // (`crates/cli/src/notify.rs`'s `broadcast`): `zellij
@@ -330,7 +289,6 @@ impl State {
                 }
             }
         }
-        render
     }
 
     /// Bootstrap tab names for freshly-opened panes by reading each pane's cwd
@@ -420,11 +378,7 @@ impl ZellijPlugin for State {
             // unconditional on every successful plugin load — no polling,
             // no other plugin required) and carries `ModeInfo.session_name`,
             // which is all this plugin ever needed from `SessionUpdate` in
-            // the first place; liveness itself now comes from the presence
-            // files' own mtimes, graded per entry rather than read from a
-            // Zellij-reported peer list: fresh (≤90s,
-            // `sessions::STALE_AFTER_SECS`) → stale/dimmed (90–300s) →
-            // reaped past `sessions::DEAD_AFTER_SECS` (300s).
+            // the first place.
             EventType::ModeUpdate,
             // Never handled (falls to `update`'s `_ => false`), subscribed
             // purely as an opt-out: Zellij ≥0.44 treats a plugin subscribed

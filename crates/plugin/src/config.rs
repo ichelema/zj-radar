@@ -191,8 +191,7 @@ pub struct Config {
     pub remote_commands: BTreeSet<String>,
     /// Expand the cross-session badge into a session tree: each peer's tabs
     /// and agent rows under its heading (`render::render_peer_children`).
-    /// Opt-in: off keeps the compact one-line-per-session badge and publishes
-    /// no tab tree in this session's presence file.
+    /// Opt-in: off keeps the compact one-line-per-session badge.
     pub session_tree: bool,
     /// Show the current Zellij input mode flush right on the footer tally
     /// line (`render::footer_tally`). Opt-in: off renders and repaints

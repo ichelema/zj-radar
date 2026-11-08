@@ -104,8 +104,6 @@ title. It never overwrites a name you set by hand.
   `done` in every tab's rail. Use it when an agent ends a finished turn with a
   courtesy question ("want me to also…?"). A question that actually blocks the
   agent clears on its own when you answer it.
-- **Click `✕`** on a dimmed session line in the badge to dismiss a session you
-  know is dead. If it turns out to be alive, its next heartbeat brings it back.
 - Right-click does nothing yet: Zellij does not deliver right-clicks to
   plugins ([zellij#5350](https://github.com/zellij-org/zellij/issues/5350)).
 
@@ -136,19 +134,14 @@ and needs-you agent-pane counts. With a single session the badge is invisible.
   still appear). Click a peer tab or agent row to switch to that tab; it does
   not focus a particular pane there. Peer rows only use the height left after
   your local tabs, the ledger, and the footer, so a short rail shows fewer of
-  them (or none); session lines always remain visible. Every session
-  publishes its tree; `session_tree` controls whether *your* rail draws
-  peers' trees.
+  them (or none); session lines always remain visible. `session_tree`
+  controls whether *your* rail draws peers' trees.
 - **`session-next` / `session-prev`** move a highlight through the same order.
   The switch happens about a second after your last tap; landing back on your
   own session cancels.
-- A session that stops heartbeating dims after 90 seconds and is removed after
-  five minutes. Dimmed sessions are skipped by cycling and carry a `✕` to
-  dismiss by hand.
 
-Sessions find each other through Zellij's shared plugin cache directory. If no
-writable shared directory exists, the badge never appears and nothing else
-changes.
+Sessions find each other through Zellij's own attention tracking
+(`GlobalAttentionUpdate`): a session Zellij stops reporting leaves the badge.
 
 ## Scripting: `zj-radar state`
 

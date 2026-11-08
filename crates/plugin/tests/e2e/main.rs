@@ -1401,28 +1401,11 @@ fn rail_paints_every_column_of_its_pane() {
 /// Cross-session e2e: TWO independently-started, real Zellij servers — not
 /// two tabs of one server (that's `command_activity_reaches_background_tab_
 /// instances`) — proving the whole cross-session feature works between
-/// separate processes, WITHOUT any session-manager trigger: B's plugin
-/// learns its own name from `Event::ModeUpdate` (push, automatic on load —
-/// no `get_session_list()` call needed) and persists presence to the shared
-/// `/cache` root; A's plugin reads that back directly off disk on a timer
-/// tick and renders a badge line for B; A's `session-next` (+ idle-commit
-/// ~1s later) really calls Zellij's `switch_session`, physically
-/// reattaching A's PTY client onto B.
-///
-/// HISTORY: an earlier design had liveness riding on `Event::SessionUpdate`
-/// instead of the presence files themselves. That never worked in a stock
-/// zj-radar session: zellij-server 0.44.3 only repopulates
-/// `SessionUpdate`'s peer list (`peer_sessions_cache`) when some plugin
-/// calls the blocking host fn `get_session_list()`, which only Zellij's own
-/// `session-manager` plugin does — zj-radar's plugin never does, by design
-/// (CLAUDE.md: "push-driven, never poll-driven"). See `docs/design.md`,
-/// "Why not SessionUpdate", for the full root-cause dive (this test used to
-/// fail with a STOP-CONDITION panic pointing at exactly that). The fix drops
-/// `SessionUpdate` from the design entirely: liveness is now the presence
-/// files' own mtimes, graded per entry into fresh (≤90s,
-/// `sessions::STALE_AFTER_SECS`) → stale/dimmed (90–300s) → reaped past
-/// `sessions::DEAD_AFTER_SECS` (300s), and this session's own name comes from `ModeUpdate`
-/// instead — both push-style, neither needing any other plugin to be running.
+/// separate processes, WITHOUT any session-manager trigger: B's agent
+/// attention (OSC 7501) reaches A's plugin through Zellij's
+/// `GlobalAttentionUpdate`, A renders a badge line for B, and A's
+/// `session-next` (+ idle-commit ~1s later) really calls Zellij's
+/// `switch_session`, physically reattaching A's PTY client onto B.
 #[test]
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
 fn session_next_switches_to_the_session_with_attention() {
@@ -1457,15 +1440,11 @@ fn session_next_switches_to_the_session_with_attention() {
     eprintln!("[e2e] B terminal pane_id={pane_b}");
     b.emit_program_status("state=blocked:app=claude-code:kind=question:msg=cGljayBvbmU=");
 
-    // `Effect::ReadPresences` (A reading the shared /cache root back) rides
-    // every Slow (60s) fire and decimated Fast fires (runtime.rs `timer`),
-    // and A has nothing of its own yet to arm Fast — it would otherwise idle
-    // on the Slow heartbeat and this test would need up to a minute of real
-    // wall time to stay honest. Piping a `running` status into A's OWN
-    // terminal arms A's Fast cadence indefinitely (an active `Running` row
-    // animates every tick — see `timer_should_continue`/`needs_fast_ticks`)
-    // without giving A any attention of its own, so it doesn't interfere with
-    // the ordering assertion below (B is still the only attention>0 peer).
+    // Piping a `running` status into A's OWN terminal arms A's Fast cadence
+    // (an active `Running` row animates every tick — see
+    // `timer_should_continue`/`needs_fast_ticks`) without giving A any
+    // attention of its own, so it doesn't interfere with the ordering
+    // assertion below (B is still the only attention>0 peer).
     let pane_a = a.discover_terminal_pane_id();
     eprintln!("[e2e] A terminal pane_id={pane_a}");
     let a_payload = format!(
@@ -1474,11 +1453,8 @@ fn session_next_switches_to_the_session_with_attention() {
     a.pipe_status(&a_payload);
 
     // A's badge must show B's name TOGETHER WITH the attention glyph+count —
-    // not just B's bare name. Under the new design, B's presence entry is
-    // ALL A ever learns about B (there is no separate "live session roster"
-    // to have populated a bare-name-only row from) — so this needle also
-    // rules out the degenerate case of a badge line with a name but zero
-    // counts (e.g. a peer file that parsed but was empty).
+    // not just B's bare name — this needle also rules out the degenerate
+    // case of a badge line with a name but zero counts.
     let attention_glyph = Status::Pending.glyph_for(GlyphSet::Plain);
     let needle = format!("{} 1{attention_glyph}", b.name);
     let saw_badge = a.wait_until(Duration::from_secs(10), |s| sidebar_region(&s.screen(), 32).contains(&needle));

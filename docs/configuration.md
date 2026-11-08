@@ -150,5 +150,5 @@ These binds broadcast too, for the reason above: in a session without a
 rail they do nothing.
 
 Unknown verbs are ignored. Both pipes are inert until the sidebar has been
-granted permissions. Mouse gestures (`✓` acknowledge, `✕` dismiss) are
+granted permissions. The mouse gesture (`✓` acknowledge) is
 described in [`using.md`](using.md#mouse).

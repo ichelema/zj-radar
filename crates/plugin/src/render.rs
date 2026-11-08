@@ -16,9 +16,8 @@
 use crate::config::Density;
 use crate::kind::Kind;
 // One minute band for every age display (its `1h+` freeze is load-bearing
-// for cadence disarm — pre-session-name; a named session stays Slow-armed
-// for the presence heartbeat, see `desired_cadence`) — owned by the ledger,
-// shared by the wait/run tags.
+// for cadence disarm — see `desired_cadence`) — owned by the ledger, shared
+// by the wait/run tags.
 use crate::ledger::minute_tag;
 use crate::rollup::{ExitOutcome, LedgerLine, PaneDisplay, TabDisplay, TabRow};
 use crate::sessions::BadgeEntry;
@@ -68,8 +67,8 @@ const TREE_PREFIX_COLS: usize = 3;
 /// connected, neither is progressing, so nothing animates
 /// (`docs/activity-model.md` §3: a spinner promises bounded work). The
 /// steadiness is also what lets the timer stand down around an all-steady
-/// rail (to Slow once the session name is known — the presence heartbeat, see
-/// `desired_cadence` — or fully pre-name): identical rows across ticks fall to
+/// rail (to Slow, or fully disarmed once nothing ages — see
+/// `desired_cadence`): identical rows across ticks fall to
 /// the render gate, and the cadence predicates count only
 /// `TrackedObservation::animating` rows.
 const SERVICE_GLYPH: char = '▸';
@@ -196,8 +195,8 @@ pub struct RenderOpts {
     /// known (`Sessions::badge()`'s contract). Its headings come from
     /// [`render_session_badge`] and, with `session_tree` on, each peer's tab
     /// tree from [`render_peer_children`]; `render_body` places both. Zero
-    /// lines whenever `len() <= 1` (only this session, or no peer presence
-    /// has crossed the shared `/cache` root yet), so every caller that never
+    /// lines whenever `len() <= 1` (only this session, or no other session
+    /// reported by Zellij yet), so every caller that never
     /// populates this renders byte-identical to before this field existed.
     pub badge: Vec<BadgeEntry>,
     /// `task_lines` config: full `┊` task lines, only the compact `+N` count,
@@ -322,20 +321,18 @@ pub struct RailTarget {
 /// than the small set of physical cells that are actionable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HotspotAction {
-    DismissPresence { name: String },
     Acknowledge { target: RailTarget },
 }
 
 impl HotspotAction {
     fn glyph(&self) -> &'static str {
         match self {
-            Self::DismissPresence { .. } => "✕",
             Self::Acknowledge { .. } => "✓",
         }
     }
 
     fn width(&self) -> usize {
-        // Frozen vocabulary: both glyphs are exactly one display cell.
+        // Frozen vocabulary: the glyph is exactly one display cell.
         UnicodeWidthStr::width(self.glyph())
     }
 }
@@ -710,8 +707,7 @@ fn identity_and_detail<'a>(status: Status, task: &'a str, msg: &'a str) -> (&'a 
 /// The `· 12m` wait tag for a pane blocked on the user: whole minutes since
 /// the waiting-on-you edge (`pending_epoch_s`), frozen at `1h+` once saturated
 /// — the same freeze the ledger uses, so the Slow cadence can disarm
-/// (pre-session-name; a named session stays Slow-armed for the presence
-/// heartbeat — see `desired_cadence`). `None`
+/// (see `desired_cadence`). `None`
 /// under a minute (a fresh ask needs no clock), for every non-Pending status,
 /// and for unstamped rows (pre-upgrade snapshots). Per ⟦D-timer⟧ this lives on
 /// the pane's identity line, never the tab line.
@@ -869,8 +865,6 @@ const HOTSPOT_SLOT_COLS: usize = 2;
 const TAB_HEADER_HOTSPOT_MIN: usize = 4 + HOTSPOT_SLOT_COLS;
 /// Pane identity line: tree prefix(3) + glyph(1) + sp(1) + mark(1) = 6, + slot.
 const PANE_LINE_HOTSPOT_MIN: usize = 6 + HOTSPOT_SLOT_COLS;
-/// Session badge line: here-marker(1) + sp(1) = 2, + slot.
-const BADGE_LINE_HOTSPOT_MIN: usize = 2 + HOTSPOT_SLOT_COLS;
 
 /// Owns the complete hotspot suffix contract: admission at a site's minimum
 /// width, reservation of separator+glyph, and release-build enforcement when
@@ -1720,15 +1714,10 @@ fn header_rule(width: usize, now_tick: u64, working: bool, accent: &str) -> Stri
 /// [`render_peer_children`] draws each peer's tree and `render_body` splits
 /// the headings around the local cards (see the separator note below).
 /// Renders ZERO lines when `entries.len() <= 1` — only the current
-/// session, or no peer presence has crossed the shared `/cache` root yet —
-/// so the feature is invisible until there's genuinely something
-/// cross-session to show, and
+/// session, or no other session reported by Zellij yet — so the feature is
+/// invisible until there's genuinely something cross-session to show, and
 /// every existing single-session snapshot/test stays byte-identical (the
-/// badge is additive, never a subtraction from the render surface). A lone
-/// fresh own-entry plus only STALE peers still clears this threshold and
-/// renders (a stale-but-not-yet-dead entry stays visible by design — only
-/// `sessions::DEAD_AFTER_SECS` reaps) — the count is over `entries`, not
-/// over fresh entries.
+/// badge is additive, never a subtraction from the render surface).
 ///
 /// The current session's own line carries NO click target at all — you
 /// can't "switch to" the session you're already in, and unlike a peer line
@@ -1737,17 +1726,14 @@ fn header_rule(width: usize, now_tick: u64, working: bool, accent: &str) -> Stri
 /// peer via [`RailTarget::for_session`], which bakes in `tab_position` NOW
 /// (at line-build time, from the entry's `attention_tab_position`) rather
 /// than leaving `mouse_click` to re-derive it later against a badge that may
-/// have moved on by the time the click lands. This applies uniformly to
-/// stale peers too — a click on one is a deliberate act (`entry.stale` only
-/// affects color, never the target).
+/// have moved on by the time the click lands.
 ///
 /// Text is `name` plus, only when nonzero, a running count and an attention
 /// count — each paired with the SAME glyph the per-tab rows already use for
 /// that status (`Status::Running`/`Status::Pending`, run through
 /// `opts.glyphs`) rather than inventing a parallel icon vocabulary the nerd/
 /// plain config wouldn't know about. `selected` (the pending Alt+[/] cycle
-/// target) renders bold+accent; a `stale` entry recedes past the ordinary
-/// muted `idle_text` (see the color derivation below); every other label —
+/// target) renders bold+accent; every other label —
 /// including the current line's — renders in `idle_text`, so the badge
 /// reads as a status strip, not a second row of cards. The one accent in
 /// that strip is the current line's `•` you-are-here marker: rendered in
@@ -1774,24 +1760,12 @@ fn render_session_badge(entries: &[BadgeEntry], opts: &RenderOpts) -> Vec<Line> 
     }
     let width = opts.width;
     let idle = tc_fg(opts.theme.idle_text);
-    // A stale entry (dimmed, never dropped from the badge) recedes
-    // one step further than the ordinary muted `idle_text` every other line
-    // uses — blended halfway toward the panel background, the same "recede
-    // toward bg" idiom `DerivedColors::from_bg_fg` already uses for its own
-    // surface ladder, rather than inventing a parallel dim vocabulary. It
-    // stays fully clickable (`target` below doesn't distinguish stale from
-    // fresh) — a click on it is a deliberate act.
-    let stale = tc_fg(crate::theme::blend(opts.theme.idle_text, opts.theme.rail_bg, 0.5));
     let accent = Role::Accent.ansi();
     let running_glyph = Status::Running.glyph_for(opts.glyphs);
     let attention_glyph = Status::Pending.glyph_for(opts.glyphs);
     let mut lines: Vec<Line> = entries
         .iter()
         .map(|entry| {
-            let hotspot =
-                (entry.stale && !entry.is_current).then(|| HotspotAction::DismissPresence { name: entry.name.clone() });
-            let hotspot = HotspotSlot::new(width, BADGE_LINE_HOTSPOT_MIN, hotspot);
-            let content_width = hotspot.content_width();
             let mut label = entry.name.clone();
             if entry.running > 0 {
                 label.push_str(&format!(" {}{}", entry.running, running_glyph));
@@ -1805,18 +1779,12 @@ fn render_session_badge(entries: &[BadgeEntry], opts: &RenderOpts) -> Vec<Line> 
             let marker = if entry.is_current { "•" } else { " " };
             const PREFIX_VIS: usize = 2; // marker + its separating space
             let text = prefixed_line(
-                content_width,
+                width,
                 PREFIX_VIS,
                 || format!("{marker} {label}"),
                 |avail| {
                     let clamped = truncate(&label, avail);
-                    let label_seg = if entry.selected {
-                        Seg::bold(accent, clamped)
-                    } else if entry.stale {
-                        Seg::new(&stale, clamped)
-                    } else {
-                        Seg::new(&idle, clamped)
-                    };
+                    let label_seg = if entry.selected { Seg::bold(accent, clamped) } else { Seg::new(&idle, clamped) };
                     // Peers' alignment space paints identically in any
                     // color — byte-stable output.
                     let marker_color = if entry.is_current { accent } else { &idle };
@@ -1827,16 +1795,14 @@ fn render_session_badge(entries: &[BadgeEntry], opts: &RenderOpts) -> Vec<Line> 
                 pane_id: entry.attention_pane_id,
                 ..RailTarget::for_session(entry.name.clone(), entry.attention_tab_position)
             });
-            let line = Line::new(text, target, LineBg::Rail);
-            let hotspot_color = if entry.selected { accent } else { &stale };
-            hotspot.finish(line, hotspot_color)
+            Line::new(text, target, LineBg::Rail)
         })
         .collect();
     lines.push(Line::new("\n".to_string(), None, LineBg::Rail));
     lines
 }
 
-/// A peer session's read-only tab tree (from its bounded presence file):
+/// A peer session's read-only tab tree (from `GlobalAttentionUpdate`):
 /// one line per tab, then one per agent pane under it, at most `budget`
 /// lines in tree order. Every line targets the peer session at that tab.
 /// Local tabs never come through here — they render as full cards.
