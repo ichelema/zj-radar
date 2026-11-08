@@ -9,7 +9,7 @@ lives, and which seam it crosses. The mechanisms behind them are in
 The rendered sidebar: a pinned left column listing every tab with per-tab
 agent status. The rail seam is `render_rail(rows, ledger, opts) ->
 RenderedRail` in `crates/plugin/src/render.rs`, with `onboarding(opts)` and
-`needs_permission(opts, grant_hint)` as sibling faces for the no-agents-yet and
+`needs_permission(opts)` as sibling faces for the no-agents-yet and
 not-yet-granted states. Layout planning (overflow folding, card spacing, tree
 expansion) is implementation behind the seam. Color is additive: stripping SGR
 from the rail yields the same character grid, so layout and color test apart.

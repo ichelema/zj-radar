@@ -178,8 +178,8 @@ pub struct RenderOpts {
     /// are wall-clock, not tick-relative.
     pub now_epoch_s: u64,
     /// Whether the footer may advertise the `alt-[n] jump` chord. Zellij owns
-    /// keybinds, not the plugin, so this is config-driven honesty (the
-    /// `GrantHint` pattern) — and strictly opt-in: NO in-tree config sets it.
+    /// keybinds, not the plugin, so this is config-driven honesty — and
+    /// strictly opt-in: NO in-tree config sets it.
     /// Even the `run`-owned config, which bakes the Alt-1..9 → GoToTab binds,
     /// deliberately omits it (`run.rs` pins that): Alt+digit is commonly
     /// claimed upstream of Zellij (WM hotkeys, macOS Option typing `¡`) and
@@ -653,12 +653,9 @@ pub fn onboarding(opts: &RenderOpts) -> RenderedRail {
 
 /// Rail face shown when permission has NOT been granted. Distinct from
 /// `onboarding` (which is the granted-but-idle face) so a blocked install is
-/// never mistaken for a working one. Points at the `Ctrl-y` keybind (baked into
-/// the owned `config.kdl`) rather than "press y here": the borderless rail can't
-/// host Zellij's prompt legibly (Zellij #4749), and on an attached session no
-/// onboarding float was ever opened — `Ctrl-y` summons that legible float from
-/// any session state.
-pub fn needs_permission(opts: &RenderOpts, grant_hint: crate::config::GrantHint) -> RenderedRail {
+/// never mistaken for a working one. The hint is true for every install:
+/// Zellij binds its own prompt to a rail pane, so focus it and answer.
+pub fn needs_permission(opts: &RenderOpts) -> RenderedRail {
     let w = opts.width;
     let mut out = String::new();
     let accent = Role::Accent.ansi();
@@ -668,15 +665,7 @@ pub fn needs_permission(opts: &RenderOpts, grant_hint: crate::config::GrantHint)
     push_panel_line(&mut out, accent, &"═".repeat(w), w);
     push_panel_line(&mut out, needs, " ⚠ needs permission", w);
     out.push('\n');
-    // The escape-hatch hint must only promise what this install actually
-    // bound: run-owned configs bake the Ctrl-y float keybind; a setup-injected
-    // rail has no such bind, so it gets the universally true wording (Zellij's
-    // own prompt is bound to a rail pane — focus it and answer).
-    let hint: [&str; 3] = match grant_hint {
-        crate::config::GrantHint::CtrlY => [" press Ctrl-y to", " open the grant", " prompt."],
-        crate::config::GrantHint::Generic => [" focus this pane;", " press y when the", " prompt appears."],
-    };
-    for line in hint {
+    for line in [" focus this pane;", " press y when the", " prompt appears."] {
         push_panel_line(&mut out, muted, line, w);
     }
     RenderedRail::from_ansi_without_targets(&out, opts.height)

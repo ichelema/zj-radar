@@ -4,23 +4,16 @@ test:
 
 # Bash hook + installer tests (requires bats + shellcheck + jq on PATH, plus
 # GNU coreutils for `timeout` — two adversarial-input cases skip without it).
-# Builds the CLI first: parity.bats compares the bash producer against
-# target/debug/zj-radar. Covers every shipped shell script: notify.sh (the
-# Claude producer hook), install.sh (the curl|sh release asset — see
-# scripts/tests/install.bats), funnel.sh (the fresh-machine CI check), and the
-# demo/ recording scripts.
+# Covers every shipped shell script: notify.sh (the Claude producer hook),
+# install.sh (the curl|sh release asset — see scripts/tests/install.bats),
+# funnel.sh (the fresh-machine CI check), and the demo/ recording scripts.
 test-bash:
-    cargo build -p zj-radar
     shellcheck plugins/zj-radar-claude/scripts/notify.sh scripts/install.sh scripts/funnel.sh demo/record.sh demo/agent.sh demo/banner.sh demo/demorc.sh
     # notify.sh's head runs under /bin/sh (dash on Debian/Ubuntu) before it
     # re-execs bash for the fallback; the file-level directive lints it as
     # bash, so lint the dispatcher section as POSIX sh on its own.
     sed -n '3,/^# ---- bash/p' plugins/zj-radar-claude/scripts/notify.sh | shellcheck -s sh -
     bats plugins/zj-radar-claude/tests scripts/tests
-
-# pi, omp + opencode bridge harnesses (node --test). node is in the nix dev shell.
-test-js:
-    node --test crates/cli/tests/pi_bridge.test.mjs crates/cli/tests/omp_bridge.test.mjs crates/cli/tests/opencode_bridge.test.mjs
 
 # Live E2E (L5): builds the wasm plugin, drives a real Zellij in a PTY.
 # `--test-threads=1` is REQUIRED: each test spawns its own Zellij session, and
@@ -99,4 +92,4 @@ hermetic:
 
 # Everything a PR must pass locally. CI runs more on top of this: the
 # `hermetic` job (nix flake check) and the live E2E suite (test-e2e).
-ci: fmt-check test clippy build-wasm test-bash test-js
+ci: fmt-check test clippy build-wasm test-bash

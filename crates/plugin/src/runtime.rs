@@ -970,7 +970,7 @@ impl PluginRuntime {
         self.last_render_key =
             Some((tabrows.clone(), ledger.clone(), opts.badge.clone(), self.theme.clone(), opts.mode));
         let rail = if !self.permission.granted() {
-            render::needs_permission(&opts, self.config.grant_hint)
+            render::needs_permission(&opts)
         } else if tabrows.is_empty() && ledger.is_empty() && !opts.shows_peer_tree() {
             render::onboarding(&opts)
         } else {

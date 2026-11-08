@@ -52,36 +52,8 @@ impl Density {
     }
 }
 
-/// Which escape hatch the `needs_permission` face may honestly advertise. The
-/// rail can't know how it was installed, and the two install flows differ in
-/// what's actually bound: `run`-owned configs bake a Ctrl-y keybind that
-/// summons the legible grant float, while a `setup`-injected rail lives in the
-/// user's own config where no such bind exists — telling those users to press
-/// Ctrl-y is a dead end. So the hint is config-driven: the `run` layouts pass
-/// `grant_hint "ctrl-y"`, and everything else falls back to the universally
-/// true generic wording (focus the rail, answer Zellij's prompt).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum GrantHint {
-    /// A Ctrl-y grant keybind is known to exist (run-owned configs only).
-    CtrlY,
-    /// Default: promise nothing about keybinds we didn't install.
-    #[default]
-    Generic,
-}
-
-impl GrantHint {
-    pub fn from_config(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "ctrl-y" => Some(GrantHint::CtrlY),
-            "generic" => Some(GrantHint::Generic),
-            _ => None,
-        }
-    }
-}
-
-/// Whether the footer may advertise the `alt-[n] jump` chord — the same
-/// honesty contract as [`GrantHint`]: Zellij owns keybinds, not the plugin,
-/// so only configs that actually bake the Alt-1..9 → GoToTab binds (the
+/// Whether the footer may advertise the `alt-[n] jump` chord. Zellij owns
+/// keybinds, not the plugin, so only configs that actually bake the Alt-1..9 → GoToTab binds (the
 /// `run`-owned config) may claim them. Everywhere else the footer omits the
 /// hint line entirely rather than promising a dead chord.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -139,8 +111,6 @@ pub struct Config {
     pub header: bool,
     pub glyphs: crate::status::GlyphSet,
     pub density: Density,
-    /// Which grant escape hatch the needs-permission face advertises.
-    pub grant_hint: GrantHint,
     /// Whether the footer advertises the `alt-[n] jump` chord.
     pub jump_hint: JumpHint,
     /// How background tasks show under an agent's pane row.
@@ -175,7 +145,6 @@ impl Default for Config {
             header: true,
             glyphs: crate::status::GlyphSet::default(),
             density: Density::default(),
-            grant_hint: GrantHint::default(),
             jump_hint: JumpHint::default(),
             task_lines: TaskLines::default(),
             ledger: true,
@@ -252,7 +221,6 @@ config_fields! {
     naming:     "naming"     => NamingMode::from_config,
     density:    "density"    => Density::from_config,
     glyphs:     "glyphs"     => crate::status::GlyphSet::from_config,
-    grant_hint: "grant_hint" => GrantHint::from_config,
     jump_hint:  "jump_hint"  => JumpHint::from_config,
     task_lines: "task_lines" => TaskLines::from_config,
     header:              "header"              => parse_bool,
@@ -430,20 +398,8 @@ mod tests {
     }
 
     #[test]
-    fn grant_hint_parses_and_defaults_to_generic() {
-        // Absent or unrecognized: promise nothing about keybinds we didn't
-        // install — only the run-owned layouts may claim Ctrl-y.
-        assert_eq!(Config::default().grant_hint, GrantHint::Generic);
-        assert_eq!(Config::from_map(&map(&[])).grant_hint, GrantHint::Generic);
-        assert_eq!(Config::from_map(&map(&[("grant_hint", "ctrl-y")])).grant_hint, GrantHint::CtrlY);
-        assert_eq!(Config::from_map(&map(&[("grant_hint", "CTRL-Y")])).grant_hint, GrantHint::CtrlY);
-        assert_eq!(Config::from_map(&map(&[("grant_hint", "banana")])).grant_hint, GrantHint::Generic);
-    }
-
-    #[test]
     fn jump_hint_parses_and_defaults_to_hidden() {
-        // Same honesty contract as grant_hint: absent or unrecognized promises
-        // nothing — only the run-owned config (which binds Alt-1..9) may claim
+        // Absent or unrecognized promises nothing — only the run-owned config (which binds Alt-1..9) may claim
         // the footer's alt-[n] jump hint.
         assert_eq!(Config::default().jump_hint, JumpHint::Hidden);
         assert!(!JumpHint::Hidden.shows());

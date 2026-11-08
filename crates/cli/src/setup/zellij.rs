@@ -107,7 +107,7 @@ pub(crate) fn zellij_config_dir() -> Option<PathBuf> {
 /// callers just early-return. With every env source unset, the old fallback
 /// resolved to the *relative* path `.config/zellij` in the process CWD, so a
 /// `setup zellij --yes` from cron/a container silently grew a config tree in
-/// whatever directory it ran from (mirrors `codex_home_from`'s refusal).
+/// whatever directory it ran from.
 pub(crate) fn zellij_config_dir_or_report() -> Option<PathBuf> {
     let dir = zellij_config_dir();
     if dir.is_none() {
@@ -505,7 +505,6 @@ pub(crate) fn setup_zellij(uninstall: bool, opts: ZellijSetupOpts<'_>) {
             if !run_preseed(&wasm_dest, facts.granted, yes, dry_run, is_tty) {
                 print_grant_hint_if_needed(&facts);
             }
-            print_producer_hint_if_needed(&facts);
         }
         Outcome::Conflict
             if hand_owned_alias_loads(
@@ -529,7 +528,6 @@ pub(crate) fn setup_zellij(uninstall: bool, opts: ZellijSetupOpts<'_>) {
             if !run_preseed(&wasm_dest, facts.granted, yes, dry_run, is_tty) {
                 print_grant_hint_if_needed(&facts);
             }
-            print_producer_hint_if_needed(&facts);
         }
         Outcome::Conflict => {
             crate::exit::fail_report(
@@ -578,16 +576,8 @@ pub(crate) fn setup_zellij(uninstall: bool, opts: ZellijSetupOpts<'_>) {
                 crate::fsutil::atomic_write(&wasm_dest, &bytes).map_err(|e| format!("wasm copy failed — {e}"))?;
                 Ok(())
             };
-            // The fail-when-named rule (`report_declined`) covers the agent
-            // targets; zellij's consent chain keeps its quiet decline.
-            if !confirm_and_write(
-                "zellij",
-                &config_path,
-                &new,
-                Consent { yes, is_tty, explicit: false },
-                &prompt,
-                copy_wasm,
-            ) {
+            // zellij's consent chain keeps its quiet decline.
+            if !confirm_and_write("zellij", &config_path, &new, Consent { yes, is_tty }, &prompt, copy_wasm) {
                 return;
             }
             println!("zellij: {} ({})", if uninstall { "removed" } else { "installed" }, config_path.display());
@@ -599,7 +589,6 @@ pub(crate) fn setup_zellij(uninstall: bool, opts: ZellijSetupOpts<'_>) {
                 if !run_preseed(&wasm_dest, facts.granted, yes, dry_run, is_tty) {
                     print_grant_hint_if_needed(&facts);
                 }
-                print_producer_hint_if_needed(&facts);
             }
         }
     }
@@ -689,22 +678,6 @@ fn print_grant_hint_if_needed(facts: &ZellijFacts) {
          and press y to allow access, or run `zj-radar setup zellij --grant` from \
          inside Zellij for a legible floating prompt. Zellij asks once, then remembers."
     );
-}
-
-/// Emit a producer hint at the tail of `setup zellij`: the full "no producer
-/// wired" hint when nothing is, else one note per agent that is on PATH but
-/// not wired (same detection as `run` and the doctor — `crate::producers`).
-fn print_producer_hint_if_needed(facts: &ZellijFacts) {
-    if let Some(hint) = crate::producers::producer_hint(&facts.producers) {
-        println!("zellij: {hint}");
-        return;
-    }
-    for agent in crate::agents::Agent::ALL {
-        let name = agent.source();
-        if which(name) && !facts.producers.contains(agent) {
-            println!("zellij: note: {name} found on PATH but not wired — run `zj-radar setup {name}`");
-        }
-    }
 }
 
 /// Print the "Add the sidebar to a Zellij layout with:" paste snippet, tailored

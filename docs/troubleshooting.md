@@ -21,8 +21,7 @@ does not cover every requested permission), an alias pointing at a
 **Fix:** `zj-radar setup zellij --check`; a non-`ok` `grant` item confirms it.
 Then one of:
 
-- in a `zj-radar run` session, press **Ctrl-y** to open the grant prompt in a
-  legible floating pane;
+- re-run `zj-radar run`: it pre-authorizes its own wasm before launching;
 - `zj-radar setup zellij -y` to pre-authorize, then open a new tab or restart
   Zellij;
 - from inside the session, `zj-radar setup zellij --grant` and press `y` in

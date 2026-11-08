@@ -1,25 +1,14 @@
 //! Native CLI (`zj-radar`): the host front door for the sidebar.
 //!
-//! Five subcommands, one per module:
-//! - `notify <agent>` ([`notify`]) — the *pushed* information source. Reads an
-//!   agent's hook payload and broadcasts a `zj_radar.status.v1` update. Each
-//!   agent is a peer adapter behind the [`agents::Agent::derive`] seam, so
-//!   `notify` stays agent-agnostic.
-//! - `setup [claude|codex|opencode|pi|omp|zellij]` ([`setup`]) — idempotent
-//!   wiring: manage Codex notify/`hooks.json`, drop the opencode JS bridge
-//!   plugin and the pi bridge extension into their auto-loaded dirs, install
-//!   the wasm plugin, and inject the rail into a Zellij layout ([`layout`]).
+//! Three subcommands, one per module:
+//! - `setup [zellij]` ([`setup`]) — idempotent wiring: install the wasm plugin,
+//!   manage the `radar` alias in `config.kdl`, and inject the rail into a
+//!   Zellij layout ([`layout`]).
 //! - `run` ([`run`]) — turnkey launch of a Zellij session that owns its own
 //!   config with the rail preinstalled.
 //! - `update` ([`update`]) — move the CLI and the sidebar wasm to a newer
 //!   release together (self-replace, then re-exec `setup zellij --download`);
 //!   hands Nix/cargo-managed binaries back to their package manager.
-//! - `state` ([`state`]) — read-only view of every live session's presence file, for scripts.
-
-// Re-export the shared core so the CLI submodules keep addressing these as
-// `crate::status`, `crate::payload`, … with no per-reference churn.
-#[cfg_attr(not(test), allow(unused_imports))]
-pub(crate) use zj_radar_core::{command, kind, payload, pipe, status};
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -29,17 +18,10 @@ use std::path::PathBuf;
 /// drift. (`build.rs` repeats the literal: it can't import the crate it builds.)
 pub(crate) const WASM_FILE_NAME: &str = "zj_radar.wasm";
 
-mod agents;
-mod codex_daemon;
-mod dedup;
 mod fsutil;
-mod git;
 pub(crate) mod layout;
-mod notify;
-mod producers;
 mod run;
 mod setup;
-mod state;
 mod update;
 
 /// Process-wide failure flag. The setup/run orchestrators report refusals and
@@ -47,9 +29,7 @@ mod update;
 /// layers; they mark the invocation failed here instead of threading a Result
 /// through every signature. [`run`] maps it to the process exit code, so
 /// `zj-radar setup … && next` composes correctly in scripts and installers.
-/// A user *declining* a confirmation prompt is not a failure. `notify` is
-/// exempt: it is invoked from an agent hook and must exit 0 on any input, so
-/// its diagnostics are plain `eprintln!` hints that never set the flag.
+/// A user *declining* a confirmation prompt is not a failure.
 pub(crate) mod exit {
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -74,7 +54,7 @@ pub(crate) mod exit {
 #[command(
     name = "zj-radar",
     version,
-    about = "Launch a Zellij session with the zj-radar sidebar, broadcast agent status to it, and wire agents up."
+    about = "Install the zj-radar sidebar into Zellij and launch Zellij sessions with it."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -83,33 +63,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Broadcast one agent's status to the sidebar (called from an agent hook).
-    Notify {
-        /// Which agent is reporting: `claude`, `codex`, `opencode`, `pi`, `omp`, or
-        /// `generic` (any script — pass explicit `--status`/`--msg`/`--task`
-        /// flags, no hook payload needed).
-        agent: String,
-        /// Hook payload as a trailing argument (Codex's legacy notify slot). Hooks and bridges pass it on stdin instead.
-        input: Option<String>,
-        /// Explicit status (hooks and bridges pass this; required for `generic`):
-        /// running | pending | done | error | idle.
-        #[arg(long)]
-        status: Option<String>,
-        /// Activity line for `generic` (e.g. "deploying site"); shown on the
-        /// pane's rail line. Running with no msg gets a "working" baseline.
-        #[arg(long)]
-        msg: Option<String>,
-        /// Sticky task label for `generic`; empty keeps the stored label.
-        #[arg(long)]
-        task: Option<String>,
-        /// Kind mark for `generic`: test | build | deploy | server | command …
-        /// (default `generic` → the neutral ⦿ mark).
-        #[arg(long)]
-        source: Option<String>,
-        /// Print the payload instead of broadcasting.
-        #[arg(long)]
-        dry_run: bool,
-    },
     /// Launch a turnkey Zellij session with the radar rail (owns its own config).
     Run {
         /// Session name (default: current directory's name).
@@ -118,9 +71,9 @@ enum Command {
         #[arg(long)]
         print_cmd: bool,
     },
-    /// Idempotently wire installed agents and Zellij to use zj-radar.
+    /// Idempotently set up Zellij to use the zj-radar sidebar.
     Setup {
-        /// Targets to set up (default: detected agents only). Supported: claude, codex, opencode, pi, omp, zellij.
+        /// Target to set up (default and only supported: zellij).
         targets: Vec<String>,
         /// Wasm artifact to install when setting up Zellij.
         #[arg(long, value_name = "PATH")]
@@ -145,10 +98,7 @@ enum Command {
         // uninstalling would read as "uninstalled".
         #[arg(long, conflicts_with = "uninstall")]
         check: bool,
-        /// Use Codex's legacy single-slot notify config instead of hooks.json.
-        #[arg(long)]
-        legacy_notify: bool,
-        /// Overwrite conflicting entries where supported.
+        /// Overwrite a conflicting `radar` plugin alias in config.kdl.
         #[arg(long)]
         force: bool,
         /// Inject the rail into the target layout without prompting (consent flag).
@@ -175,66 +125,17 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
-    /// Print what the radar knows: live sessions, tabs, and tracked panes,
-    /// read from the rails' presence files (never queries Zellij).
-    State {
-        /// Machine-readable JSON (`{"v":1,"sessions":[…]}`).
-        #[arg(long)]
-        json: bool,
-        /// Only agent panes that need you (pending or error); exits 1 if none.
-        #[arg(long)]
-        needs_attention: bool,
-        /// With --needs-attention, also consider stale sessions (no heartbeat for >90s).
-        #[arg(long, requires = "needs_attention")]
-        include_stale: bool,
-        /// Only this session.
-        #[arg(long, value_name = "NAME")]
-        session: Option<String>,
-    },
 }
 
 /// CLI entry point (called by `src/main.rs`). Returns the process exit code:
 /// failure when any orchestrator flagged a refusal/error via [`exit::fail_report`].
 pub fn run() -> std::process::ExitCode {
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
-        Err(err) => return parse_failure(err),
-    };
+    let cli = Cli::parse();
     match cli.command {
         Command::Run { name, print_cmd } => {
             run::run(run::RunOptions { name, print_cmd });
         }
-        Command::Notify { agent, input, status, msg, task, source, dry_run } => {
-            if agent == "generic" {
-                notify::run_generic(status.as_deref(), msg.as_deref(), task.as_deref(), source.as_deref(), dry_run);
-            } else {
-                // `--msg`/`--task`/`--source` belong to `notify generic`; the
-                // agent adapters derive all three from the hook payload. Hint
-                // and continue — never a clap conflict: notify is called from
-                // hooks and must stay exit-0 on any input (see `exit`).
-                if msg.is_some() || task.is_some() || source.is_some() {
-                    eprintln!(
-                        "zj-radar: --msg/--task/--source apply to `notify generic` only — \
-                         ignored for `notify {agent}`"
-                    );
-                }
-                notify::run(&agent, input.as_deref(), status.as_deref(), dry_run);
-            }
-        }
-        Command::Setup {
-            targets,
-            wasm,
-            download,
-            uninstall,
-            dry_run,
-            yes,
-            check,
-            legacy_notify,
-            force,
-            inject,
-            layout,
-            grant,
-        } => {
+        Command::Setup { targets, wasm, download, uninstall, dry_run, yes, check, force, inject, layout, grant } => {
             setup::run(setup::SetupOptions {
                 targets: &targets,
                 wasm: wasm.as_deref(),
@@ -243,7 +144,6 @@ pub fn run() -> std::process::ExitCode {
                 dry_run,
                 yes,
                 check,
-                legacy_notify,
                 force,
                 inject,
                 layout: layout.as_deref(),
@@ -253,31 +153,10 @@ pub fn run() -> std::process::ExitCode {
         Command::Update { check } => {
             update::run(update::UpdateOptions { check });
         }
-        Command::State { json, needs_attention, include_stale, session } => {
-            return state::run(state::StateOptions { json, needs_attention, include_stale, session });
-        }
     }
     if exit::failed() {
         std::process::ExitCode::FAILURE
     } else {
         std::process::ExitCode::SUCCESS
     }
-}
-
-/// clap's own behaviour for a bad command line — usage on stderr, exit 2;
-/// `--help`/`--version` print and exit 0 — except for `notify`, which agent
-/// hooks exec directly. Claude Code treats a non-zero hook exit as a
-/// blocking error (a PreToolUse hook blocks the tool call, and the hook's
-/// stderr is discarded), so a `zj-radar` on PATH that rejects a flag the
-/// installed hook passes (version skew) must degrade to a logged no-op:
-/// hint, exit 0, send nothing. Detected by the first argument, since a
-/// parse failure has no `Command` to match on.
-fn parse_failure(err: clap::Error) -> std::process::ExitCode {
-    let is_notify = std::env::args().nth(1).is_some_and(|arg| arg == "notify");
-    if is_notify && err.use_stderr() {
-        eprintln!("zj-radar: {err}");
-        eprintln!("zj-radar: ignoring this notify invocation — a hook must never fail its agent");
-        return std::process::ExitCode::SUCCESS;
-    }
-    err.exit()
 }

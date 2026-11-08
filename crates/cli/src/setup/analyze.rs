@@ -1,14 +1,8 @@
 use super::*;
 
-use crate::agents::Agent;
-use crate::producers::ProducerTexts;
-use crate::setup::detect::{
-    codex_hook_handler_is_ours, has_unmanaged_radar_alias, is_unmanaged_radar_alias_line, notify_is_ours,
-    omp_extension_is_ours, opencode_plugin_is_ours, pi_extension_is_ours, strip_managed_zellij_alias,
-};
+use crate::setup::detect::{has_unmanaged_radar_alias, is_unmanaged_radar_alias_line, strip_managed_zellij_alias};
 
 use std::path::{Path, PathBuf};
-use toml_edit::{DocumentMut, Item};
 
 /// Raw, already-read environment for Zellij setup. The ONLY layer that touched
 /// the filesystem — `analyze_zellij` is pure over this struct.
@@ -16,8 +10,6 @@ pub(crate) struct ZellijEnv {
     pub config_text: Option<String>,
     pub layout_text: Option<String>,
     pub permissions_text: Option<String>,
-    /// Every producer's wiring evidence (`crate::producers`).
-    pub producers: ProducerTexts,
     pub wasm_present: bool,
     pub config_managed: bool,
     pub wasm_path: String,
@@ -60,7 +52,6 @@ pub(crate) fn read_zellij_env(config_dir: &Path, layout_name: Option<&str>) -> (
     let env = ZellijEnv {
         layout_text: std::fs::read_to_string(&layout_path).ok(),
         permissions_text: crate::run::zellij_permissions_text(),
-        producers: ProducerTexts::read(),
         wasm_present: wasm_dest.is_file(),
         config_managed: path_is_managed(&config_path),
         wasm_path: wasm_dest.to_string_lossy().into_owned(),
@@ -84,10 +75,6 @@ pub(crate) struct ZellijFacts {
     /// inside the rail's split such a tab opens with the rail alone.
     pub empty_tab_bodies: Vec<String>,
     pub granted: Option<bool>,
-    /// The wired producers, in `Agent::ALL` order — empty means none, which
-    /// is what the doctor's pass/fail and `setup zellij`'s hint gate on; the
-    /// list lets them SAY which ones.
-    pub producers: Vec<Agent>,
     pub config_managed: bool,
     pub zellij_version: Option<String>,
 }
@@ -108,11 +95,8 @@ pub(crate) struct ZellijFacts {
 ///   (quoted wasm path as block header, one permission per line).
 /// - `run.rs::permissions_path_in` — the macOS cache sub-folder name
 ///   `org.Zellij-Contributors.Zellij` (Linux uses plain `zellij`).
-/// - `run.rs::session_is_running` / `line_is_running_session` —
-///   `zellij list-sessions --no-formatting` line grammar (`<name> [Created …]`,
-///   dead sessions tagged `EXITED` after the name).
-/// - `run.rs::cached_session_layout` — the resurrection-cache path shape
-///   `<cache>/<contract dir>/session_info/<session>/session-layout.kdl`.
+/// - `run.rs::session_is_live` — `zellij list-sessions --short` (one plain
+///   session name per line).
 pub(crate) const MIN_SUPPORTED_ZELLIJ: (u32, u32, u32) = (0, 46, 0);
 
 /// The floor as user-facing messages spell it, e.g. `0.46.0`.
@@ -158,7 +142,6 @@ pub(crate) fn zellij_version_is_supported(version_output: &str) -> bool {
     }
 }
 
-/// Pure: derive every Zellij setup fact from already-read inputs. No I/O.
 /// `(managed, unmanaged)`: is our marked alias block in `config.kdl`, and is
 /// a `radar` alias of the user's own there outside it?
 fn alias_presence(lines: &[String]) -> (bool, bool) {
@@ -168,15 +151,7 @@ fn alias_presence(lines: &[String]) -> (bool, bool) {
     (managed, has_unmanaged_radar_alias(&lines_without_managed))
 }
 
-/// Does `config.kdl` carry any `radar` alias, ours or the user's? The alias
-/// half of [`analyze_zellij`], for a caller that needs only "has the sidebar
-/// been set up at all" and not the doctor's full (spawning) read.
-pub(crate) fn radar_alias_present(config_text: Option<&str>) -> bool {
-    let lines: Vec<String> = config_text.map(split_lines).unwrap_or_default();
-    let (managed, unmanaged) = alias_presence(&lines);
-    managed || unmanaged
-}
-
+/// Pure: derive every Zellij setup fact from already-read inputs. No I/O.
 pub(crate) fn analyze_zellij(env: &ZellijEnv) -> ZellijFacts {
     let lines: Vec<String> = env.config_text.as_deref().map(split_lines).unwrap_or_default();
     let (managed_alias_present, unmanaged_alias_present) = alias_presence(&lines);
@@ -200,237 +175,9 @@ pub(crate) fn analyze_zellij(env: &ZellijEnv) -> ZellijFacts {
         has_rail,
         empty_tab_bodies,
         granted,
-        producers: env.producers.wired(),
         config_managed: env.config_managed,
         zellij_version: env.zellij_version.clone(),
     }
-}
-
-/// Derived state of Codex's `[features].hooks` switch.
-pub(crate) enum CodexHooksFeature {
-    EnabledOrUnset,
-    Disabled,
-    ConfigError(String),
-}
-
-/// Derived state of Codex's shared app-server daemon, whose hooks carry a
-/// stale pane env and are therefore dropped by `notify codex` (issue #71).
-#[derive(Debug, PartialEq)]
-pub(crate) enum CodexDaemon {
-    /// Live now: every hook runs there, so Codex rows stay dark.
-    Running,
-    /// `[features].daemon_auto_start = false` and none running: hooks run
-    /// in each TUI with its own pane env.
-    AutoStartOff,
-    /// None running, auto-start not disabled: Codex 0.157+ starts one with
-    /// the next session.
-    NotRunning,
-}
-
-/// Derived state of the legacy `notify` slot in Codex `config.toml`.
-pub(crate) enum CodexNotifyState {
-    ConfigAbsent,
-    NotInstalled,
-    Ours,
-    Foreign,
-    ConfigError(String),
-}
-
-/// Raw, already-read environment for Codex setup. The only IO layer.
-pub(crate) struct CodexEnv {
-    pub codex_on_path: bool,
-    pub zj_radar_on_path: bool,
-    pub config_text: Option<String>,
-    pub hooks_text: Option<String>,
-    /// A Codex app-server daemon is live (`codex_daemon::daemon_running`).
-    pub daemon_running: bool,
-}
-
-/// Every derived fact about Codex setup state. The legacy-vs-hooks choice is a
-/// flag the consumer projects on — NOT a fact — so both surfaces are observed.
-pub(crate) struct CodexFacts {
-    pub codex_on_path: bool,
-    pub zj_radar_on_path: bool,
-    pub hooks_feature: CodexHooksFeature,
-    pub notify: CodexNotifyState,
-    /// `None` = hooks.json absent; `Some(Ok(n))` = n marker-owned events; `Some(Err)` = parse error.
-    pub owned_hook_events: Option<Result<usize, String>>,
-    pub daemon: CodexDaemon,
-}
-
-/// Pure: derive every Codex setup fact from already-read inputs. No I/O.
-pub(crate) fn analyze_codex(env: &CodexEnv) -> CodexFacts {
-    let hooks_feature = match env.config_text.as_deref().map(codex_hooks_disabled_in_config) {
-        Some(Ok(true)) => CodexHooksFeature::Disabled,
-        Some(Ok(false)) | None => CodexHooksFeature::EnabledOrUnset,
-        Some(Err(e)) => CodexHooksFeature::ConfigError(e),
-    };
-    let notify = match env.config_text.as_deref() {
-        None => CodexNotifyState::ConfigAbsent,
-        Some(text) => match text.parse::<DocumentMut>() {
-            Ok(doc) if notify_is_ours(doc.get("notify")) => CodexNotifyState::Ours,
-            Ok(doc) if doc.get("notify").is_some() => CodexNotifyState::Foreign,
-            Ok(_) => CodexNotifyState::NotInstalled,
-            Err(e) => CodexNotifyState::ConfigError(e.to_string()),
-        },
-    };
-    let owned_hook_events = env.hooks_text.as_deref().map(codex_owned_hook_event_count);
-    let daemon = if env.daemon_running {
-        CodexDaemon::Running
-    } else if env.config_text.as_deref().is_some_and(codex_daemon_auto_start_off) {
-        CodexDaemon::AutoStartOff
-    } else {
-        CodexDaemon::NotRunning
-    };
-    CodexFacts {
-        codex_on_path: env.codex_on_path,
-        zj_radar_on_path: env.zj_radar_on_path,
-        hooks_feature,
-        notify,
-        owned_hook_events,
-        daemon,
-    }
-}
-
-fn codex_owned_hook_event_count(existing: &str) -> Result<usize, String> {
-    let file = parse_hooks_file(existing)?;
-    Ok(CODEX_HOOK_EVENTS
-        .iter()
-        .filter(|event| {
-            file.hooks.get(**event).is_some_and(|groups| {
-                groups.iter().filter_map(|group| group.hooks.as_ref()).flatten().any(codex_hook_handler_is_ours)
-            })
-        })
-        .count())
-}
-
-fn codex_hooks_disabled_in_config(existing: &str) -> Result<bool, String> {
-    let doc = existing.parse::<DocumentMut>().map_err(|e| format!("config.toml is not valid TOML: {e}"))?;
-    Ok(doc
-        .get("features")
-        .and_then(Item::as_table_like)
-        .and_then(|features| features.get("hooks").or_else(|| features.get("codex_hooks")).and_then(Item::as_bool))
-        == Some(false))
-}
-
-/// `[features].daemon_auto_start = false`? Unparseable TOML reads as not set
-/// (the hooks-feature item already reports the parse error).
-fn codex_daemon_auto_start_off(existing: &str) -> bool {
-    existing.parse::<DocumentMut>().ok().is_some_and(|doc| {
-        doc.get("features")
-            .and_then(Item::as_table_like)
-            .and_then(|features| features.get("daemon_auto_start"))
-            .and_then(Item::as_bool)
-            == Some(false)
-    })
-}
-
-/// Raw, already-read environment for opencode setup. The only IO layer.
-/// Two bridge files: `plugin_text` is the 1.x server plugin
-/// (`plugins/zj-radar.js`), `tui_plugin_text` the 2.x TUI plugin
-/// (`plugins/zj-radar/tui.js`). `None` = absent.
-pub(crate) struct OpencodeEnv {
-    pub opencode_on_path: bool,
-    pub zj_radar_on_path: bool,
-    pub plugin_text: Option<String>,
-    pub tui_plugin_text: Option<String>,
-}
-
-/// Every derived fact about opencode setup state. The two `*_is_ours` are the
-/// single home for "is the installed bridge ours?" — read by the install/
-/// uninstall gating, the doctor, and `run`'s detection (via
-/// `opencode_plugin_is_ours` in `detect.rs`).
-pub(crate) struct OpencodeFacts {
-    pub opencode_on_path: bool,
-    pub zj_radar_on_path: bool,
-    /// The 1.x bridge file. `None` = absent; `Some(true)` = ours (marker
-    /// present); `Some(false)` = foreign (file present, marker absent).
-    pub plugin_is_ours: Option<bool>,
-    /// The 2.x TUI bridge file, same three states.
-    pub tui_plugin_is_ours: Option<bool>,
-}
-
-/// Pure: derive every opencode setup fact from already-read inputs. No I/O.
-pub(crate) fn analyze_opencode(env: &OpencodeEnv) -> OpencodeFacts {
-    OpencodeFacts {
-        opencode_on_path: env.opencode_on_path,
-        zj_radar_on_path: env.zj_radar_on_path,
-        plugin_is_ours: env.plugin_text.as_deref().map(opencode_plugin_is_ours),
-        tui_plugin_is_ours: env.tui_plugin_text.as_deref().map(opencode_plugin_is_ours),
-    }
-}
-
-/// Raw, already-read environment for pi setup. The only IO layer.
-/// `pi_version` is `pi --version`'s stdout (doctor only; `None` elsewhere).
-pub(crate) struct PiEnv {
-    pub pi_on_path: bool,
-    pub zj_radar_on_path: bool,
-    pub extension_text: Option<String>,
-    pub pi_version: Option<String>,
-}
-
-pub(crate) struct PiFacts {
-    pub pi_on_path: bool,
-    pub zj_radar_on_path: bool,
-    /// `None` = absent; `Some(true)` = ours; `Some(false)` = foreign.
-    pub extension_is_ours: Option<bool>,
-    /// Parsed `major.minor.patch`, when `pi --version` ran and parsed.
-    pub pi_version: Option<(u32, u32, u32)>,
-}
-
-/// The oldest pi whose events the bridge needs (`agent_settled`).
-pub(crate) const PI_MIN_VERSION: (u32, u32, u32) = (0, 80, 4);
-/// The oldest pi whose extension dialogs the bridge can see, so they surface
-/// as "needs you" (docs/producers.md → pi). Older pis still work otherwise.
-pub(crate) const PI_DIALOG_MIN_VERSION: (u32, u32, u32) = (0, 84, 4);
-
-pub(crate) fn analyze_pi(env: &PiEnv) -> PiFacts {
-    PiFacts {
-        pi_on_path: env.pi_on_path,
-        zj_radar_on_path: env.zj_radar_on_path,
-        extension_is_ours: env.extension_text.as_deref().map(pi_extension_is_ours),
-        pi_version: env.pi_version.as_deref().and_then(parse_semver),
-    }
-}
-
-pub(crate) struct OmpEnv {
-    pub omp_on_path: bool,
-    pub zj_radar_on_path: bool,
-    pub extension_text: Option<String>,
-}
-
-/// omp's doctor facts. No version floor: the bridge degrades on an older omp
-/// (no subagent identity → all sessions read as main; no approval events →
-/// approvals don't surface) rather than breaking.
-pub(crate) struct OmpFacts {
-    pub omp_on_path: bool,
-    pub zj_radar_on_path: bool,
-    /// `None` = absent; `Some(true)` = ours; `Some(false)` = foreign.
-    pub extension_is_ours: Option<bool>,
-}
-
-pub(crate) fn analyze_omp(env: &OmpEnv) -> OmpFacts {
-    OmpFacts {
-        omp_on_path: env.omp_on_path,
-        zj_radar_on_path: env.zj_radar_on_path,
-        extension_is_ours: env.extension_text.as_deref().map(omp_extension_is_ours),
-    }
-}
-
-/// The first whitespace token of `text` that reads as `[v]X.Y.Z[-pre]`.
-///
-/// Deliberately looser than `update.rs`'s `parse_version`: this reads a
-/// third-party tool's free-form `--version` banner ("pi v0.80.4", a prerelease
-/// suffix) to grade a floor, where a best-effort parse is right; that one
-/// compares zj-radar's own release tags before replacing a binary, so it
-/// accepts only a bare `MAJOR.MINOR.PATCH` and fails closed.
-fn parse_semver(text: &str) -> Option<(u32, u32, u32)> {
-    text.split_whitespace().find_map(|tok| {
-        let tok = tok.trim_start_matches('v');
-        let core = tok.split(['-', '+']).next()?;
-        let mut parts = core.split('.').map(|p| p.parse::<u32>().ok());
-        Some((parts.next()??, parts.next()??, parts.next()??))
-    })
 }
 
 #[cfg(test)]
@@ -446,7 +193,6 @@ mod tests {
             config_text: Some(managed),
             layout_text: None,
             permissions_text: None,
-            producers: ProducerTexts::default(),
             wasm_present: false,
             config_managed: false,
             wasm_path: "/x.wasm".to_string(),
@@ -474,7 +220,6 @@ mod tests {
             config_text: Some(config.to_string()),
             layout_text: None,
             permissions_text: None,
-            producers: ProducerTexts::default(),
             wasm_present: false,
             config_managed: false,
             wasm_path: "/x.wasm".to_string(),
@@ -504,7 +249,6 @@ mod tests {
             config_text: None,
             layout_text: Some(layout.to_string()),
             permissions_text: Some(perms),
-            producers: ProducerTexts::default(),
             wasm_present: true,
             config_managed: false,
             wasm_path: wasm_path.to_string(),
@@ -523,7 +267,6 @@ mod tests {
             config_text: None,
             layout_text: None,
             permissions_text: None,
-            producers: ProducerTexts::default(),
             wasm_present: false,
             config_managed: false,
             wasm_path: "/x.wasm".to_string(),
@@ -532,85 +275,5 @@ mod tests {
         let f = analyze_zellij(&env);
         assert_eq!(f.has_rail, None, "no layout file -> None, distinct from Some(false)");
         assert_eq!(f.granted, None, "no permissions file -> None");
-        assert!(f.producers.is_empty(), "no codex hooks and no claude plugin -> not wired");
-    }
-
-    #[test]
-    fn analyze_zellij_producer_wired_when_claude_plugin_present() {
-        let env = ZellijEnv {
-            config_text: None,
-            layout_text: None,
-            permissions_text: None,
-            producers: ProducerTexts {
-                claude_plugins: Some(r#"{"plugins":["zj-radar-claude"]}"#.to_string()),
-                ..ProducerTexts::default()
-            },
-            wasm_present: false,
-            config_managed: false,
-            wasm_path: "/x.wasm".to_string(),
-            zellij_version: Some("zellij 0.46.0".to_string()),
-        };
-        let f = analyze_zellij(&env);
-        assert_eq!(f.producers, vec![Agent::Claude], "claude producer plugin present -> wired");
-    }
-
-    #[test]
-    fn analyze_zellij_producer_wired_when_codex_hooks_marked() {
-        let env = ZellijEnv {
-            config_text: None,
-            layout_text: None,
-            permissions_text: None,
-            producers: ProducerTexts {
-                codex_hooks: Some(format!("{{\"command\": \"{CODEX_HOOK_MARKER} zj-radar notify codex\"}}")),
-                ..ProducerTexts::default()
-            },
-            wasm_present: false,
-            config_managed: false,
-            wasm_path: "/x.wasm".to_string(),
-            zellij_version: Some("zellij 0.46.0".to_string()),
-        };
-        let f = analyze_zellij(&env);
-        assert_eq!(f.producers, vec![Agent::Codex], "codex hooks text containing the marker -> wired");
-    }
-
-    #[test]
-    fn analyze_codex_classifies_notify_states() {
-        let ours = "notify = [\"zj-radar\", \"notify\", \"codex\"]\n";
-        let foreign = "notify = [\"other\"]\n";
-        let mk = |cfg: Option<&str>| {
-            analyze_codex(&CodexEnv {
-                codex_on_path: true,
-                zj_radar_on_path: true,
-                config_text: cfg.map(str::to_string),
-                hooks_text: None,
-                daemon_running: false,
-            })
-        };
-        assert!(matches!(mk(Some(ours)).notify, CodexNotifyState::Ours));
-        assert!(matches!(mk(Some(foreign)).notify, CodexNotifyState::Foreign));
-        assert!(matches!(mk(Some("a = 1\n")).notify, CodexNotifyState::NotInstalled));
-        assert!(matches!(mk(None).notify, CodexNotifyState::ConfigAbsent));
-    }
-
-    #[test]
-    fn analyze_codex_hooks_feature_and_event_count() {
-        let cfg_disabled = "[features]\nhooks = false\n";
-        let f = analyze_codex(&CodexEnv {
-            codex_on_path: true,
-            zj_radar_on_path: true,
-            config_text: Some(cfg_disabled.to_string()),
-            hooks_text: None,
-            daemon_running: false,
-        });
-        assert!(matches!(f.hooks_feature, CodexHooksFeature::Disabled));
-        assert!(f.owned_hook_events.is_none(), "no hooks.json -> None");
-    }
-
-    #[test]
-    fn parse_semver_reads_pi_version_output() {
-        assert_eq!(parse_semver("0.87.1\n"), Some((0, 87, 1)));
-        assert_eq!(parse_semver("pi v0.80.4"), Some((0, 80, 4)));
-        assert_eq!(parse_semver("0.88.0-beta.1"), Some((0, 88, 0)));
-        assert_eq!(parse_semver("unknown"), None);
     }
 }

@@ -711,7 +711,7 @@ leaves ≥2 spare lines, a footer pins to the floor of the pane — a `─` rule
 the tally line (`{n} working`, gaining ` · {m} need you` only when `m > 0`:
 a zero need-you count is noise, not signal). The `alt-[n] jump` hint is a
 THIRD footer line that renders only under `jump_hint` (the `JumpHint` config —
-same honesty contract as `grant_hint`, but no in-tree config sets it: `run`
+no in-tree config sets it: `run`
 bakes Alt-1..9 → GoToTab binds, yet Alt+digit is commonly claimed upstream of
 Zellij — WM workspace hotkeys, macOS Option typing `¡` — and the rail can't
 detect interception, so the hint is opt-in for setups that truly deliver the

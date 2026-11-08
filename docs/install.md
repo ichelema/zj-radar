@@ -57,11 +57,28 @@ edited. Consequences:
 
 - Your Zellij keybinds and theme do not apply inside `run` sessions.
 - Attaching to a session `run` did not create asks first.
-- On top of Zellij's defaults it binds `Ctrl y` (open the permission-grant
-  float) and `Alt 1`–`Alt 9` (tab jumps), so those chords do not reach
-  programs in the panes.
+- Before launching, it pre-authorizes its own wasm in Zellij's
+  `permissions.kdl` (backup at `permissions.kdl.zj-radar.bak`), so Zellij
+  never prompts. If that write is refused, Zellij asks inside the rail: focus
+  it and press `y`.
+- On top of Zellij's defaults it binds `Alt 1`–`Alt 9` (tab jumps), so those
+  chords do not reach programs in the panes.
 - It uses the wasm bundled into the binary. A `cargo install` build has no
   bundled wasm and downloads the matching one on first use.
+
+## Upgrading from a release with agent adapters
+
+Older releases wired each agent to the sidebar with hooks, plugins, or
+extensions that call `zj-radar notify`. The current CLI has no `notify` and
+no agent targets: agents that emit OSC 7501 need no setup. Remove the old
+adapters with the OLD CLI, before you install the new one:
+
+```sh
+for a in claude codex opencode pi omp; do zj-radar setup "$a" --uninstall; done
+```
+
+An adapter left behind makes its agent report an error on every hook event,
+because `zj-radar notify` no longer exists.
 
 ## Build from source
 

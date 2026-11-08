@@ -846,10 +846,7 @@ fn panel_faces_never_exceed_height() {
     for height in [0usize, 1, 2, 3, 5, 7, 12, 100] {
         for (name, face) in [
             ("onboarding", onboarding(&RenderOpts { height, ..ro(24, 0) })),
-            (
-                "needs_permission",
-                needs_permission(&RenderOpts { height, ..ro(24, 0) }, crate::config::GrantHint::CtrlY),
-            ),
+            ("needs_permission", needs_permission(&RenderOpts { height, ..ro(24, 0) })),
         ] {
             assert!(face.line_count() <= height, "{name} at height {height} emits {} lines", face.line_count());
             // vt100 scrolls when the newline COUNT reaches the pane height
@@ -3695,26 +3692,17 @@ fn seg_is_always_reset_terminated() {
 fn needs_permission_face_is_distinct_and_actionable() {
     let opts = ro(24, 0); // existing test helper: RenderOpts at width 24
     let onboard = onboarding(&opts).ansi;
-    let needs = needs_permission(&opts, crate::config::GrantHint::Generic).ansi;
+    let needs = needs_permission(&opts).ansi;
     assert_ne!(needs, onboard, "permission face must differ from idle onboarding");
-    // The searched substrings ("Ctrl-y", "permission", "press y") contain no
+    // The searched substrings ("permission", "press y") contain no
     // characters that appear in SGR escape sequences (`\x1b`, `[`, digits, `;`,
     // `m`), so a plain `contains` on the raw ANSI string is valid without
     // stripping SGR first.
     //
-    // Default (setup-injected rails, unknown installs): NO Ctrl-y promise —
-    // that keybind only exists in run-owned configs. The generic wording
-    // (focus + press y) is true everywhere: Zellij binds its native prompt to
-    // a rail pane.
-    assert!(!needs.contains("Ctrl-y"), "default face must not promise an uninstalled keybind:\n{needs}");
-    assert!(needs.contains("press y"), "default face must name the universal grant action:\n{needs}");
+    // The wording (focus + press y) is true everywhere: Zellij binds its
+    // native prompt to a rail pane.
+    assert!(needs.contains("press y"), "the face must name the universal grant action:\n{needs}");
     assert!(needs.to_lowercase().contains("permission"), "must mention permission");
-
-    // Run-owned configs pass `grant_hint "ctrl-y"` and get the float keybind.
-    let ctrl_y = needs_permission(&ro(24, 0), crate::config::GrantHint::CtrlY).ansi;
-    assert!(ctrl_y.contains("Ctrl-y"), "run installs must name the grant keybind:\n{ctrl_y}");
-    // Both variants keep the same height: three hint lines behind one face.
-    assert_eq!(needs.matches('\n').count(), ctrl_y.matches('\n').count());
 }
 
 #[test]

@@ -28,9 +28,7 @@ pub(crate) fn wasm_checksum_url(version: &str) -> String {
 /// repository baked in at build time (`CARGO_PKG_REPOSITORY`), so a fork only has
 /// to set `repository` in Cargo.toml — no source edit and no drift between the
 /// download URL and the error message. `ZJ_RADAR_REPO` overrides at runtime,
-/// mirroring the curl|sh installer's same-named knob. Also the marketplace repo
-/// `setup claude` adds (see `claude::claude_marketplace_name`), for the same
-/// fork-follows reason.
+/// mirroring the curl|sh installer's same-named knob.
 pub(crate) fn repo_slug() -> String {
     match std::env::var("ZJ_RADAR_REPO") {
         Ok(slug) if !slug.is_empty() => slug,
