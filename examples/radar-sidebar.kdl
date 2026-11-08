@@ -19,9 +19,7 @@ layout {
     default_tab_template {
         pane split_direction="vertical" {
             pane size=32 borderless=true {
-                plugin location="radar" {
-                    // Desktop notifications (macOS + Linux). Master switch + per-status toggles.
-                }
+                plugin location="radar"
             }
             children
         }
@@ -37,9 +35,7 @@ layout {
     new_tab_template {
         pane split_direction="vertical" {
             pane size=32 borderless=true {
-                plugin location="radar" {
-                    // Desktop notifications (macOS + Linux). Master switch + per-status toggles.
-                }
+                plugin location="radar"
             }
             pane focus=true
         }

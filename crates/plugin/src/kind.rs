@@ -86,10 +86,9 @@ kinds! {
 
 impl Kind {
     /// Whether this kind is an *agent* identity (a program that owns its pane
-    /// outright) rather than a task classification. The command observer uses
-    /// it to classify an exe by identity: `Kind::from_source(exe).is_agent()`
-    /// is THE test for "this exe is an agent", so the agent exe vocabulary
-    /// lives only in the `kinds!` table. Exhaustive on purpose — a new variant
+    /// outright) rather than a task classification:
+    /// `Kind::from_source(token).is_agent()` is THE test for "this `app` token
+    /// is an agent", so the agent vocabulary lives only in the `kinds!` table. Exhaustive on purpose — a new variant
     /// must declare which side it is here before it compiles.
     pub fn is_agent(self) -> bool {
         match self {
@@ -126,7 +125,7 @@ impl Kind {
 
     /// Whether this kind is a live connection to another machine — the `Remote`
     /// class in docs/activity-model.md §3. Its consumers are the tab marker and
-    /// the intake kind override for `remote_commands` extras.
+    /// `is_steady`.
     pub fn is_remote(self) -> bool {
         match self {
             Kind::Remote => true,

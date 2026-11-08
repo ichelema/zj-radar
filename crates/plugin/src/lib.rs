@@ -313,7 +313,7 @@ impl ZellijPlugin for State {
             EventType::RunCommandResult,
             // Replaces `SessionUpdate`: stock zj-radar never calls the
             // blocking `get_session_list()` host fn that's the ONLY thing
-            // that repopulates `SessionUpdate`'s peer list in zellij 0.44.3
+            // that repopulates `SessionUpdate`'s peer list (checked on zellij 0.44.3)
             // (`docs/design.md`, "Why not SessionUpdate") — only Zellij's own
             // session-manager plugin does, so a user without it open would
             // see an empty cross-session badge forever. `ModeUpdate` fires

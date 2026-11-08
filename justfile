@@ -2,8 +2,7 @@
 test:
     cargo test --all-features
 
-# Bash script tests (requires bats + shellcheck + jq on PATH, plus GNU
-# coreutils for `timeout` — two adversarial-input cases skip without it).
+# Bash script tests (requires bats + shellcheck on PATH).
 # Covers every shipped shell script: install.sh (the curl|sh release asset —
 # see scripts/tests/install.bats), funnel.sh (the fresh-machine CI check), and
 # the demo/ recording scripts.

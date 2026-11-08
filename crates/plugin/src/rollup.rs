@@ -91,7 +91,7 @@ pub(crate) enum PaneDisplay {
         pending_epoch_s: Option<u64>,
         /// The user has already seen this status (hides the `✓` hotspot).
         acknowledged: bool,
-        /// Background tasks the agent started (`core::task`), rendered as
+        /// Background tasks the agent started (`task.rs`, from OSC 7501 child records), rendered as
         /// `┊` sub-lines under the pane line.
         tasks: BgTasks,
     },

@@ -192,12 +192,10 @@
       devShells.default = pkgs.mkShell {
         # `just`, `bats`, and `shellcheck` are required by the CI recipes
         # (`just test-bash` / `just test-e2e`, and the `shellcheck` step) — keep
-        # them here so `nix develop -c just …` resolves on PATH. `jq` is used by
-        # the bash script tests. `cargo-deny` reproduces the nightly advisory job
-        # (`cargo deny check`).
+        # them here so `nix develop -c just …` resolves on PATH. `cargo-deny`
+        # reproduces the nightly advisory job (`cargo deny check`).
         packages = [
           toolchain
-          pkgs.jq
           pkgs.zellij
           pkgs.just
           pkgs.bats

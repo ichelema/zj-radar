@@ -2,8 +2,8 @@
 # A scripted "demo agent": prints a timed arc of OSC 7501 program-status
 # records for THIS pane, so the sidebar animates a believable story with no real
 # agent, no API keys, and byte-identical output every run. Same Zellij Program
-# Status Protocol a real agent speaks — see the README's "Writing your own
-# producer".
+# Status Protocol a real agent speaks — see docs/producers.md, "Writing your
+# own producer".
 #
 #   agent.sh <source> <repo> <branch> <scenario>
 #
