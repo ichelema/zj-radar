@@ -222,8 +222,8 @@ fn cwd_basename(path: &str) -> Option<String> {
 /// conventions: Claude (`<repo>/.claude/worktrees/<branch>`) and Codex
 /// (`<repo>/.Codex/worktrees/<branch>`). A cwd sitting inside such a worktree
 /// belongs, conceptually, to the parent repo — so naming should follow the repo,
-/// not the (per-branch) worktree directory. Mirrors the CLI's git-common-dir
-/// resolution (`cli::notify`) without needing a `git` process from inside wasm.
+/// not the (per-branch) worktree directory. A path check, so it needs no `git`
+/// process from inside wasm.
 const WORKTREE_MARKERS: [&str; 2] = ["/.claude/worktrees/", "/.Codex/worktrees/"];
 
 /// Resolve the directory NAME a tab should take from a pane's cwd. For a cwd

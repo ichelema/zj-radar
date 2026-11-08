@@ -51,7 +51,7 @@ zellij --config target/demo/config.kdl --layout target/demo/layout.kdl
 
 | File | What it is |
 |------|------------|
-| `agent.sh` | Broadcasts a timed status arc for `$ZELLIJ_PANE_ID`; the focused arcs also print agent-style output to fill the content pane. |
+| `agent.sh` | Prints a timed OSC 7501 status arc into its own pane; the focused arcs also print agent-style output to fill the content pane. |
 | `banner.sh` | The intro title card (tool name + glyph legend) shown for the first ~3s. |
 | `demorc.sh` | A minimal bash rcfile giving runtime tabs (`Ctrl+t n` while exploring live) a clean `$ ` prompt instead of the recording host's shell config. |
 | `layout.kdl` | Tabs running `agent.sh` arcs (one with two panes → a roll-up tree); radar sidebar pinned left via a direct `file:` plugin path. Template — `__WASM__`/`__ROOT__` filled at record time. |
@@ -87,7 +87,7 @@ recording flaky:
   `config.kdl`.)
 - **Timing is wall-clock.** The `Sleep`s in `hero.tape` and the `sleep`s in
   `agent.sh` share one clock, offset by the ~2–3s it takes the session to start
-  and the agents to begin broadcasting. If a beat lands early/late, nudge the
+  and the agents to begin emitting. If a beat lands early/late, nudge the
   two together. The two exceptions are event-driven and self-syncing: the
   tape's `Wait+Screen` anchors, and beat 3's resume (`agent.sh` blocks on
   `read` until the tape's `y` arrives).

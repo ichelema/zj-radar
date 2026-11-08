@@ -16,11 +16,10 @@ repo="${2:-demo}"
 branch="${3:-main}"
 scenario="${4:-working}"
 
-# Hold this pane open (and its last pushed status on the rail) until the
-# recording ends. Deliberately NOT `exec`: Zellij reports a pane whose root
-# process has no child as "back at the shell prompt" (is_foreground=false),
-# and the plugin rightly exit-clears the pane's pushed status on that signal —
-# so tail must run as our CHILD, keeping the process tree agent-shaped.
+# Hold this pane open (and its last status on the rail) until the recording
+# ends. Deliberately NOT `exec`: Zellij reads a pane whose root process has no
+# child as "back at the shell prompt" (is_foreground=false), so tail runs as
+# our CHILD, keeping the process tree agent-shaped.
 # (`sleep infinity` is GNU-only — stock macOS sleep rejects it.)
 hold() { tail -f /dev/null; }
 
@@ -68,9 +67,8 @@ needs-you) # the star of the show: works, blocks on approval
     sleep 5;  emit pending "run database migration?"
     printf '\n\033[33m❯ Run migration?\033[0m (y/n) '
     # `read` is a bash builtin: while it blocks, this script has no child
-    # process, and a childless pane root reads to Zellij (and so the plugin)
-    # as "producer exited, back at the prompt" — which would exit-clear the
-    # pending card mid-beat. Park a sleep child for the duration of the wait.
+    # process, and a childless pane root reads to Zellij as "back at the
+    # prompt" (see hold above). Park a sleep child for the duration of the wait.
     sleep 30 & guard=$!
     read -r -n 1 -t 20 || true   # tape types `y` (into REPLY); timeout so an
     kill "$guard" 2>/dev/null || true   # unattended run still completes

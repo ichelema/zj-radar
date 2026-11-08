@@ -550,7 +550,7 @@ impl PluginRuntime {
         // `tick` at ~1 Hz through late fires and Frame↔Fast switches. Not
         // exactly 1 Hz: Zellij's elapsed is the timer's sleep alone, so each
         // fire's processing and re-arm go uncounted — a tick costs
-        // `1s + fires × overhead`. At ~1ms per frame (bench-wasm) that is a
+        // `1s + fires × overhead`. At ~1ms per frame (measured with the former wasm-fuel bench) that is a
         // few ms per tick more than the plain Fast chain's one fire, a
         // sub-percent skew against hidden siblings that the grace/TTL windows
         // (seconds wide) absorb.
