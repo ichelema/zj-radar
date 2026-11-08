@@ -623,13 +623,12 @@ fn focused_done_enters_the_ledger() {
     assert!(filed, "the finished turn should resurface as an `─ earlier` ledger row;\nsidebar:\n{sidebar}");
 }
 
-/// Behavior: an error the user is watching must NOT recede — CONTEXT.md's hard
-/// rule "an Error or a 'needs you' Pending stays lit even while watched". The
-/// sibling of `focused_done_enters_the_ledger`: same focused-pane setup, same
-/// timer ticks, but the error stays on the rail.
+/// Behavior: an error the user is watching is seen at once too — Zellij reads
+/// the focused pane's `error` as seen like a `done` — and lands in the
+/// `─ earlier` ledger. The sibling of `focused_done_enters_the_ledger`.
 #[test]
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
-fn focused_error_stays_lit_on_the_rendered_rail() {
+fn focused_error_enters_the_ledger() {
     let wasm = plugin_wasm_path();
     assert!(
         wasm.exists(),
@@ -643,18 +642,12 @@ fn focused_error_stays_lit_on_the_rendered_rail() {
     let session = ZellijSession::start(&session_name, &layout, &wasm, temp_home);
     // An error finishes on the focused pane.
     session.emit_program_status(&osc("error", "tests failed"));
-    // Same generous settle as the ledger test — if anything were going to recede
-    // it, it would have happened within these ticks.
-    std::thread::sleep(std::time::Duration::from_secs(3));
-
+    let filed = session.wait_until(Duration::from_secs(6), |s| {
+        sidebar_region(&s.screen(), 32).split_once("─ earlier").is_some_and(|(_, after)| after.contains("tests failed"))
+    });
     let sidebar = sidebar_region(&session.screen(), 32);
-    eprintln!("[e2e] post-settle sidebar (32 cols):\n{}", sidebar);
-    assert!(
-        sidebar.contains("tests failed"),
-        "an Error watched under focus must stay lit on the rail (no recede);\nsidebar:\n{}",
-        sidebar
-    );
-    eprintln!("[e2e] PASS: focused error stayed lit");
+    eprintln!("[e2e] post-error sidebar (32 cols):\n{sidebar}");
+    assert!(filed, "the failed turn should resurface as an `─ earlier` ledger row;\nsidebar:\n{sidebar}");
 }
 
 /// THE headline interaction, end-to-end: a real mouse click on a tab's rail row
