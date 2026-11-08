@@ -4,8 +4,8 @@ name: E2E
 #  - nightly, on both OSes — the broad regression net;
 #  - on every PR, ubuntu-only, so the required `e2e (ubuntu-latest)` check
 #    always reports. The suite itself runs only when the PR touches what E2E
-#    exercises (plugin + core + the notify.sh producer the harness drives, the
-#    toolchain/lockfiles, this workflow); otherwise the job passes after the
+#    exercises (the plugin, the toolchain/lockfiles,
+#    this workflow); otherwise the job passes after the
 #    `scope` step. A path filter on the trigger would skip the workflow, and a
 #    required check that never reports blocks the merge;
 #  - as a release gate: release.yml `uses:` this workflow via workflow_call,
@@ -65,7 +65,7 @@ jobs:
           fi
           changed="$(git diff --name-only HEAD^1 HEAD)"
           printf '%s\n' "$changed"
-          if printf '%s\n' "$changed" | grep -Eq '^(crates/plugin/|crates/core/|plugins/zj-radar-claude/scripts/|Cargo\.lock$|justfile$|flake\.nix$|flake\.lock$|\.github/workflows/e2e\.yml$)'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(crates/plugin/|Cargo\.lock$|justfile$|flake\.nix$|flake\.lock$|\.github/workflows/e2e\.yml$)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"

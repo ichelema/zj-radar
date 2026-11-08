@@ -200,12 +200,12 @@ impl PaneDisplay {
     pub(crate) fn has_unacknowledged_status_pending(&self) -> bool {
         matches!(
             self,
-            Self::Tracked { status: Status::Pending, acknowledged: false, origin: ObservationOrigin::StatusPipe, .. }
+            Self::Tracked { status: Status::Pending, acknowledged: false, origin: ObservationOrigin::Program, .. }
         )
     }
 
     pub(crate) fn is_status_origin(&self) -> bool {
-        matches!(self, Self::Tracked { origin: ObservationOrigin::StatusPipe, .. })
+        matches!(self, Self::Tracked { origin: ObservationOrigin::Program, .. })
     }
 }
 
@@ -373,7 +373,7 @@ pub(crate) struct TabRow {
 impl TabRow {
     /// The 0-based tab position Zellij's switch/jump APIs speak — `number`
     /// is the rail's 1-based display ordinal. The one home for that
-    /// conversion (`target_for_row`'s click targets, `own_presence`'s
+    /// conversion (`target_for_row`'s click targets, `own_counts`'s
     /// `attention_tab_position`), so the two consumers can never disagree
     /// off-by-one.
     pub(crate) fn tab_position(&self) -> usize {

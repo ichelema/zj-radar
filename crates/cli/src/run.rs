@@ -826,7 +826,7 @@ mod tests {
     #[test]
     fn materialize_is_noop_on_matching_version_and_assets() {
         // The up-to-date probe is the marker (version + asset hash) plus file
-        // presence — it never re-reads file CONTENTS. So a sentinel scribbled
+        // existence — it never re-reads file CONTENTS. So a sentinel scribbled
         // into a generated file survives a matching re-materialize, proving
         // the second call wrote nothing. (A changed asset flips the marker and
         // rewrites — covered by the without-version-bump test below.)

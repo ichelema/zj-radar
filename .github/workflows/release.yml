@@ -36,7 +36,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: deterministic suite (L1-L4)
         run: nix develop -c cargo test --workspace --all-features
-      - name: bash hook + installer tests
+      - name: bash script + installer tests
         run: nix develop -c just test-bash
 
   e2e:

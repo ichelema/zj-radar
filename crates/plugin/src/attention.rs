@@ -7,7 +7,7 @@
 
 use crate::kind::Kind;
 use crate::observation::{ObservationOrigin, TrackedObservation};
-use crate::presence::{Presence, PresencePane, PresenceTab};
+use crate::sessions::{SessionSummary, SummaryPane, SummaryTab, MAX_LABEL_CHARS, MAX_PANES_PER_TAB, MAX_TABS};
 use crate::status::Status;
 use crate::task::{BgTask, BgTasks, TaskState};
 
@@ -111,7 +111,7 @@ impl NativePane {
             .then(|| self.records.iter().enumerate().max_by_key(|(_, r)| r.status))
             .flatten();
         let (status, origin, kind, msg, since_ms) = match deciding {
-            Some((_, r)) => (r.status, ObservationOrigin::StatusPipe, program_kind, r.label(), r.updated_ms),
+            Some((_, r)) => (r.status, ObservationOrigin::Program, program_kind, r.label(), r.updated_ms),
             None => match a.source {
                 Source::Command => (a.status, ObservationOrigin::Command, Kind::Command, a.text.clone(), a.since_ms),
                 Source::Program | Source::Other => {
@@ -120,7 +120,7 @@ impl NativePane {
                     } else {
                         a.text.clone()
                     };
-                    (a.status, ObservationOrigin::StatusPipe, program_kind, msg, a.since_ms)
+                    (a.status, ObservationOrigin::Program, program_kind, msg, a.since_ms)
                 }
             },
         };
@@ -193,18 +193,17 @@ pub(crate) struct PeerSession {
 }
 
 impl PeerSession {
-    /// The peer as the badge's [`Presence`], tabs in first-seen item order.
+    /// The peer as the badge's [`SessionSummary`], tabs in first-seen item order.
     /// Tab positions are ordinals, not Zellij positions: peer clicks focus a
     /// pane by id instead (`render_peer_children`).
-    pub(crate) fn presence(self) -> Presence {
+    pub(crate) fn summary(self) -> SessionSummary {
         use crate::payload::sanitize;
-        use crate::presence::{MAX_LABEL_CHARS, MAX_PANES_PER_TAB, MAX_TABS, PRESENCE_VERSION};
-        let mut tabs: Vec<(usize, PresenceTab)> = Vec::new();
+        let mut tabs: Vec<(usize, SummaryTab)> = Vec::new();
         for item in self.items {
             let i = match tabs.iter().position(|(id, _)| *id == item.tab_id) {
                 Some(i) => i,
                 None if tabs.len() < MAX_TABS => {
-                    let tab = PresenceTab {
+                    let tab = SummaryTab {
                         position: tabs.len(),
                         name: sanitize(&item.tab_name, MAX_LABEL_CHARS),
                         panes: vec![],
@@ -215,28 +214,25 @@ impl PeerSession {
                 None => continue,
             };
             let a = item.attention;
-            let (origin, kind) = match a.source {
-                Source::Command => ("command", Kind::Command),
-                Source::Program | Source::Other => ("status", a.app.as_deref().map_or(Kind::Other, kind_for_app)),
+            let kind = match a.source {
+                Source::Command => Kind::Command,
+                Source::Program | Source::Other => a.app.as_deref().map_or(Kind::Other, kind_for_app),
             };
             let panes = &mut tabs[i].1.panes;
             if panes.len() < MAX_PANES_PER_TAB {
-                panes.push(PresencePane {
+                panes.push(SummaryPane {
                     pane_id: Some(item.pane_id),
-                    origin: Some(origin.into()),
                     kind: kind.as_source().into(),
                     status: a.status.as_wire().into(),
                     label: sanitize(&a.text, MAX_LABEL_CHARS),
                 });
             }
         }
-        Presence {
-            v: PRESENCE_VERSION,
+        SessionSummary {
             session_name: sanitize(&self.name, 128),
             running: self.working,
             attention: self.needs_you,
             attention_tab_position: None,
-            updated_epoch_s: 0,
             tabs: tabs.into_iter().map(|(_, tab)| tab).collect(),
         }
     }
@@ -270,14 +266,13 @@ mod tests {
                 item(5, 7, "pi", Status::Done),
             ],
         }
-        .presence();
+        .summary();
         assert_eq!((p.session_name.as_str(), p.running, p.attention), ("work", 1, 1));
         let tabs: Vec<(&str, Vec<u32>)> =
             p.tabs.iter().map(|t| (t.name.as_str(), t.panes.iter().filter_map(|p| p.pane_id).collect())).collect();
         assert_eq!(tabs, vec![("tab7", vec![3, 5]), ("tab9", vec![4])]);
         let first = &p.tabs[0].panes[0];
         assert_eq!((first.kind.as_str(), first.status.as_str()), ("claude", "pending"));
-        assert!(Presence::parse(&p.to_json()).is_some(), "a converted peer is a valid presence");
     }
 
     fn program(status: Status, app: &str, text: &str) -> NativePane {
@@ -308,7 +303,7 @@ mod tests {
         let o = program(Status::Running, "claude-code", "working 40%: Editing main.rs").observation(None, 7).unwrap();
         assert_eq!(o.status, Status::Running);
         assert_eq!(o.kind, Kind::Claude);
-        assert_eq!(o.origin, ObservationOrigin::StatusPipe);
+        assert_eq!(o.origin, ObservationOrigin::Program);
         assert_eq!(o.msg, "working 40%: Editing main.rs");
         assert_eq!(o.last_change_tick, 7);
         assert_eq!(o.exit_code, None);

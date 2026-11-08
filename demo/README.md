@@ -4,8 +4,8 @@ Everything needed to regenerate the repo's hero media and screenshots — and a
 zero-dependency way to **see the sidebar in action without wiring up a real
 agent**.
 
-The trick: zj-radar's only interface is the `zj_radar.status.v1` pipe broadcast,
-so [`agent.sh`](agent.sh) just *plays* a scripted status arc for its own pane.
+The trick: the rail reads Zellij's own program status (the OSC 7501 escape
+sequence), so [`agent.sh`](agent.sh) just *plays* a scripted status arc for its own pane.
 Each tab runs a different arc; the rail animates the rest (the spinner and
 elapsed clock advance on the plugin's own 1-second timer).
 

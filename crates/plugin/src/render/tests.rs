@@ -78,7 +78,7 @@ fn display(status: Status, done: usize, total: usize, detail: Option<PrimaryDeta
                 since_tick: d.since_tick,
                 outcome: d.outcome,
                 pending_epoch_s: d.pending_epoch_s,
-                origin: crate::observation::ObservationOrigin::StatusPipe,
+                origin: crate::observation::ObservationOrigin::Program,
                 acknowledged: false,
                 tasks: Default::default(),
             }]
@@ -929,7 +929,7 @@ fn pe(id: u32, kind: Kind, status: Status, msg: &str) -> PaneDisplay {
         since_tick: 0,
         outcome: None,
         pending_epoch_s: None,
-        origin: crate::observation::ObservationOrigin::StatusPipe,
+        origin: crate::observation::ObservationOrigin::Program,
         acknowledged: false,
         tasks: Default::default(),
     }
@@ -3108,7 +3108,7 @@ prop_compose! {
                 since_tick: 0,
                 outcome: None,
                 pending_epoch_s: None,
-                origin: crate::observation::ObservationOrigin::StatusPipe,
+                origin: crate::observation::ObservationOrigin::Program,
                 acknowledged: false,
                 tasks: bg,
             }
@@ -3436,7 +3436,7 @@ fn hotspot_metadata_survives_cards_finalize_and_excludes_question_and_overflow_l
         since_tick: 0,
         outcome: None,
         pending_epoch_s: None,
-        origin: crate::observation::ObservationOrigin::StatusPipe,
+        origin: crate::observation::ObservationOrigin::Program,
         acknowledged: false,
         tasks: Default::default(),
     };
@@ -3888,17 +3888,17 @@ fn badge_absent_with_single_session_and_lockstep_with_many() {
     assert_eq!(lines[2].target, None, "separator line is click-inert");
 }
 
-/// A peer entry whose presence carries `tabs` tabs of `agents` running
+/// A peer entry whose summary carries `tabs` tabs of `agents` running
 /// Claude panes each (tab `t` at position `t`, named `t{t}`, panes `a{t}.{p}`).
 fn peer_with_tree(name: &str, tabs: usize, agents: usize) -> BadgeEntry {
-    use crate::presence::{PresencePane, PresenceTab};
+    use crate::sessions::{SummaryPane, SummaryTab};
     let mut peer = badge_entry(name, false, tabs * agents, 0, None, false);
     peer.tabs = (0..tabs)
-        .map(|t| PresenceTab {
+        .map(|t| SummaryTab {
             position: t,
             name: format!("t{t}"),
             panes: (0..agents)
-                .map(|p| PresencePane {
+                .map(|p| SummaryPane {
                     kind: "claude".into(),
                     status: "running".into(),
                     label: format!("a{t}.{p}"),
@@ -3912,12 +3912,12 @@ fn peer_with_tree(name: &str, tabs: usize, agents: usize) -> BadgeEntry {
 
 #[test]
 fn peer_session_tree_lists_tabs_and_agents_with_tab_targets() {
-    use crate::presence::{PresencePane, PresenceTab};
+    use crate::sessions::{SummaryPane, SummaryTab};
     let mut peer = badge_entry("review", false, 1, 0, None, false);
-    peer.tabs = vec![PresenceTab {
+    peer.tabs = vec![SummaryTab {
         position: 2,
         name: "PR 8577".into(),
-        panes: vec![PresencePane {
+        panes: vec![SummaryPane {
             kind: "claude".into(),
             status: "running".into(),
             label: "reviewing CI".into(),
@@ -3937,17 +3937,16 @@ fn peer_session_tree_lists_tabs_and_agents_with_tab_targets() {
 
 #[test]
 fn peer_lines_with_pane_ids_focus_the_pane_not_a_tab() {
-    use crate::presence::{PresencePane, PresenceTab};
+    use crate::sessions::{SummaryPane, SummaryTab};
     let mut peer = badge_entry("review", false, 1, 1, None, false);
     peer.attention_pane_id = Some(9);
-    let pane = |id, label: &str| PresencePane {
+    let pane = |id, label: &str| SummaryPane {
         pane_id: Some(id),
         kind: "claude".into(),
         status: "pending".into(),
         label: label.into(),
-        ..Default::default()
     };
-    peer.tabs = vec![PresenceTab { position: 0, name: "t".into(), panes: vec![pane(9, "a"), pane(4, "b")] }];
+    peer.tabs = vec![SummaryTab { position: 0, name: "t".into(), panes: vec![pane(9, "a"), pane(4, "b")] }];
     let targets: Vec<(Option<u32>, Option<usize>)> = render_peer_children(&peer, usize::MAX, &ro(36, 18))
         .iter()
         .map(|l| l.target.as_ref().map(|t| (t.pane_id, t.session_tab_position())).unwrap())
@@ -4051,7 +4050,7 @@ fn idle_strip_sits_under_the_local_cards_not_the_peer_tree() {
 #[test]
 fn session_tree_off_keeps_the_compact_badge_above_the_cards() {
     // Default: the badge is one line per session above the cards — the peer
-    // presence may carry a tree (a peer with the option on), but it's ignored.
+    // the summary may carry a tree (a peer with the option on), but it's ignored.
     let rows = vec![tab(1, "local", display(Status::Running, 0, 1, Some(pd("r", "b", "localjob", Status::Running))))];
     let badge = vec![badge_entry("work", true, 1, 0, None, false), peer_with_tree("peer", 2, 2)];
     let opts = RenderOpts { height: 40, density: crate::config::Density::Cards, badge, ..ro(32, 0) };

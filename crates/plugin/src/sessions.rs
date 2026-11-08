@@ -12,15 +12,49 @@
 //! and `cycle()` (what Alt+[/] steps through): current session first, then
 //! `attention > 0` sessions by name, then the rest by name.
 
-use crate::presence::{Presence, PresenceTab};
 use crate::radar_state::Direction;
 
-/// A row in the shared ordering: a [`Presence`] (own or peer) plus whether
+pub(crate) const MAX_TABS: usize = 64;
+pub(crate) const MAX_PANES_PER_TAB: usize = 16;
+pub(crate) const MAX_LABEL_CHARS: usize = 96;
+
+/// A bounded, display-only view of another session's tab tree.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Deserialize), serde(default))]
+pub(crate) struct SummaryTab {
+    pub position: usize,
+    pub name: String,
+    pub panes: Vec<SummaryPane>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Deserialize), serde(default))]
+pub(crate) struct SummaryPane {
+    /// Zellij terminal pane id.
+    pub pane_id: Option<u32>,
+    pub kind: String,
+    pub status: String,
+    pub label: String,
+}
+
+/// What the badge knows about one session (own or peer): its name and counts,
+/// plus, for peers, a bounded tab tree.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Deserialize), serde(default))]
+pub(crate) struct SessionSummary {
+    pub session_name: String,
+    pub running: usize,
+    pub attention: usize,
+    pub attention_tab_position: Option<usize>,
+    pub tabs: Vec<SummaryTab>,
+}
+
+/// A row in the shared ordering: a [`SessionSummary`] (own or peer) plus whether
 /// it's the current session. `own` contributes at most one of these (via
-/// `set_own`); every peer in `peers` contributes one. A `Presence` IS the
+/// `set_own`); every peer in `peers` contributes one. A `SessionSummary` IS the
 /// identity (its `session_name`) as well as the counts.
 struct OrderedEntry<'a> {
-    presence: &'a Presence,
+    summary: &'a SessionSummary,
     is_current: bool,
 }
 
@@ -36,7 +70,7 @@ pub(crate) struct BadgeEntry {
     pub attention_pane_id: Option<u32>,
     pub is_current: bool,
     pub selected: bool,
-    pub tabs: Vec<PresenceTab>,
+    pub tabs: Vec<SummaryTab>,
 }
 
 /// Where a committed cycle gesture lands — enough for the runtime to switch
@@ -51,7 +85,7 @@ pub(crate) struct CommitTarget {
 /// The first pane waiting on the user in a peer's tree — the arrival focus
 /// for a peer from `GlobalAttentionUpdate`, which knows pane ids but not tab
 /// positions. `None` when a tab position is already known.
-fn attention_pane(p: &Presence) -> Option<u32> {
+fn attention_pane(p: &SessionSummary) -> Option<u32> {
     if p.attention_tab_position.is_some() {
         return None;
     }
@@ -84,8 +118,8 @@ struct SelectionState {
 
 #[derive(Default)]
 pub(crate) struct Sessions {
-    peers: Vec<Presence>,
-    own: Option<Presence>,
+    peers: Vec<SessionSummary>,
+    own: Option<SessionSummary>,
     selection: Option<SelectionState>,
     /// Mirrors the local `session_tree` option. Off, peer trees are dropped
     /// from the badge — and so from `update_global`'s change compare and the
@@ -96,8 +130,8 @@ pub(crate) struct Sessions {
 
 impl Sessions {
     /// Replace the peer set with every other session Zellij reports
-    /// (`attention::PeerSession::presence`). Returns whether the badge changed.
-    pub(crate) fn update_global(&mut self, peers: Vec<Presence>) -> bool {
+    /// (`attention::PeerSession::summary`). Returns whether the badge changed.
+    pub(crate) fn update_global(&mut self, peers: Vec<SessionSummary>) -> bool {
         let before = self.badge();
         self.peers = peers;
         self.badge() != before
@@ -118,9 +152,9 @@ impl Sessions {
     /// counts into the badge — the runtime calls this every time it
     /// re-derives them (`own_counts`), not just on a name change, so the own
     /// row stays live as running/attention move. Receives a counts-only
-    /// `Presence` (empty `tabs`): the current session's own tree is never
+    /// `SessionSummary` (empty `tabs`): the current session's own tree is never
     /// rendered.
-    pub(crate) fn set_own(&mut self, p: Presence) -> bool {
+    pub(crate) fn set_own(&mut self, p: SessionSummary) -> bool {
         let before = self.badge();
         self.own = Some(p);
         self.badge() != before
@@ -141,7 +175,7 @@ impl Sessions {
         // selected" — restart below rather than advance from a position it
         // no longer occupies.
         let current_position =
-            self.selection.as_ref().and_then(|sel| order.iter().position(|s| s.presence.session_name == sel.name));
+            self.selection.as_ref().and_then(|sel| order.iter().position(|s| s.summary.session_name == sel.name));
         self.selection = match (current_position, order.len()) {
             (_, 0) => None,
             (None, _) => {
@@ -149,7 +183,7 @@ impl Sessions {
                 // the first non-current entry (index 0 is the current
                 // session, when own is known).
                 order.iter().position(|s| !s.is_current).map(|index| SelectionState {
-                    name: order[index].presence.session_name.clone(),
+                    name: order[index].summary.session_name.clone(),
                     taps_since_last_fire: true,
                 })
             }
@@ -158,7 +192,7 @@ impl Sessions {
                     Direction::Next => (index + 1) % len,
                     Direction::Prev => (index + len - 1) % len,
                 };
-                Some(SelectionState { name: order[next].presence.session_name.clone(), taps_since_last_fire: true })
+                Some(SelectionState { name: order[next].summary.session_name.clone(), taps_since_last_fire: true })
             }
         };
         self.badge() != before
@@ -184,14 +218,14 @@ impl Sessions {
         let name = sel.name.clone();
         self.selection = None; // committing, cancelling, or dropping a vanished selection all clear
         let order = self.ordered();
-        let entry = order.iter().find(|s| s.presence.session_name == name)?; // vanished session: nothing to commit
+        let entry = order.iter().find(|s| s.summary.session_name == name)?; // vanished session: nothing to commit
         if entry.is_current {
             return None; // cancel gesture
         }
         Some(CommitTarget {
-            name: entry.presence.session_name.clone(),
-            attention_tab_position: entry.presence.attention_tab_position,
-            attention_pane_id: attention_pane(entry.presence),
+            name: entry.summary.session_name.clone(),
+            attention_tab_position: entry.summary.attention_tab_position,
+            attention_pane_id: attention_pane(entry.summary),
         })
     }
 
@@ -204,13 +238,13 @@ impl Sessions {
         order
             .into_iter()
             .map(|s| BadgeEntry {
-                name: s.presence.session_name.clone(),
-                running: s.presence.running,
-                attention: s.presence.attention,
-                attention_tab_position: s.presence.attention_tab_position,
-                attention_pane_id: attention_pane(s.presence),
+                name: s.summary.session_name.clone(),
+                running: s.summary.running,
+                attention: s.summary.attention,
+                attention_tab_position: s.summary.attention_tab_position,
+                attention_pane_id: attention_pane(s.summary),
                 is_current: s.is_current,
-                selected: selected_name == Some(s.presence.session_name.as_str()),
+                selected: selected_name == Some(s.summary.session_name.as_str()),
                 // The current session's own tree never renders (its tabs are
                 // the local cards). Peer trees only when shown, agent panes
                 // only — the filter sits here, upstream of the tab glyph and
@@ -218,10 +252,10 @@ impl Sessions {
                 tabs: if s.is_current || !self.show_trees {
                     Vec::new()
                 } else {
-                    s.presence
+                    s.summary
                         .tabs
                         .iter()
-                        .map(|tab| PresenceTab {
+                        .map(|tab| SummaryTab {
                             panes: tab
                                 .panes
                                 .iter()
@@ -259,14 +293,14 @@ impl Sessions {
             .peers
             .iter()
             .filter(|p| own_name != Some(p.session_name.as_str()))
-            .map(|presence| OrderedEntry { presence, is_current: false })
-            .partition(|e| e.presence.attention > 0);
+            .map(|summary| OrderedEntry { summary, is_current: false })
+            .partition(|e| e.summary.attention > 0);
         fn by_name(a: &OrderedEntry<'_>, b: &OrderedEntry<'_>) -> std::cmp::Ordering {
-            a.presence.session_name.cmp(&b.presence.session_name)
+            a.summary.session_name.cmp(&b.summary.session_name)
         }
         attention.sort_by(by_name);
         rest.sort_by(by_name);
-        let current = self.own.as_ref().map(|p| OrderedEntry { presence: p, is_current: true });
+        let current = self.own.as_ref().map(|p| OrderedEntry { summary: p, is_current: true });
         current.into_iter().chain(attention).chain(rest).collect()
     }
 }
@@ -276,21 +310,20 @@ mod tests {
     use super::*;
     use crate::radar_state::Direction;
 
-    fn peer_with_tree(label: &str) -> Presence {
+    fn peer_with_tree(label: &str) -> SessionSummary {
         let json = serde_json::json!({
-            "v": 1, "session_name": "alpha", "running": 1, "attention": 0, "updated_epoch_s": 10,
+            "session_name": "alpha", "running": 1, "attention": 0,
             "tabs": [{"position": 0, "name": "t", "panes": [
-                {"pane_id": 3, "origin": "status", "kind": "claude", "status": "running", "label": label},
-                {"pane_id": 4, "origin": "command", "kind": "test", "status": "running", "label": "cargo test"}
+                {"pane_id": 3, "kind": "claude", "status": "running", "label": label},
+                {"pane_id": 4, "kind": "test", "status": "running", "label": "cargo test"}
             ]}]
         });
-        Presence::parse(&json.to_string()).unwrap()
+        serde_json::from_value(json).unwrap()
     }
 
-    fn global_peer(name: &str, needs_you_pane: Option<u32>) -> Presence {
-        use crate::presence::{PresencePane, PresenceTab};
+    fn global_peer(name: &str, needs_you_pane: Option<u32>) -> SessionSummary {
         let panes = needs_you_pane
-            .map(|id| PresencePane {
+            .map(|id| SummaryPane {
                 pane_id: Some(id),
                 kind: "claude".into(),
                 status: "pending".into(),
@@ -298,10 +331,10 @@ mod tests {
             })
             .into_iter()
             .collect();
-        Presence {
+        SessionSummary {
             session_name: name.into(),
             attention: needs_you_pane.map_or(0, |_| 1),
-            tabs: vec![PresenceTab { panes, ..Default::default() }],
+            tabs: vec![SummaryTab { panes, ..Default::default() }],
             ..Default::default()
         }
     }
@@ -348,33 +381,29 @@ mod tests {
         assert!(s.update_global(vec![peer_with_tree("two")]), "with trees on, label edges repaint");
     }
 
-    fn own(name: &str) -> Presence {
-        Presence {
+    fn own(name: &str) -> SessionSummary {
+        SessionSummary {
             session_name: name.into(),
             running: 0,
             attention: 0,
             attention_tab_position: None,
-            updated_epoch_s: 0,
             tabs: vec![],
-            ..Default::default()
         }
     }
-    fn presence(name: &str, running: usize, attention: usize) -> Presence {
-        Presence { session_name: name.into(), running, attention, ..Default::default() }
+    fn summary(name: &str, running: usize, attention: usize) -> SessionSummary {
+        SessionSummary { session_name: name.into(), running, attention, ..Default::default() }
     }
 
     #[test]
     fn badge_orders_current_then_attention_then_rest() {
         let mut s = Sessions::default();
-        s.update_global(vec![presence("zeta", 1, 2), presence("alpha", 1, 0)]);
-        s.set_own(Presence {
+        s.update_global(vec![summary("zeta", 1, 2), summary("alpha", 1, 0)]);
+        s.set_own(SessionSummary {
             session_name: "work".into(),
             running: 3,
             attention: 0,
             attention_tab_position: None,
-            updated_epoch_s: 0,
             tabs: vec![],
-            ..Default::default()
         });
         // (Bound rather than chained straight off `s.badge()`: the literal
         // brief snippet borrows from a temporary `Vec<BadgeEntry>` that would
@@ -389,7 +418,7 @@ mod tests {
     fn cycle_advances_and_wraps_and_tick_commits_after_idle() {
         let mut s = Sessions::default();
         s.set_own(own("work"));
-        s.update_global(vec![presence("alpha", 0, 1), presence("beta", 1, 0)]);
+        s.update_global(vec![summary("alpha", 0, 1), summary("beta", 1, 0)]);
         // Order: work(current), alpha(attention), beta.
         s.cycle(Direction::Next); // select alpha
         assert_eq!(s.tick(), None, "the fire covering the tap must not commit — it clears the flag");
@@ -404,7 +433,7 @@ mod tests {
     fn committing_on_current_session_is_a_noop_cancel() {
         let mut s = Sessions::default();
         s.set_own(own("work"));
-        s.update_global(vec![presence("alpha", 0, 0)]);
+        s.update_global(vec![summary("alpha", 0, 0)]);
         s.cycle(Direction::Next); // alpha
         s.cycle(Direction::Next); // wraps to work (current)
         s.tick(); // the fire covering that tap: skip, clears the flag
@@ -415,7 +444,7 @@ mod tests {
     fn commit_carries_attention_tab_position() {
         let mut s = Sessions::default();
         s.set_own(own("work"));
-        s.update_global(vec![Presence { attention_tab_position: Some(2), ..presence("alpha", 0, 1) }]);
+        s.update_global(vec![SessionSummary { attention_tab_position: Some(2), ..summary("alpha", 0, 1) }]);
         s.cycle(Direction::Next);
         s.tick(); // the fire covering the tap: skip, clears the flag
         assert_eq!(s.tick().unwrap().attention_tab_position, Some(2));
@@ -433,7 +462,7 @@ mod tests {
     fn tap_then_immediate_fire_does_not_commit() {
         let mut s = Sessions::default();
         s.set_own(own("work"));
-        s.update_global(vec![presence("alpha", 1, 0)]);
+        s.update_global(vec![summary("alpha", 1, 0)]);
         s.cycle(Direction::Next); // selects alpha
                                   // A fire landing right after the tap must not commit instantly —
                                   // it covers the tap's interval and must reset the deadline instead.
@@ -447,7 +476,7 @@ mod tests {
     fn rapid_multi_tap_across_several_fires_commits_only_after_first_quiet_fire() {
         let mut s = Sessions::default();
         s.set_own(own("work"));
-        s.update_global(vec![presence("alpha", 1, 0), presence("beta", 1, 0)]);
+        s.update_global(vec![summary("alpha", 1, 0), summary("beta", 1, 0)]);
         // Order: work(current), alpha, beta. Several taps land, each one
         // arriving before the next fire — faster than the old 1-tick grain
         // could distinguish. Every fire covering a tap must skip, not just
@@ -473,7 +502,7 @@ mod tests {
     fn wants_fast_cadence_tracks_pending_selection_through_commit_and_cancel() {
         let mut s = Sessions::default();
         s.set_own(own("work"));
-        s.update_global(vec![presence("alpha", 1, 0), presence("beta", 1, 0)]);
+        s.update_global(vec![summary("alpha", 1, 0), summary("beta", 1, 0)]);
         assert!(!s.wants_fast_cadence(), "nothing selected initially");
 
         s.cycle(Direction::Next); // selects alpha
@@ -505,42 +534,29 @@ mod tests {
     #[test]
     fn update_global_reports_change_only_on_actual_content_change() {
         let mut s = Sessions::default();
-        assert!(s.update_global(vec![presence("alpha", 1, 0)]), "first peer report changes the badge");
-        assert!(!s.update_global(vec![presence("alpha", 1, 0)]), "identical peer report is not a change");
+        assert!(s.update_global(vec![summary("alpha", 1, 0)]), "first peer report changes the badge");
+        assert!(!s.update_global(vec![summary("alpha", 1, 0)]), "identical peer report is not a change");
     }
 
     #[test]
     fn set_own_reports_change_only_on_actual_content_change() {
         let mut s = Sessions::default();
-        let p = Presence {
+        let p = SessionSummary {
             session_name: "work".into(),
             running: 3,
             attention: 0,
             attention_tab_position: None,
-            updated_epoch_s: 0,
             tabs: vec![],
-            ..Default::default()
         };
         assert!(s.set_own(p.clone()), "first own-count report changes the badge");
-        // Same badge-relevant fields, different updated_epoch_s (not part of
-        // BadgeEntry) — must not register as a change.
-        let p2 = Presence {
-            session_name: "work".into(),
-            running: 3,
-            attention: 0,
-            attention_tab_position: None,
-            updated_epoch_s: 99,
-            tabs: vec![],
-            ..Default::default()
-        };
-        assert!(!s.set_own(p2), "a report identical in badge-relevant fields is not a change");
+        assert!(!s.set_own(p), "an identical report is not a change");
     }
 
     #[test]
     fn cycle_reports_change_when_the_highlight_moves() {
         let mut s = Sessions::default();
         s.set_own(own("work"));
-        s.update_global(vec![presence("alpha", 1, 0), presence("beta", 1, 0)]);
+        s.update_global(vec![summary("alpha", 1, 0), summary("beta", 1, 0)]);
         assert!(s.cycle(Direction::Next), "starting a selection flips a `selected` flag in the badge");
         assert!(s.cycle(Direction::Next), "advancing the selection moves the `selected` flag");
     }
@@ -554,7 +570,7 @@ mod tests {
     fn cycle_selection_survives_reordering_by_name_not_index() {
         let mut s = Sessions::default();
         s.set_own(own("work"));
-        s.update_global(vec![presence("alpha", 1, 0), presence("beta", 1, 0)]);
+        s.update_global(vec![summary("alpha", 1, 0), summary("beta", 1, 0)]);
         // Order: work (current), alpha, beta — both zero-attention, by name.
         s.cycle(Direction::Next); // selects alpha (first non-current)
 
@@ -563,7 +579,7 @@ mod tests {
         // "aardvark" instead of "alpha". `update_global` REPLACES the
         // peer set wholesale, so this is the same "membership changed under
         // the selection" shape.
-        s.update_global(vec![presence("aardvark", 1, 0), presence("alpha", 1, 0), presence("beta", 1, 0)]);
+        s.update_global(vec![summary("aardvark", 1, 0), summary("alpha", 1, 0), summary("beta", 1, 0)]);
 
         s.tick(); // the fire covering the tap: skip, clears the flag
         let t = s.tick().expect("a quiet fire commits");
@@ -574,9 +590,9 @@ mod tests {
     fn selected_session_vanishing_before_tick_clears_selection_and_commits_nothing() {
         let mut s = Sessions::default();
         s.set_own(own("work"));
-        s.update_global(vec![presence("alpha", 0, 0)]);
+        s.update_global(vec![summary("alpha", 0, 0)]);
         s.cycle(Direction::Next); // selects alpha
-        s.update_global(vec![]); // alpha's presence vanished before the idle tick
+        s.update_global(vec![]); // alpha's summary vanished before the idle tick
 
         s.tick(); // the fire covering the tap: skip, clears the flag (selection still pending)
         assert_eq!(s.tick(), None, "a vanished selection must not commit");
@@ -593,14 +609,14 @@ mod tests {
     fn cycle_restarts_fresh_after_selected_session_vanishes() {
         let mut s = Sessions::default();
         s.set_own(own("work"));
-        s.update_global(vec![presence("alpha", 1, 0), presence("beta", 1, 0), presence("gamma", 1, 0)]);
+        s.update_global(vec![summary("alpha", 1, 0), summary("beta", 1, 0), summary("gamma", 1, 0)]);
         // No attention: order is work (current), then alpha, beta, gamma by name.
 
         s.cycle(Direction::Next); // selects alpha (first non-current)
 
         // alpha vanishes, leaving a fresh order with *two* non-current entries
         // (beta, gamma) — order: work, beta, gamma.
-        s.update_global(vec![presence("beta", 1, 0), presence("gamma", 1, 0)]);
+        s.update_global(vec![summary("beta", 1, 0), summary("gamma", 1, 0)]);
 
         // Cycling with Prev is what actually discriminates restart-fresh from
         // an index-0 fallback: restart-fresh ignores the stale direction and
@@ -636,8 +652,8 @@ mod tests {
         // comment) and must win outright — the peer here claims larger
         // counts, and must still lose.
         let mut s = Sessions::default();
-        s.set_own(Presence { running: 3, ..own("work") });
-        s.update_global(vec![presence("work", 9, 9)]);
+        s.set_own(SessionSummary { running: 3, ..own("work") });
+        s.update_global(vec![summary("work", 9, 9)]);
         let badge = s.badge();
         let work_entries: Vec<&BadgeEntry> = badge.iter().filter(|b| b.name == "work").collect();
         assert_eq!(work_entries.len(), 1, "a peer claiming our own name must not add a second badge line");
@@ -650,7 +666,7 @@ mod tests {
     fn cycle_returns_false_on_noop_with_only_current_session() {
         let mut s = Sessions::default();
         s.set_own(own("work"));
-        // No presences, no peers — work is the only session.
+        // No summaries, no peers — work is the only session.
 
         let changed = s.cycle(Direction::Next);
         assert!(!changed, "cycle with nothing to select must return false (no badge change)");

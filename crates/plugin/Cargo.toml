@@ -22,7 +22,6 @@ name = "zj_radar"
 path = "src/main.rs"
 
 [dependencies]
-zj-radar-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 unicode-width = { workspace = true }

@@ -504,7 +504,7 @@ fn focused_pane_line_is_highlighted_and_follows_focus() {
 }
 
 /// Rendered-output fidelity: assert on the ACTUAL cells Zellij painted — both
-/// text and color — not just substring presence in the PTY stream.
+/// text and color — not just substring match in the PTY stream.
 ///
 /// After a working agent reports from the focused pane, the parsed sidebar must show:
 ///   1. the " RADAR" header on row 0;
@@ -1099,8 +1099,6 @@ fn rail_paints_every_column_of_its_pane() {
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
 fn session_next_switches_to_the_session_with_attention() {
     use std::time::Duration;
-    use zj_radar_core::status::GlyphSet;
-    use zj_radar_core::Status;
 
     let wasm = plugin_wasm_path();
     assert!(
@@ -1139,7 +1137,8 @@ fn session_next_switches_to_the_session_with_attention() {
     // A's badge must show B's name TOGETHER WITH the attention glyph+count —
     // not just B's bare name — this needle also rules out the degenerate
     // case of a badge line with a name but zero counts.
-    let attention_glyph = Status::Pending.glyph_for(GlyphSet::Plain);
+    // `Status::Pending`'s Plain glyph (the `statuses!` table in crates/plugin/src/status.rs).
+    let attention_glyph = '◆';
     let needle = format!("{} 1{attention_glyph}", b.name);
     let saw_badge = a.wait_until(Duration::from_secs(10), |s| sidebar_region(&s.screen(), 32).contains(&needle));
     eprintln!("[e2e] A's rail (32 cols):\n{}", sidebar_region(&a.screen(), 32));

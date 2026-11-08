@@ -41,10 +41,10 @@
 
 use crate::config;
 use crate::control::Verb;
-use crate::presence::Presence;
 use crate::radar_state::{Direction, PaneUpdate, RadarChange, RadarState, RadarTab, TabId};
 use crate::render::{self, RenderedRail};
 use crate::rollup::{LedgerLine, TabRow};
+use crate::sessions::SessionSummary;
 use crate::sessions::{BadgeEntry, CommitTarget, Sessions};
 use crate::status::Status;
 use crate::tab_namer::TabRename;
@@ -350,7 +350,7 @@ pub(crate) struct PluginRuntime {
     /// derive (a full `rows()` pass) was the bulk of `project`'s per-event
     /// cost. `None` forces a recompute (start-up, or a session-name change,
     /// which alters the counts' identity without touching radar state).
-    presence_gen: Option<u64>,
+    summary_gen: Option<u64>,
     /// Everything content-derived the last actual `render()` drew: rows,
     /// ledger lines, badge, theme, shown mode. Stamped by `render`, consulted by
     /// `project`'s render gate — a change whose re-derived key equals what is
@@ -417,7 +417,7 @@ type RenderKey = (
 /// are excluded at this seam (`is_status_origin`), not inferred later from a
 /// tab's dominant status. `attention_tab_position` is the first
 /// (lowest-position) row that `needs_you()`.
-fn presence_counts(rows: &[TabRow]) -> (usize, usize, Option<usize>) {
+fn summary_counts(rows: &[TabRow]) -> (usize, usize, Option<usize>) {
     let mut running = 0usize;
     let mut attention = 0usize;
     let mut attention_tab_position = None;
@@ -825,7 +825,7 @@ impl PluginRuntime {
             // The name is the own row's identity, which no radar mutation
             // tracks — drop the cached generation so `project` re-derives it
             // even though `radar.generation()` hasn't moved.
-            self.presence_gen = None;
+            self.summary_gen = None;
         }
         self.own_session_name = name;
         self.project(vec![], change, self.last_now_epoch_s)
@@ -846,8 +846,8 @@ impl PluginRuntime {
     }
 
     /// `GlobalAttentionUpdate`: every other session on this Zellij server,
-    /// already converted to the badge's `Presence` shape.
-    pub(crate) fn global_attention_changed(&mut self, peers: Vec<Presence>) -> Outcome {
+    /// already converted to the badge's `SessionSummary` shape.
+    pub(crate) fn global_attention_changed(&mut self, peers: Vec<SessionSummary>) -> Outcome {
         self.sessions.set_show_trees(self.config.session_tree);
         let change = RadarChange { render: self.sessions.update_global(peers), ..RadarChange::default() };
         self.project(vec![], change, self.last_now_epoch_s)
@@ -859,14 +859,14 @@ impl PluginRuntime {
     /// (lowest-position) row that `needs_you()`, matching the position
     /// `Sessions`/`BadgeEntry` expect for a same-repo jump-on-arrival. Counts
     /// only (empty `tabs`): the current session's own tree is never rendered.
-    fn own_counts(&self) -> Presence {
-        let (running, attention, attention_tab_position) = presence_counts(&self.radar.rows(self.tick));
-        Presence {
+    fn own_counts(&self) -> SessionSummary {
+        let (running, attention, attention_tab_position) = summary_counts(&self.radar.rows(self.tick));
+        SessionSummary {
             session_name: self.own_session_name.clone(),
             running,
             attention,
             attention_tab_position,
-            ..Presence::default()
+            ..SessionSummary::default()
         }
     }
 
@@ -1119,8 +1119,8 @@ impl PluginRuntime {
         // only when the radar generation moved — the derive is a full
         // `rows()` pass, which every broadcast in an 8-tab session used to
         // pay twice.
-        if !self.own_session_name.is_empty() && self.presence_gen != Some(self.radar.generation()) {
-            self.presence_gen = Some(self.radar.generation());
+        if !self.own_session_name.is_empty() && self.summary_gen != Some(self.radar.generation()) {
+            self.summary_gen = Some(self.radar.generation());
             render |= self.sessions.set_own(self.own_counts());
         }
         // Rows-diff render gate: Zellij delivers every

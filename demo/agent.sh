@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# A scripted "demo agent": broadcasts a timed arc of zj_radar.status.v1 messages
-# for THIS pane, so the sidebar animates a believable story with no real agent,
-# no API keys, and byte-identical output every run. Same pipe the Claude/Codex
-# producers use — see the README's "Writing your own producer".
+# A scripted "demo agent": prints a timed arc of OSC 7501 program-status
+# records for THIS pane, so the sidebar animates a believable story with no real
+# agent, no API keys, and byte-identical output every run. Same Zellij Program
+# Status Protocol a real agent speaks — see the README's "Writing your own
+# producer".
 #
 #   agent.sh <source> <repo> <branch> <scenario>
 #
-# <source> is a Kind wire token (claude|codex|opencode|pi|omp|gemini|test|build|deploy|command).
+# <source> is the OSC 7501 `app` (claude→claude-code, codex|opencode|pi|omp|gemini|test|build|deploy|command as is).
 # <scenario> selects one of the arcs below. Run only inside Zellij.
 set -euo pipefail
 
@@ -23,48 +24,48 @@ scenario="${4:-working}"
 # (`sleep infinity` is GNU-only — stock macOS sleep rejects it.)
 hold() { tail -f /dev/null; }
 
-# Resolve our own pane id (the sidebar keys status by pane → tab).
+# Zellij attributes the OSC to the pane it is printed in, so only Zellij matters.
 [[ -n "${ZELLIJ:-}" && -n "${ZELLIJ_PANE_ID:-}" ]] || {
-    echo "agent.sh: not inside Zellij (no ZELLIJ_PANE_ID) — nothing to broadcast." >&2
+    echo "agent.sh: not inside Zellij (no ZELLIJ_PANE_ID) — nothing to emit." >&2
     hold
 }
-pane="${ZELLIJ_PANE_ID#terminal_}"
 
-# emit <status> <msg> [task] — one zj_radar.status.v1 broadcast for this pane.
-# Ordering is latest-wins on the plugin side; the pipe delivers in order, so
-# each emit simply overwrites the pane's previous state. A non-empty [task]
-# becomes the sticky identity line; while pending, the rail spends an extra
+# The OSC 7501 `app` for the source argument (Claude Code reports itself as
+# `claude-code`; every other source is already its own app name).
+app="$source_kind"
+if [[ "$app" == claude ]]; then app=claude-code; fi
+
+# emit <status> <msg> — one OSC 7501 record for this pane, status in the rail's
+# vocabulary (running|pending|done|error|idle), msg base64-encoded as the
+# protocol requires. Zellij keeps the latest record, so each emit simply
+# overwrites the pane's previous state. While pending, the rail spends an extra
 # `↳` line on <msg> (the actionable question).
-# NOTE: printf-into-JSON works here because every emit below passes known
-# literals — a copied producer must escape its strings (see notify.sh's
-# `jq --arg` usage) or a quote/backslash in a message corrupts the payload.
 emit() {
-    local status="$1" msg="$2" task="${3:-}"
-    local payload
-    payload=$(printf '{"v":1,"source":"%s","pane":{"type":"terminal","id":%s},"status":"%s","repo":"%s","branch":"%s","msg":"%s"' \
-        "$source_kind" "$pane" "$status" "$repo" "$branch" "$msg")
-    if [[ -n "$task" ]]; then
-        payload+=$(printf ',"task":"%s"' "$task")
-    fi
-    payload+='}'
-    zellij pipe --name zj_radar.status.v1 -- "$payload"
+    local status="$1" msg="$2" state kind=""
+    case "$status" in
+    running) state=working ;;
+    pending) state=blocked kind=":kind=permission" ;;
+    *) state="$status" ;;
+    esac
+    # shellcheck disable=SC1003 # ST is ESC followed by a literal backslash
+    printf '\033]7501;state=%s:app=%s%s:msg=%s\033\\' \
+        "$state" "$app" "$kind" "$(printf %s "$msg" | base64 | tr -d '\n')"
 }
 
 # A little context in the focused content pane so it doesn't read as "broken".
 printf '\033[2m%s · %s\033[0m\n\n' "$repo" "$branch"
 
 case "$scenario" in
-needs-you) # the star of the show: works with a sticky task, blocks on approval
+needs-you) # the star of the show: works, blocks on approval
            # while the viewer is on another tab (the rail carries the ↳
            # question there), and resumes when the recorded `y` lands — the
            # keystroke actually answers the read, so the beat can't misfire.
            # Its stdout reads like a Claude session for the beat-3 jump.
-    task="add auth middleware"
     printf '> add auth middleware\n\n'
-    sleep 1;  emit running "reading auth middleware" "$task"
+    sleep 1;  emit running "reading auth middleware"
     printf '\033[2m●\033[0m Read  src/auth.rs\n'
     printf '\033[2m●\033[0m Edit  src/auth.rs\n'
-    sleep 5;  emit pending "run database migration?" "$task"
+    sleep 5;  emit pending "run database migration?"
     printf '\n\033[33m❯ Run migration?\033[0m (y/n) '
     # `read` is a bash builtin: while it blocks, this script has no child
     # process, and a childless pane root reads to Zellij (and so the plugin)
@@ -74,9 +75,9 @@ needs-you) # the star of the show: works with a sticky task, blocks on approval
     read -r -n 1 -t 20 || true   # tape types `y` (into REPLY); timeout so an
     kill "$guard" 2>/dev/null || true   # unattended run still completes
     printf '\n\n'
-    emit running "applying migration" "$task"
+    emit running "applying migration"
     printf '\033[2m●\033[0m Bash  sqlx migrate run\n'
-    sleep 2;  emit "done" "migration applied" "$task"
+    sleep 2;  emit "done" "migration applied"
     printf '\033[2m●\033[0m done\n'
     ;;
 tests) # an observed task: a test run that progresses, then passes late enough

@@ -49,8 +49,8 @@ fn roll_up_is_focus_blind() {
     // Focus is render-only and resolved by the caller (it needs the tab's
     // floating-layer visibility): focusing a pane changes nothing roll_up makes.
     let mut map = HashMap::new();
-    map.insert(1, obs(ObservationOrigin::StatusPipe, Status::Running, 1));
-    map.insert(2, obs(ObservationOrigin::StatusPipe, Status::Running, 2));
+    map.insert(1, obs(ObservationOrigin::Program, Status::Running, 1));
+    map.insert(2, obs(ObservationOrigin::Program, Status::Running, 2));
     let unfocused = [pane(1, "a"), pane(2, "b")];
     let focused = [pane(1, "a"), TerminalPane { focused_in_tab: true, ..pane(2, "b") }];
     assert_eq!(roll_up(&focused, resolver(&map)), roll_up(&unfocused, resolver(&map)));
@@ -73,7 +73,7 @@ fn effective_focus_resolves_zellijs_per_layer_focus() {
 #[test]
 fn untracked_panes_are_shown_but_not_counted() {
     let mut map = HashMap::new();
-    map.insert(1, obs(ObservationOrigin::StatusPipe, Status::Running, 1));
+    map.insert(1, obs(ObservationOrigin::Program, Status::Running, 1));
     let panes = [pane(1, "codex"), pane(2, "shell")];
 
     let display = roll_up(&panes, resolver(&map));
@@ -105,8 +105,8 @@ fn severity_precedence_picks_highest_active() {
 fn tie_break_prefers_later_change_tick_over_position() {
     // Higher-tick pane comes FIRST; positional logic would pick the second.
     let mut map = HashMap::new();
-    map.insert(1, obs(ObservationOrigin::StatusPipe, Status::Running, 9));
-    map.insert(2, obs(ObservationOrigin::StatusPipe, Status::Running, 5));
+    map.insert(1, obs(ObservationOrigin::Program, Status::Running, 9));
+    map.insert(2, obs(ObservationOrigin::Program, Status::Running, 5));
     let panes = [pane(1, "a"), pane(2, "b")];
 
     let display = roll_up(&panes, resolver(&map));
@@ -124,7 +124,7 @@ fn counts_done_total_and_pending() {
     let mut map = HashMap::new();
     map.insert(1, obs(ObservationOrigin::Command, Status::Done, 1));
     map.insert(2, obs(ObservationOrigin::Command, Status::Running, 1));
-    map.insert(3, obs(ObservationOrigin::StatusPipe, Status::Pending, 1));
+    map.insert(3, obs(ObservationOrigin::Program, Status::Pending, 1));
     let panes = [pane(1, "a"), pane(2, "b"), pane(3, "c")];
 
     let display = roll_up(&panes, resolver(&map));
@@ -142,7 +142,7 @@ fn pending_is_only_counted_for_tracked_panes() {
     // same set as `total`/`done`, never more, so progress stays internally
     // consistent (pending <= total).
     let mut map = HashMap::new();
-    let mut stale = obs(ObservationOrigin::StatusPipe, Status::Pending, 1);
+    let mut stale = obs(ObservationOrigin::Program, Status::Pending, 1);
     stale.ever_active = false;
     map.insert(1, stale);
     let panes = [pane(1, "shell")];
@@ -163,14 +163,14 @@ fn pane_outcome_maps_finished_commands_only() {
     assert_eq!(pane_outcome(&command_obs(Status::Running, None)), None);
     // Agents (status pipe) never get a tag, even when Done.
     let mut agent = command_obs(Status::Done, Some(0));
-    agent.origin = ObservationOrigin::StatusPipe;
+    agent.origin = ObservationOrigin::Program;
     assert_eq!(pane_outcome(&agent), None);
 }
 
 #[test]
 fn tracked_pane_display_carries_last_change_tick_as_since_tick() {
     let panes = [pane(1, "shell")];
-    let ob = obs(ObservationOrigin::StatusPipe, Status::Running, 42);
+    let ob = obs(ObservationOrigin::Program, Status::Running, 42);
     let display = roll_up(&panes, |id| (id == 1).then_some(&ob));
     match &display.panes[0] {
         PaneDisplay::Tracked { since_tick, .. } => assert_eq!(*since_tick, 42),
@@ -182,7 +182,7 @@ fn tracked_pane_display_carries_last_change_tick_as_since_tick() {
 fn task_threads_through_to_pane_display_and_primary_detail() {
     let panes = [pane(1, "shell")];
     let mut obs = TrackedObservation::command(Status::Pending, "r".into(), "approve?".into(), Kind::Claude, 3);
-    obs.origin = ObservationOrigin::StatusPipe;
+    obs.origin = ObservationOrigin::Program;
     obs.task = "fix flaky e2e".into();
     let display = roll_up(&panes, |id| (id == 1).then_some(&obs));
     match &display.panes[0] {
@@ -218,7 +218,7 @@ fn arb_status() -> impl Strategy<Value = Status> {
 
 fn pane_specs() -> impl Strategy<Value = Vec<Spec>> {
     let spec = proptest::option::of((
-        prop_oneof![Just(ObservationOrigin::StatusPipe), Just(ObservationOrigin::Command)],
+        prop_oneof![Just(ObservationOrigin::Program), Just(ObservationOrigin::Command)],
         arb_status(),
         any::<bool>(),
         0u64..50,
@@ -359,7 +359,7 @@ fn animating_tracks_running_jobs_not_services_and_sits_outside_the_ever_active_g
     // (TrackedObservation::animating has no ever_active gate) or cadence and
     // paint could disagree about whether anything is in motion. Pinned so a
     // refactor that moves the `animating` accrual inside the gate fails here.
-    let mut stale = obs(ObservationOrigin::StatusPipe, Status::Running, 1);
+    let mut stale = obs(ObservationOrigin::Program, Status::Running, 1);
     stale.ever_active = false;
     map.insert(1, stale);
     let display = roll_up(&panes, resolver(&map));

@@ -21,7 +21,7 @@ fn runtime_with_config(config: config::Config) -> PluginRuntime {
 /// A granted runtime with the default test `config()` and NO session name —
 /// the "permission resolved, nameless" shape many render/effect tests hand-roll
 /// inline. `runtime_with_granted_permission` differs by also setting a session
-/// name, which only the presence tests need.
+/// name, which only the session-name tests need.
 fn granted_runtime() -> PluginRuntime {
     PluginRuntime { permission: PermissionState::Resolved { granted: true }, config: config(), ..Default::default() }
 }
@@ -482,10 +482,10 @@ fn drive_tabs_and_panes(rt: &mut PluginRuntime) {
     rt.radar.set_tab_panes_for_position(0, vec![pane(7)]);
 }
 
-/// A peer from a JSON literal, in the `Presence` shape `GlobalAttentionUpdate`
-/// peers reach the runtime in (`attention::PeerSession::presence`).
-fn fresh(json: &str) -> Presence {
-    Presence::parse(json).expect("test peer JSON must parse")
+/// A peer from a JSON literal, in the `SessionSummary` shape `GlobalAttentionUpdate`
+/// peers reach the runtime in (`attention::PeerSession::summary`).
+fn fresh(json: &str) -> SessionSummary {
+    serde_json::from_str(json).expect("test peer JSON must parse")
 }
 
 /// Shared setup for the right-click tests: one tab + one "alpha" peer, then
@@ -493,7 +493,7 @@ fn fresh(json: &str) -> Presence {
 /// resulting line indices follow `clicking_a_session_line_emits_switch_session`'s
 /// bookkeeping — 0/1 header, 2 own "work" line (click-inert), 3 peer "alpha"
 /// line, 4 the badge's blank separator, 5 the tab header.
-fn render_with_badge(rt: &mut PluginRuntime, peer: Presence) {
+fn render_with_badge(rt: &mut PluginRuntime, peer: SessionSummary) {
     rt.tabs_changed(vec![tab(0, "team", false)]);
     rt.global_attention_changed(vec![peer]);
     let ansi = rt.render(100, 80);
@@ -635,7 +635,7 @@ fn a_global_attention_peer_click_focuses_its_waiting_pane() {
         }],
         ..Default::default()
     };
-    assert!(rt.global_attention_changed(vec![peer.presence()]).render);
+    assert!(rt.global_attention_changed(vec![peer.summary()]).render);
     rt.render(100, 80);
     assert_eq!(
         rt.mouse_click(4, 0).effects,

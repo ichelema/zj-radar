@@ -10,10 +10,9 @@
 ///
 /// Each row is `Variant => "wire", Role, plain_glyph, nerd_glyph`. The macro
 /// expands the table into the `Status` enum plus `from_wire` / `as_wire` /
-/// `role` / `glyph_for` / `ALL` and the `serde` pair (via `wire_serde!`), so
-/// the variant list, the wire vocabulary, the role mapping, the two glyph sets,
-/// and the snapshot encoding are a *single source of truth* — they cannot
-/// drift, and the generated `as_wire` / `role` / `glyph_for` use exhaustive
+/// `role` / `glyph_for` / `ALL`, so the variant list, the wire vocabulary, the
+/// role mapping and the two glyph sets are a *single source of truth* — they
+/// cannot drift, and the generated `as_wire` / `role` / `glyph_for` use exhaustive
 /// `match self`, so a row that omits a variant fails to compile.
 ///
 /// Two invariants ride on the table layout, both preserved by construction:
@@ -21,8 +20,7 @@
 ///   derived `Ord` *is* the aggregation order used by the Tab Roll-Up
 ///   (`.max()` picks the most-urgent member). Reordering rows reorders severity.
 /// - **Lenient parse.** `from_wire` falls back to `$fallback` for any unknown
-///   token (the empty string included), matching how the pipe payload parses
-///   status. `Default` is generated from the same `fallback =` declaration, so
+///   token (the empty string included). `Default` is generated from the same `fallback =` declaration, so
 ///   the two can never disagree.
 macro_rules! statuses {
     (
@@ -39,6 +37,7 @@ macro_rules! statuses {
         impl Status {
             /// Every `Status`, in table (ascending-severity) order. Lets callers
             /// and exhaustiveness tests iterate the variants without re-typing.
+            #[cfg(test)]
             pub const ALL: &'static [Status] = &[ $( Status::$variant ),+ ];
 
             /// Parse a wire value; any unknown token (the empty string
@@ -47,17 +46,6 @@ macro_rules! statuses {
                 match s {
                     $( $wire => Status::$variant, )+
                     _ => Status::$fallback,
-                }
-            }
-
-            /// Strict parse: `Some` only for a token in the wire vocabulary.
-            /// The door for producers that must hint-and-refuse on a typo
-            /// rather than lenient-fall-back to `Idle` — a typo'd status
-            /// silently becoming idle erases the row it meant to update.
-            pub fn try_from_wire(s: &str) -> Option<Status> {
-                match s {
-                    $( $wire => Some(Status::$variant), )+
-                    _ => None,
                 }
             }
 
@@ -86,11 +74,6 @@ macro_rules! statuses {
                 }
             }
         }
-
-        // Snapshot/pipe encoding, generated from the same table. Lenient: an
-        // unknown or empty token deserializes to the `from_wire` fallback
-        // (Idle), matching how the pipe payload parses status.
-        $crate::wire::wire_serde!(lenient, Status);
 
         /// Matches `from_wire`'s fallback for an unknown or empty wire token —
         /// generated from the same `fallback = …` table declaration `from_wire`
@@ -232,8 +215,7 @@ mod tests {
     #[test]
     fn default_matches_from_wire_fallback() {
         // `Default` must agree with `from_wire`'s fallback for unknown tokens
-        // (`""` included), since `StatusPayload::default()` relies on this
-        // correspondence. Both are generated from the table's `fallback =`
+        // (`""` included). Both are generated from the table's `fallback =`
         // declaration; this pins the pairing against a macro regression.
         assert_eq!(Status::default(), Status::from_wire(""));
         assert_eq!(Status::default(), Status::Idle);
@@ -263,15 +245,6 @@ mod tests {
         for &s in Status::ALL {
             assert_eq!(Status::from_wire(s.as_wire()), s, "{s:?} must survive a wire round-trip",);
         }
-    }
-
-    #[test]
-    fn try_from_wire_is_strict_where_from_wire_is_lenient() {
-        for &s in Status::ALL {
-            assert_eq!(Status::try_from_wire(s.as_wire()), Some(s));
-        }
-        assert_eq!(Status::try_from_wire("runnign"), None);
-        assert_eq!(Status::try_from_wire(""), None);
     }
 
     #[test]

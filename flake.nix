@@ -47,12 +47,6 @@
           || (pkgs.lib.hasSuffix "/docs/configuration.md" path)
           # include_str!'d by the plugin's ZELLIJ_REV guard test (lib.rs).
           || (pkgs.lib.hasSuffix "/.github/workflows/e2e.yml" path)
-          # include_str!'d by the plugin's producer-script guard test (lib.rs).
-          || (pkgs.lib.hasSuffix "/plugins/zj-radar-claude/scripts/notify.sh" path)
-          # include_str!'d by the plugin's hook-headroom guard (hooks_manifest_tests.rs).
-          || (pkgs.lib.hasSuffix "/plugins/zj-radar-claude/hooks/hooks.json" path)
-          # include_str!'d by the version-triple weld (hooks_manifest_tests.rs).
-          || (pkgs.lib.hasSuffix "/plugins/zj-radar-claude/.claude-plugin/plugin.json" path)
           # Recorded proptest failure seeds: without them the hermetic checks
           # would skip replaying known-bad cases instead of pinning the fixes.
           || (pkgs.lib.hasInfix "/proptest-regressions/" path)
@@ -104,7 +98,7 @@
           # binaryen's `-Oz` post-pass on the way: Zellij runs the plugin under
           # the wasmi interpreter, where executed instructions are the cost,
           # and this pass measured 12–27 % less fuel on every event class
-          # (`tools/wasm-fuel`, docs/design.md §15) plus ~13 % fewer bytes,
+          # (measured with the former tools/wasm-fuel bench) plus ~13 % fewer bytes,
           # over rustc's own opt-level "z". The `--enable-*` set is exactly
           # what rustc emits for wasm32-wasip1 (`rustc --print cfg --target
           # wasm32-wasip1 | grep target_feature`, as of rustc 1.97); the
@@ -180,7 +174,7 @@
             ZJ_RADAR_WASM_PATH = "${zj-radar}/bin/zj_radar.wasm";
           });
         # NOT redundant with test/clippy above: `-p zj-radar` builds the CLI
-        # standalone (only its own + core's features), reproducing what a
+        # standalone (only its own features), reproducing what a
         # crates.io `cargo install zj-radar` sees — the workspace-wide checks
         # unify features across the plugin member and can mask a missing
         # feature declaration in the CLI's own manifest.
@@ -199,7 +193,7 @@
         # `just`, `bats`, and `shellcheck` are required by the CI recipes
         # (`just test-bash` / `just test-e2e`, and the `shellcheck` step) — keep
         # them here so `nix develop -c just …` resolves on PATH. `jq` is used by
-        # the bash hook tests. `cargo-deny` reproduces the nightly advisory job
+        # the bash script tests. `cargo-deny` reproduces the nightly advisory job
         # (`cargo deny check`).
         packages = [
           toolchain
@@ -215,7 +209,7 @@
           echo "dev:    just dev         (sandboxed zj-radar-dev session)"
           echo "build:  just dev-build   (wasm + CLI, no launch)"
           echo "test:   just test        (cargo test --all-features)"
-          echo "        just test-bash   (shellcheck + bats hook tests)"
+          echo "        just test-bash   (shellcheck + bats script tests)"
           echo "        just test-e2e    (wasm build + live Zellij PTY)"
         '';
       };

@@ -302,7 +302,7 @@ fn truncate(s: &str, max: usize) -> std::borrow::Cow<'_, str> {
 /// needs to carry "no attention tab" (`Option::None`) losslessly through a
 /// field that stays a plain `usize` for every other target — see that
 /// method's doc. `session: Option<String>` (owned: a peer's name, read off
-/// its `Presence`, isn't a value this module can borrow from) is why
+/// its `SessionSummary`, isn't a value this module can borrow from) is why
 /// the struct can no longer derive `Copy`; every call site that used to rely
 /// on implicit-copy semantics now clones explicitly at its last use.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1107,7 +1107,7 @@ struct CompactTasksTag {
 
 /// The compact `+N` tag for a pane's tasks, or `None` when nothing is worth
 /// counting. It counts only what still matters at a glance — running work
-/// and failures — because the finished-fine ones (`●` / killed / `·`) are the
+/// and failures — because the finished-fine ones (`●` / `·`) are the
 /// detail the full form has room for and the compact form exists to drop.
 /// A failure turns the tag red: the full form deliberately ranks failures
 /// above services so they never hide behind `+N more`, and the compact form
@@ -1226,7 +1226,6 @@ fn emit_task_line(task: &BgTask, ctx: &TaskLineCtx) -> String {
         (TaskState::Running, false) => (SERVICE_GLYPH, Role::Working),
         (TaskState::Completed, _) => (Status::Done.glyph_for(opts.glyphs), Role::Success),
         (TaskState::Failed, _) => (Status::Error.glyph_for(opts.glyphs), Role::Error),
-        (TaskState::Killed, _) => (Status::Idle.glyph_for(opts.glyphs), Role::Muted),
         (TaskState::Ended, _) => ('·', Role::Muted),
     };
     let label = if task.label.trim().is_empty() { "task" } else { task.label.as_str() };

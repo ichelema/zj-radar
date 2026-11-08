@@ -9,10 +9,6 @@
 //!   in the modules below. Host tests exercise that logic without a wasm build.
 //! - The `#[cfg(test)] impl State` block holds test-only fixtures (`build_rows`,
 //!   …) that are never linked into the shipped wasm.
-//!
-//! The shared vocabulary types are re-exported from [`zj_radar_core`]
-//! (see below) so the modules here address them as `crate::status`,
-//! `crate::payload`, … with no per-reference churn at the crate boundary.
 
 // On a plain host build (`cargo build`, not wasm, not test) the only consumers
 // of the pure modules are the wasm glue (cfg'd out) and the unit tests (cfg'd
@@ -22,19 +18,15 @@
 // `cargo test` (not(test) is false) and the wasm build.
 #![cfg_attr(all(not(target_arch = "wasm32"), not(test)), allow(dead_code))]
 
-// Re-export the shared core so the plugin glue and modules keep addressing these
-// as `crate::status`, `crate::payload`, … with no per-reference churn.
-pub(crate) use zj_radar_core::{kind, observation, payload, status, task};
-
 mod attention;
 mod clock;
 mod config;
 mod control;
-#[cfg(test)]
-mod hooks_manifest_tests;
+mod kind;
 mod ledger;
 mod mode;
-mod presence;
+mod observation;
+mod payload;
 mod radar_state;
 #[cfg(test)]
 mod reference_tests;
@@ -42,7 +34,9 @@ mod render;
 mod rollup;
 mod runtime;
 mod sessions;
+mod status;
 mod tab_namer;
+mod task;
 #[cfg(test)]
 mod test_fixtures;
 mod theme;
@@ -439,7 +433,7 @@ impl ZellijPlugin for State {
                                 .collect(),
                             name: s.name,
                         }
-                        .presence()
+                        .summary()
                     })
                     .collect();
                 let outcome = self.runtime.global_attention_changed(peers);
@@ -533,8 +527,8 @@ mod tests {
     /// a permission added to the request list but not the probe makes every
     /// existing grant partial, and Zellij's re-prompt is illegible inside the
     /// rail (zellij#4749) — the failure presents as a silently blank rail.
-    /// Text-pinned like the pipe-name guard above, because the two lists live
-    /// on opposite sides of the wasm boundary and can't share a const.
+    /// Text-pinned because the two lists live on opposite sides of the wasm
+    /// boundary and can't share a const.
     #[test]
     fn cli_grant_probe_covers_the_exact_requested_permission_set() {
         let full_src = include_str!("lib.rs");

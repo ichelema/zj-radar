@@ -17,6 +17,5 @@ docs/superpowers/
 .env
 
 # Internal AI-workflow exhaust — not for the public repo.
-# (.claude-plugin/ stays tracked: it backs `/plugin marketplace add`.)
 /plans/
 /.claude/

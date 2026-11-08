@@ -234,13 +234,13 @@ pub(crate) struct RadarState {
     /// Monotonic mutation counter over everything `rows()` reads — bumped by
     /// [`touch`](Self::touch) at every entry point that changed row-visible
     /// state. Two consumers: the [`rows`](Self::rows) memo below, and the
-    /// runtime's own-presence gate (counts can only move when this does).
+    /// runtime's own-summary gate (counts can only move when this does).
     /// Wall-clock animation (spinner frames, ages) deliberately does NOT bump
     /// it — those read `now_tick` at render time.
     generation: u64,
     /// Memo for [`rows`](Self::rows): the last `(generation, lit flashes)`
     /// it was computed at, with its result. Events that consult rows more than once
-    /// per intake (the runtime's presence derivation, the render-gate compare,
+    /// per intake (the runtime's summary derivation, the render-gate compare,
     /// and the render itself, all under a wasm *interpreter* on the host side)
     /// pay the rollup once — and the `Rc` makes each hit a refcount bump, not
     /// a deep clone of every row. `RefCell` keeps `rows(&self)` callable from
@@ -277,7 +277,7 @@ impl RadarState {
     }
 
     /// The current mutation generation — see the field doc. The runtime uses
-    /// it to skip recomputing derived-from-rows values (own presence) on
+    /// it to skip recomputing derived-from-rows values (own summary) on
     /// events that provably changed nothing.
     pub(crate) fn generation(&self) -> u64 {
         self.generation
@@ -298,7 +298,7 @@ impl RadarState {
     /// Rows in position order — `tabs_changed` (the only writer of `self.tabs`)
     /// sorts at intake, so this render-path call is a plain iteration.
     /// Memoized on `(generation, lit flashes)` and shared via `Rc`: one intake
-    /// event consults rows several times (presence derivation, the render-gate
+    /// event consults rows several times (summary derivation, the render-gate
     /// diff, the render itself), and under Zellij's interpreted-wasm runtime
     /// both the repeat rollups AND per-hit deep clones were a measurable share
     /// of per-event cost.
