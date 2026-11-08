@@ -25,7 +25,7 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 zj-radar setup zellij --download
 ```
 
-`setup zellij --download` does five things:
+`setup zellij --download` does six things:
 
 1. Downloads the wasm built for this CLI's version, so the two never drift
    apart. `ZJ_RADAR_VERSION` pins a different tag.
@@ -34,7 +34,9 @@ zj-radar setup zellij --download
    with a warning.
 3. Copies it to `~/.config/zellij/plugins/zj_radar.wasm`.
 4. Adds or updates a managed `radar` alias in `~/.config/zellij/config.kdl`.
-5. Asks `Inject the rail into <layout>? [y/N]`. `y` splices the rail in place
+5. Pre-writes the sidebar's permission grant in Zellij's `permissions.kdl`
+   (see [Permissions](#permissions)), so Zellij doesn't prompt.
+6. Asks `Inject the rail into <layout>? [y/N]`. `y` splices the rail in place
    (backup at `<layout>.zj-radar.bak`); `N` prints the snippet to paste.
 
 Flags:
@@ -315,6 +317,12 @@ zj-radar update --check    # report only; exit 1 when an update is available
 Restart Zellij, or open a new session, to load the new sidebar. A running
 session keeps the old plugin.
 
+From a release with agent adapters, remove them first, as in
+[Upgrading from a release with agent adapters](#upgrading-from-a-release-with-agent-adapters).
+The old `update` re-runs `setup <agent>` through the new binary, which refuses
+it, so `update` ends with an error. The new CLI and sidebar are installed all
+the same.
+
 `--check` compares both halves: the CLI version against the release tag, and
 the installed wasm's checksum against the release's published `.sha256`. A
 wasm built from source reads as differing, since it is not byte-identical to
@@ -402,9 +410,9 @@ config-dir entries with them.
 | `~/.config/zellij/config.kdl`: managed `radar` alias between `// zj-radar:` markers | `setup zellij` | **reversed**: strips only the fenced block |
 | `~/.config/zellij/layouts/<name>.kdl`: rail spliced between markers | `setup zellij --inject` into an existing layout | **reversed**: exact inverse of the splice |
 | `~/.config/zellij/layouts/<name>.kdl`: whole file | `setup zellij --inject` when no layout existed | left in place; delete the file |
-| `<edited file>.zj-radar.bak` | every config/layout edit | left in place; they are your restore points |
+| `<edited file>.zj-radar.bak` | every config/layout edit, and `run`'s grant write (`permissions.kdl.zj-radar.bak`) | left in place; they are your restore points |
 | `~/.config/zellij/plugins/zj_radar.wasm` | `setup zellij --wasm/--download` | left in place; `rm` it |
-| `permissions.kdl` grant entry (macOS `~/Library/Caches/org.Zellij-Contributors.Zellij/`, Linux `~/.cache/zellij/`) | `setup zellij` with your consent, or Zellij when you answer `y` | left in place (Zellij also writes this file); delete the `zj_radar.wasm` block |
+| `permissions.kdl` grant entry (macOS `~/Library/Caches/org.Zellij-Contributors.Zellij/`, Linux `~/.cache/zellij/`) | `setup zellij` with your consent, `zj-radar run`, or Zellij when you answer `y` | left in place (Zellij also writes this file); delete the `zj_radar.wasm` block |
 | `run`'s config dir (macOS `~/Library/Application Support/zj-radar/`, Linux `~/.local/share/zj-radar/`) | `zj-radar run` | not touched by `setup`; `rm -r` it, it holds only re-materializable assets and session markers |
 
 The plugin itself writes no files.

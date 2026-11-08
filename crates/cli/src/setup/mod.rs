@@ -110,8 +110,9 @@ fn unsupported_target_message(target: &str) -> String {
     );
     if REMOVED_AGENT_TARGETS.contains(&target) {
         msg.push_str(&format!(
-            " Old adapters are removed with the previous CLI release \
-             (`zj-radar setup {target} --uninstall`, version 0.12 or earlier) or by hand."
+            " Remove its old adapter by hand: docs/install.md, \"Upgrading from a release \
+             with agent adapters\". A CLI from a release with adapters also removes it \
+             (`zj-radar setup {target} --uninstall`)."
         ));
     }
     msg
@@ -318,6 +319,7 @@ mod tests {
         for agent in REMOVED_AGENT_TARGETS {
             let msg = unsupported_target_message(agent);
             assert!(msg.contains("no longer wires agents"), "{msg}");
+            assert!(msg.contains("by hand: docs/install.md"), "{msg}");
             assert!(msg.contains(&format!("zj-radar setup {agent} --uninstall")), "{msg}");
         }
         let msg = unsupported_target_message("gemini");

@@ -85,10 +85,11 @@ ESC ] 7501 ; key=value:key=value ESC \
 
 - Pairs are separated by `:`, not `;`.
 - `BEL` (`\a`) also terminates the sequence.
-- Keys are lowercase ASCII, at most 16 bytes.
+- Keys are lowercase ASCII. A key over 16 bytes drops the whole sequence.
 - Values use only `A-Z a-z 0-9 _ . , + / = -`, so free text travels as base64
   (`msg`, `title`).
-- A pair with an unknown key, or a value with other characters, is skipped.
+- A pair with an unknown or non-lowercase key, or a value with other
+  characters, is skipped.
 - A sequence over 4096 bytes is dropped.
 
 A deploy script that reports its progress:
