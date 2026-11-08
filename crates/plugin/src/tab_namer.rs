@@ -64,6 +64,12 @@ pub(crate) struct TabNamer {
     applied: HashMap<TabId, String>,
     /// Tabs whose next `rename` ignores stickiness ([`TabNamer::repick`]).
     repick: std::collections::HashSet<TabId>,
+    /// Renames sent but not yet echoed, keyed by tab: the name the tab showed
+    /// when we sent it. Until that name changes (our echo, a manual rename, an
+    /// undo) the same name is not sent again: a duplicate sent on an event
+    /// before the echo could land after a manual rename and overwrite it.
+    // ponytail: a rename Zellij drops is not retried until the tab's name changes; add a retry if one ever goes missing.
+    in_flight: HashMap<TabId, String>,
 }
 
 impl TabNamer {
@@ -81,6 +87,10 @@ impl TabNamer {
         let force = mode == NamingMode::Force;
         let mut out = Vec::new();
         for tab in tabs {
+            let echo_pending = self.in_flight.get(&tab.id) == Some(&tab.name);
+            if !echo_pending {
+                self.in_flight.remove(&tab.id);
+            }
             let ours = self.applied.get(&tab.id) == Some(&tab.name);
             let repick = self.repick.remove(&tab.id);
             // Stickiness: a name we applied stays put as long as some pane still
@@ -101,8 +111,12 @@ impl TabNamer {
             if desired.is_empty() || desired == tab.name {
                 continue;
             }
+            if echo_pending && self.applied.get(&tab.id) == Some(&desired) {
+                continue;
+            }
             if force || is_default_name(&tab.name) || ours {
                 self.applied.insert(tab.id, desired.clone());
+                self.in_flight.insert(tab.id, tab.name.clone());
                 out.push(TabRename { id: tab.id, name: desired });
             }
         }
@@ -117,6 +131,7 @@ impl TabNamer {
     pub(crate) fn retain_tabs(&mut self, live: &std::collections::HashSet<TabId>) {
         self.applied.retain(|id, _| live.contains(id));
         self.repick.retain(|id| live.contains(id));
+        self.in_flight.retain(|id, _| live.contains(id));
     }
 
     /// Skip stickiness on this tab's next `rename`: a better candidate has
@@ -519,5 +534,33 @@ mod tests {
         let tabs = vec![tab(1, "alpha", vec![repo_pane("beta", true)])];
         assert_eq!(namer.rename(&tabs, NamingMode::Managed), renamed_to("beta"));
         assert_eq!(namer.applied_name(TabId::new(1)), Some("beta"));
+    }
+
+    #[test]
+    fn an_in_flight_rename_is_not_resent_before_its_echo() {
+        // Zellij echoes a rename in a later TabUpdate. Events before the echo
+        // still show the old name; re-sending on each of them let a late
+        // duplicate land after a manual rename and overwrite it.
+        let mut namer = TabNamer::default();
+        let pending = vec![tab(1, "Tab #2", vec![repo_pane("home", true)])];
+        assert_eq!(namer.rename(&pending, NamingMode::Managed), renamed_to("home"));
+        assert!(namer.rename(&pending, NamingMode::Managed).is_empty(), "echo pending: no duplicate");
+        // The manual rename's echo wins and stays.
+        let manual = vec![tab(1, "keep-this-manual-name", vec![repo_pane("home", true)])];
+        assert!(namer.rename(&manual, NamingMode::Managed).is_empty());
+        // Undo back to the default name: the tab is named again.
+        assert_eq!(namer.rename(&pending, NamingMode::Managed), renamed_to("home"));
+    }
+
+    #[test]
+    fn a_different_name_is_sent_even_while_an_echo_is_pending() {
+        // Only exact duplicates wait: a new candidate (here a git remote name)
+        // goes out at once, and is itself not repeated before its echo.
+        let mut namer = TabNamer::default();
+        let pending = vec![tab(1, "Tab #2", vec![repo_pane("home", true)])];
+        assert_eq!(namer.rename(&pending, NamingMode::Managed), renamed_to("home"));
+        let better = vec![tab(1, "Tab #2", vec![repo_pane("zj-radar", true)])];
+        assert_eq!(namer.rename(&better, NamingMode::Managed), renamed_to("zj-radar"));
+        assert!(namer.rename(&better, NamingMode::Managed).is_empty(), "no duplicate of the new name");
     }
 }
