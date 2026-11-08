@@ -77,8 +77,9 @@ adapters with the OLD CLI, before you install the new one:
 for a in claude codex opencode pi omp; do zj-radar setup "$a" --uninstall; done
 ```
 
-An adapter left behind makes its agent report an error on every hook event,
-because `zj-radar notify` no longer exists.
+An adapter left behind does nothing: the new CLI keeps a hidden
+`zj-radar notify` that only prints a reminder to remove it and exits 0, so it
+never blocks its agent.
 
 ## Build from source
 

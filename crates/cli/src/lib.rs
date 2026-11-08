@@ -125,7 +125,22 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Removed in favour of OSC 7501. Kept hidden so a hook left by an older
+    /// release exits 0: Claude Code treats a non-zero hook exit as blocking
+    /// (a PreToolUse hook would block every tool call).
+    #[command(hide = true)]
+    Notify {
+        /// Whatever the old hook passes (agent name, flags, payload).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
+
+/// Printed by the hidden `notify`: hook stderr is often discarded, but a user
+/// who runs the hook by hand learns what to remove.
+pub(crate) const NOTIFY_REMOVED: &str = "zj-radar: `notify` was removed — agents report through OSC 7501 \
+    now. Remove the old zj-radar hook, plugin or extension of this agent (see docs/install.md, \
+    \"Upgrading from a release with agent adapters\").";
 
 /// CLI entry point (called by `src/main.rs`). Returns the process exit code:
 /// failure when any orchestrator flagged a refusal/error via [`exit::fail_report`].
@@ -153,6 +168,7 @@ pub fn run() -> std::process::ExitCode {
         Command::Update { check } => {
             update::run(update::UpdateOptions { check });
         }
+        Command::Notify { args: _ } => eprintln!("{NOTIFY_REMOVED}"),
     }
     if exit::failed() {
         std::process::ExitCode::FAILURE
