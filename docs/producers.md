@@ -1,466 +1,233 @@
-# Producers: sending agent status to the sidebar
+# Producers: getting status onto the rail
 
-The sidebar only displays. A **producer** is whatever broadcasts agent status
-to it. zj-radar ships producers for Claude Code, Codex, Opencode, pi, and omp
-(oh-my-pi), a `notify generic` command for any script, and documents the wire
-format so you can write your own.
+The sidebar only displays. A **producer** is any program that reports its
+state to Zellij with the Program Status Protocol: an `OSC 7501` escape
+sequence printed to its own terminal. Zellij turns those reports, and its own
+shell-command tracking, into per-pane attention, and the rail draws it. There
+is no hook, plugin, or setup step on the zj-radar side.
 
-Install the [sidebar](install.md) first. Every producer below needs the
-`zj-radar` CLI on `PATH` except the Claude plugin, which falls back to a
-bundled `bash`+`jq` script when the binary is absent.
+This needs Zellij 0.46.0 or newer and the [sidebar](install.md). Desktop
+notifications come from Zellij itself (`attention` → `desktop_notifications`
+in its config), not from zj-radar.
 
-`zj-radar setup <agent>` wires the agents you name; a named agent that is not
-found, or a write with no terminal to confirm it (pass `-y`), exits non-zero
-with the reason. Bare `zj-radar setup` wires every agent it finds, skips the
-rest, and points you at `zj-radar setup zellij --download` if the sidebar is
-not installed yet.
+## Supported agents
 
-## Claude Code
+These agents speak OSC 7501 natively. Run them in a Zellij pane and their row
+appears.
 
-The Claude Code plugin registers the status hooks itself: no `settings.json`
-editing, clean uninstall.
-
-```sh
-zj-radar setup claude
-```
-
-This drives Claude Code's own plugin CLI (marketplace add + install). The same
-thing from inside Claude Code:
-
-```text
-/plugin marketplace add marktoda/zj-radar
-/plugin install zj-radar-claude@zj-radar
-```
-
-The plugin is a no-op outside Zellij, so it is safe to leave enabled. Hook
-details and the event-to-status table are in
-[`plugins/zj-radar-claude/README.md`](../plugins/zj-radar-claude/README.md).
-
-With the `zj-radar` CLI installed, a `running` update identical to the one the
-pane last delivered (same message and task) within 10 seconds is not re-sent:
-Claude fires a hook before and after every tool call with the same content,
-and the second would only cost every sidebar instance a no-op. Any other
-status always goes out, and so does a `running` that changes anything or
-arrives after the 10 seconds. `ZJ_RADAR_NO_DEDUP=1` in the agent's
-environment disables this; the bash fallback never dedups (and never sends
-background tasks — task lines need the CLI). An update that
-carries background tasks (below) is never deduped and always gets the full
-send deadline: a task start or outcome can't be recovered later.
-
-Background work shows up under the pane as its own lines. Claude reports a
-task when a tool call backgrounds it (`run_in_background`, a background
-subagent), each outcome when Claude Code wakes the model with a
-`<task-notification>`, and the full running set on every `Stop`. A turn that
-ends while bounded work still runs stays `running` ("waiting on …") until the
-last of it finishes. A backgrounded shell is bounded unless its command looks
-like a service (a dev server, a watcher, `tail -f`, a tunnel), judged only at
-command positions: each `&`/`|`/`;`/newline segment's first word past env
-assignments and wrappers, or past package runners (`npx`, `pnpm exec`, …) too.
-So `npm run dev`, `cd web && vite` and `tsc --watch` are services, while
-`vite build`, `cd serve && cargo test` and `pytest tests/test_serve.py` are
-bounded. The task's description decides only when it has no command.
-
-## Codex
-
-```sh
-zj-radar setup codex
-```
-
-This adds command hooks to `hooks.json` under `$CODEX_HOME` (default
-`~/.codex`) that call `zj-radar notify codex`. Hooks are additive, so an
-existing Codex `notify` program is preserved. After installing or changing the
-hooks, run `/hooks` inside Codex once to review and trust them.
-
-| Codex event | Status |
-|---|---|
-| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `running` |
-| `SubagentStart`, `SubagentStop` | `running` ("delegating"; the subagent's report is never the message) |
-| `PermissionRequest` | `pending` |
-| `Stop` | `done` |
-
-Each entry carries `timeout: 10` (the send deadline plus headroom, see
-[Bound your sends](#bound-your-sends)) and the `ZJ_RADAR_CODEX_HOOK=v1` marker
-that idempotency and `--uninstall` key on.
-
-Codex 0.157+ runs sessions on a shared app-server daemon by default, and the
-daemon runs every session's hooks with the pane environment of whichever pane
-started it. `notify codex` ignores hooks whose parent is `codex app-server`,
-so launch Codex with `--no-daemon` (or set `[features] daemon_auto_start =
-false`) for its rows to appear; see
-[troubleshooting](troubleshooting.md#a-codex-pane-shows-no-status).
-
-`zj-radar setup codex --legacy-notify` uses Codex's older single-slot `notify`
-program instead of hooks. It only reports `done`, and it refuses to replace a
-foreign notifier unless you also pass `--force`.
-
-## Opencode
-
-```sh
-zj-radar setup opencode
-```
-
-This writes two bridge plugins under `$XDG_CONFIG_HOME/opencode/plugins/`
-(default `~/.config/opencode/plugins/`), one per opencode line. Opencode
-auto-loads them; no `opencode.json` edit. Whichever bridge your version loads
-forwards each event to `zj-radar notify opencode`, which does the
-classification.
-
-| Opencode | Bridge | Runs in |
+| Agent | What it reports | Limits |
 |---|---|---|
-| 2.x | `plugins/zj-radar/tui.js` (a TUI plugin directory) | the TUI process of the pane |
-| 1.18.x | `plugins/zj-radar.js` (a server plugin file) | the TUI's in-process server |
+| [Claude Code](#claude-code) | working, needs you, done; subagents as child records; clears its status on exit | Reports only when its OSC 7501 probe gets an answer |
+| [Codex](#codex) | its turn state, `app=codex` | none known |
+| [pi](#pi) | working, needs you, done, error, idle | Interactive mode only |
+| [Opencode](#opencode) | working and needs you, one child record per session | No done or error: a finished turn reads idle |
+| [omp](#omp) | as pi | Needs a release containing can1357/oh-my-pi#17147 |
 
-Each line ignores the other's shape: 2.x's TUI discovers plugin
-*directories*, 1.x loads plugin *files*. Under 2.x the 1.x file loads as an
-inert stub so it never shows as a failed plugin.
+### Claude Code
 
-| Opencode 2.x event | Status |
-|---|---|
-| a submitted prompt (`session.inbox.enqueued`), `session.execution.started`, `session.tool.*` | `running` (with task and tool activity) |
-| `permission.asked`, `form.created` (the `question` tool asks through a form) | `pending`; `permission.replied`, `form.replied` / `cancelled` return to `running` |
-| `session.execution.succeeded` | `done`, or `pending` when the last message ends in a question |
-| `session.execution.failed` | `error` |
-| `session.execution.interrupted` | `done` when the reason is `user` (your own Esc); `idle` for `shutdown` / `inactivity`; nothing for `superseded` (the replacing prompt's `running` follows) |
-| `session.created`, `session.deleted` | `idle` |
+Verified with Claude Code 2.1.318. It reports `state`, `kind`, `progress`,
+`title`, and `msg` with `app=claude-code`, and sends `state=clear` when it
+exits. Each subagent is a child record, drawn as a background-task line; a
+subagent's permission prompt arrives on the root record.
 
-The 1.x bridge maps the older names the same way (`chat.message` and
-`tool.execute.*` → `running`, `permission.asked` / `question.asked` →
-`pending`, `session.idle` → `done`, `session.error` → `error`).
+Claude Code reports only after its `OSC 7501 ; ?` probe gets an answer, and
+Zellij 0.46 answers it. Two environments turn reporting off:
 
-Things to know:
+- `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` set. Claude Code sets it for the
+  processes it starts, so a Claude launched from Claude's own Bash tool
+  reports nothing.
+- A background session (`CLAUDE_CODE_SESSION_KIND=bg`).
 
-- **Restart opencode after installing.** 1.x loads plugins once at startup;
-  2.x hot-reloads local TUI plugins, but a restart is the safe advice on both.
-- **The binary is required.** Unlike Claude, there is no script fallback.
-- **An unwired opencode pane shows nothing.** Because opencode is an
-  instrumented agent, the sidebar does not command-track its panes; without
-  the bridge (not installed, or opencode started with `--pure`) the pane has
-  no row at all. `setup --check` reports each missing bridge when `opencode`
-  is on `PATH` or one of our bridges is already installed. Upgrading from a release before 2.x support has the same
-  effect on 2.x: run `setup opencode` again (it adds the TUI bridge beside the
-  existing file) and restart opencode.
-- **2.x: status follows the pane, not the server.** Opencode 2.x runs one
-  shared background server per machine, started by whichever `opencode`
-  launched first and outliving it. A server-side plugin there would see one
-  stale pane forever, so the 2.x bridge runs in the TUI, reports the sessions
-  that TUI is showing, and dies with the pane. `opencode run` (no TUI) is not
-  reported. Under 1.x the default TUI hosts its server in-process; with
-  `opencode serve` plus `opencode attach`, status is attributed to the
-  server's pane, or dropped when the server is not under Zellij.
-- **Slash commands label the task with their expansion.** Opencode expands
-  `/command` templates before the bridge sees the prompt.
-- Verified versions: 2.0.12 live; the 1.x loader that accepts the dual-line
-  file is present in 1.18.27 through 1.18.31 (checked in source; opencode's
-  own docs date the dual export to 1.18.29). Older 1.18 releases may reject
-  the object default export. The bridges are vendored per release;
-  re-running `setup opencode` updates them in place.
+### Codex
 
-Bridge internals (event coalescing, subagent filtering, the marker) are in
-[`design.md`](design.md#7-agent-adapters).
+Codex 0.167.0 emits OSC 7501 with `app=codex`.
 
-## pi
+### pi
 
-```sh
-zj-radar setup pi
-zj-radar setup pi --check   # flags a missing extension or a pi older than 0.80.4
-```
+pi reports from its interactive TUI only. Its `msg` is the session name while
+working or done, the dialog title while blocked, and the first line of the
+error on failure. Prompts and assistant output are never reported. "Needs you"
+appears only when an extension opens a dialog, since pi has no built-in
+permission prompts.
 
-This vendors a bridge extension to
-`~/.pi/agent/extensions/zj-radar.js` (or `$PI_CODING_AGENT_DIR/extensions/`).
-pi auto-loads it; restart pi or run `/reload`. Requires pi ≥ 0.80.4
-(`@earendil-works/pi-coding-agent`; the older `@mariozechner/…` package is
-deprecated). Extension-dialog "needs you" requires ≥ 0.84.4.
+### Opencode
 
-| pi event | rail |
-|---|---|
-| `agent_start` (after `input`) | running, task label from the prompt |
-| `input` while streaming (steer / follow-up) | running, task label |
-| `tool_execution_start` | running, tool activity |
-| `ui_prompt_start` / `ui_prompt_end` | pending (dialog title) / back to running, or to the last settled state when idle |
-| `agent_settled` | done (trailing question → pending), error when the last assistant message errored, done with no message on Esc |
-| `session_start{new}` / `session_shutdown{quit}` | idle |
+Opencode reports `working` and `blocked` as one child record per session, with
+the session ID as `id` (anomalyco/opencode#55172). It has no root record, so
+the rail takes the pane's status from its most severe session. Opencode sends
+no `done` or `error` (anomalyco/opencode#60411): at the end of a turn the
+record goes away and the row reads idle, so the finished turn never reaches
+the `earlier` ledger.
 
-pi has no built-in permission prompts, so "needs you" appears only when an
-extension opens a dialog (`permission-gate`, `question`, …) or pi's final
-message ends with a question. The bridge reports only in the interactive TUI
-(`ctx.mode === "tui"`) under Zellij (`$ZELLIJ` set). `pi --no-extensions` disables it; a
-project-local `.pi/extensions/zj-radar.js` copy would double-report — keep the
-bridge global. `npx pi` / `pnpm dlx pi` launches are not recognized as pi (the
-launcher is the pane's command).
+### omp
 
-## omp
+omp (oh-my-pi, a fork of pi) needs a release that contains
+can1357/oh-my-pi#17147. Before that fix, omp's own OSC 133 prompt marks made
+Zellij drop its `working` record.
 
-```sh
-zj-radar setup omp
-zj-radar setup omp --check
-```
+### Upgrading from agent adapters
 
-omp ([oh-my-pi](https://github.com/can1357/oh-my-pi)) is a fork of pi with its
-own extension runtime. This vendors a bridge extension to
-`~/.omp/agent/extensions/zj-radar-omp.js`, following omp's own agent-dir
-rules: a named profile (`$OMP_PROFILE`, else `$PI_PROFILE`) uses
-`~/.omp/profiles/<name>/agent/`, `$PI_CONFIG_DIR` replaces `.omp`, and
-`$PI_CODING_AGENT_DIR` overrides the default profile's dir. Run `setup omp`
-with the same environment you launch omp with. omp auto-loads the file;
-restart omp.
-
-| omp event | rail |
-|---|---|
-| `agent_start` (after `input`) | running, task label from the prompt (slash commands are not tasks) |
-| `input` while a run is streaming (steer) | running, task label |
-| `tool_execution_start` | running, tool activity |
-| `ask` tool start / end | pending (its first question) / back to running |
-| `tool_approval_requested` / `_resolved` | pending (`Allow <tool>?`) / back to running |
-| `agent_end` | done (trailing question → pending), error when the last assistant message errored, done with no message on Esc; ignored while omp will continue (auto-retry, a background job) |
-| `session_switch{new}` / `session_shutdown` | idle |
-
-omp binds every extension into each subagent session too; the bridge reports
-only the main session, except that a subagent's `ask` or tool approval shown
-in your TUI still surfaces as "needs you" (it blocks you all the same). Like pi's, the bridge
-reports only in the interactive TUI under Zellij, and `omp --no-extensions`
-disables it. omp honors `$PI_CODING_AGENT_DIR`, so pi and omp can share one
-extensions dir: the two bridges have different file names, and each stays
-silent inside the other agent's process.
-
-## Any script: `zj-radar notify generic`
-
-Deploy scripts, cron jobs, and homegrown loops can put a row on the radar
-without touching the wire format:
-
-```sh
-zj-radar notify generic --status running --msg "deploying site" --task "nightly deploy" --source deploy
-# … do the work …
-zj-radar notify generic --status done --msg "deploy finished" --source deploy
-```
-
-- `--status` (required): `running` | `pending` | `done` | `error` | `idle`. An
-  unknown token prints a hint and sends nothing.
-- `--msg`: the activity line. `running` without one shows `working`.
-- `--task`: the sticky task label. Empty keeps the stored one.
-- `--source`: the kind mark. `test` ⚗ · `build` ⚙ · `deploy` ⇡ · `server` ❯ ·
-  `remote` ⇄ · `command` `$`, or an agent token (`claude` ✳ · `codex` ❉ ·
-  `opencode` ✺ · `pi` ✴ · `omp` ✷ · `gemini` ✦). `server` and `remote` rows hold a steady `▸`
-  instead of spinning; a `remote` completion notifies as a disconnect.
-  Anything else, including the default `generic`, renders `⦿`.
-- Repo and branch come from `git` in the calling directory; the pane id from
-  `$ZELLIJ_PANE_ID`. Outside Zellij it is a silent no-op. `--dry-run` prints
-  the payload instead of sending.
-
-The lifecycle is the same as for agents: the latest broadcast wins, a finished
-status clears when the pane returns to its shell prompt, and a `running` row
-with no follow-up is cleared about 15 seconds after the pane reaches the
-prompt. Send `done` or `error` when your script finishes rather than relying on
-that. A pane whose root process exits clears immediately, which matters for
-`zellij run` script panes.
+Older zj-radar releases wired each agent with hooks, plugins, or extensions
+that called `zj-radar notify`. Remove them as described in
+[Upgrading from a release with agent adapters](install.md#upgrading-from-a-release-with-agent-adapters).
 
 ## Writing your own producer
 
-The plugin's interface is one versioned pipe payload. Broadcast it by name
-(never with `--plugin`) as a `zj_radar.status.v1` message:
+Any script can put a row on the radar: print OSC 7501 to the terminal of the
+pane it runs in. Zellij attributes the sequence to the pane whose terminal
+receives it, so print to `/dev/tty` when your stdout may be piped.
 
-```json
-{ "v": 1,
-  "source": "claude",
-  "pane": { "type": "terminal", "id": 12 },
-  "status": "running",
-  "repo": "pinky",
-  "branch": "fix/x",
-  "msg": "running tests…",
-  "task": "fix the flaky auth test" }
+The sequence is:
+
+```text
+ESC ] 7501 ; key=value:key=value ESC \
 ```
 
-Field rules:
+- Pairs are separated by `:`, not `;`.
+- `BEL` (`\a`) also terminates the sequence.
+- Keys are lowercase ASCII, at most 16 bytes.
+- Values use only `A-Z a-z 0-9 _ . , + / = -`, so free text travels as base64
+  (`msg`, `title`).
+- A pair with an unknown key, or a value with other characters, is skipped.
+- A sequence over 4096 bytes is dropped.
 
-- `status`: `running` | `pending` | `done` | `error` | `idle`. **Unknown or
-  empty folds to `idle`**, which clears the row and its task. Validate before
-  sending; a typo erases the row you meant to update.
-- `pane.id`: `$ZELLIJ_PANE_ID` with any `terminal_` prefix stripped.
-  `pane.type` must be `"terminal"`.
-- `source`: lowercase, case-sensitive. `"claude"` is the Claude agent;
-  `"Claude"` is the neutral kind.
-- `task` (optional): sticky label, valid with any status. Empty or absent
-  keeps the stored label; the plugin clears it on `idle` and on return to
-  shell.
-- `ack` (optional, default `false`): "the user has already seen this". State
-  converges as usual. The rail's `✓` gesture
-  sets it; producers reporting real events should leave it out.
-- `tasks` (optional): background tasks the agent started (a backgrounded
-  test run, a background subagent, a dev server), drawn as `┊` lines under
-  the pane's row. Shape:
-  `{"snapshot": bool, "items": [{"id", "state", "label"?, "holds"?}]}`.
-  Items are upserts by `id`. `state` is `running`, `completed`, `failed`,
-  `killed`, or `ended` (finished, outcome unknown); an item with any other
-  state, an empty id, or the wrong shape is skipped, never failing the
-  payload. `holds: true` marks bounded work the agent is waiting on (it
-  spins); a running item without it is a service (steady `▸`).
-  `completed`, `failed`, and `killed` are final; `ended` yields only to one
-  of them (an outcome arriving after the snapshot); nothing returns to
-  `running`. With `snapshot: true` the
-  items are the complete running set, and every stored running task left out
-  becomes `ended`. A `running` payload whose snapshot has a holding item means
-  the agent's turn is over and it is waiting on that work (steady `⋯` on the
-  pane line). Absent leaves the stored tasks alone; `idle` clears them;
-  finished ones also clear on the next `running` with no `tasks` that either
-  comes from `done`/`error` or carries a non-empty `task` (a new prompt; a
-  bare `pending` → `running` doesn't, since a permission answer lands
-  mid-turn). At most 16 items, ids 32 chars,
-  labels 64. Only Claude sends this today, and only through the `zj-radar`
-  CLI (the Claude plugin's bash fallback keeps the waiting status but draws
-  no task lines).
-- Unknown fields are ignored, so extras are safe.
-
-The plugin defends itself at parse time: it strips ANSI, control, and bidi
-characters, folds newlines to spaces, truncates `repo`/`branch` to 40 chars,
-`msg`/`task` to 60, `source` to 16, drops payloads over 64 KB, and evicts the
-oldest pane past 256 distinct pane ids. Ordering is latest-wins; the pipe
-delivers in order and there is no sequence number.
-
-Writing it in Rust? Depend on
-[`zj-radar-core`](https://crates.io/crates/zj-radar-core)
-([docs.rs](https://docs.rs/zj-radar-core)), the crate both halves of zj-radar
-use. Build a `StatusPayload` and serialize it with `to_wire`; it round-trips
-against this schema, so the payload cannot drift.
-
-Smoke test from any shell inside the session:
+A deploy script that reports its progress:
 
 ```sh
-zellij pipe --name zj_radar.status.v1 -- \
-  '{"v":1,"source":"test","pane":{"type":"terminal","id":'"${ZELLIJ_PANE_ID#terminal_}"'},"status":"running","repo":"demo","branch":"main","msg":"hello"}'
+#!/usr/bin/env bash
+# One OSC 7501 record for this pane.
+status() { printf '\033]7501;%s\033\\' "$1" > /dev/tty; }
+b64() { printf %s "$1" | base64 | tr -d '\n'; }
+
+status "state=working:app=deploy:progress=40:msg=$(b64 'uploading assets')"
+# … do the work …
+status "state=blocked:app=deploy:kind=permission:msg=$(b64 'promote to production?')"
+read -r answer
+status "state=done:app=deploy:msg=$(b64 'deployed v1.4')"
 ```
 
-### Bound your sends
+[`demo/agent.sh`](../demo/agent.sh) is a longer example: it scripts whole
+agent turns with `printf`.
 
-`zellij pipe` is not fire-and-forget. Zellij holds the client process until
-every loaded plugin instance has consumed the message, and an instance parked
-at its permission prompt never does. A producer that fires per tool call then
-leaks one blocked process and two server file descriptors per event until the
-Zellij server hits `EMFILE` and the whole session crashes. This has happened.
+To check that the terminal understands the protocol, send the query
+`ESC ] 7501 ; ? ESC \`. Zellij answers with the states and kinds it accepts:
 
-Three rules keep you safe:
-
-1. **Put a deadline on every send.** The bundled producers use 5 seconds for
-   status edges (`done`/`pending`/`error`/`idle`) and 2 seconds for `running`
-   heartbeats; a dropped heartbeat is replaced by the next event, a dropped
-   edge loses real state. A `running` that carries `tasks` is an edge (5
-   seconds). `ZJ_RADAR_PIPE_TIMEOUT` (whole seconds, max 3600)
-   overrides both. Killing the client past its deadline loses nothing; the
-   message is already queued server-side.
-2. **Make the deadline survive your own death.** Hook runners kill their
-   hooks. A producer killed mid-send never runs its own kill, and the blocked
-   `zellij pipe` client is orphaned forever. Run the pipe under a shell
-   alongside a detached `sleep <deadline>; kill` watchdog, inside the subtree
-   you spawn. `zj-radar-core` exports this as `self_limiting_pipe_argv`, with
-   `DEFAULT_PIPE_TIMEOUT_SECS` and `RUNNING_PIPE_TIMEOUT_SECS`. The subtree
-   exits with `zellij pipe`'s own status (non-zero when the watchdog killed
-   it), so you can tell a delivered send from an expired one.
-3. **Give the hook runner headroom.** If your runner has its own per-hook
-   timeout, set it at least 2 seconds above your send deadline so the
-   graceful path finishes before the runner kills it. The bundled Claude hooks
-   keep `timeout >= deadline + 2`; the Codex entries use deadline + 5.
-
-## Presence file and `state --json`
-
-Each session's rails publish what they know to a file; `zj-radar state` and
-peer rails read it. This is the one consumer-facing contract besides the pipes.
-
-**Location.** `<zellij cache root>/<plugin URL as nested path>/plugin_cache/zj-radar.presence.<zellij_pid>.json`
-(macOS root `~/Library/Caches/org.Zellij-Contributors.Zellij`, Linux
-`$XDG_CACHE_HOME/zellij`, default `~/.cache/zellij`). Written by temp file and
-atomic rename. When that cache is unwritable the plugin falls back to its
-`/tmp` mount (host `$TMPDIR/zellij-<uid>/zj-radar`); `state` does not scan
-it, so such a session is not listed.
-
-**Schema (`v` = 1).**
-
-| Field | Meaning |
-|---|---|
-| `v` | File format version. Additive fields never bump it; a meaning or cap change does. |
-| `session_name` | Zellij session name. |
-| `running`, `attention` | Counts of agent (status-origin) panes only: working, and needing you. |
-| `attention_tab_position` | Position of the tab to land on for attention; `null` = none. |
-| `updated_epoch_s` | When the content was last written. |
-| `tabs` | `[{position, name, panes}]`, one per tab. |
-| `panes[]` | `{pane_id, origin, kind, status, label}`: tracked panes only. `origin` is `"status"` (agent) or `"command"` (observed command); plain shells and editors are excluded. `pane_id` and `origin` are absent in pre-v1 files. |
-
-Status-origin panes sort before commands, then the 16-pane cap applies. An
-agent's `label` is its sticky task (falling back to the agent kind); a
-command's is its command line.
-
-**Caps and hostile text.** 64 tabs, 16 panes per tab, 96-character labels.
-Readers truncate only the structural caps (tabs, and panes per tab). Text is
-never truncated on read: a file with an over-long or control/otherwise
-unsanitary string anywhere is rejected whole.
-
-**Liveness.** Each session rewrites its file about every 60 s. A file older
-than 90 s is stale; older than 300 s it is dead and peers reap it. Content
-changes are written by one rail per session: the most recently active one,
-which holds the `zj-radar.<pid>.presence-writer` token beside the file (it has
-the freshest view of the session's tabs). After a detach that rail keeps
-publishing. Other rails write only to rescue a file older than 75 s, so a
-session that lost its writer may briefly read as stale but is never reaped.
-
-**`zj-radar state [--json] [--needs-attention] [--include-stale] [--session NAME]`.**
-`--json` prints one line:
-
-```json
-{"v":1,"sessions":[{"name":"work","current":true,"stale":false,"age_s":12,
-  "running":1,"attention":1,"attention_tab_position":2,
-  "tabs":[{"position":2,"name":"api","panes":[{"pane_id":14,"origin":"status",
-  "kind":"claude","status":"pending","label":"fix login"}]}]}]}
+```text
+ESC ] 7501 ; ?:states=idle,working,done,blocked,error:kinds=permission,question,auth ESC \
 ```
 
-| Field | Meaning |
+### Field reference
+
+| Key | Values | Effect |
+|---|---|---|
+| `state` | `idle`, `working`, `blocked`, `done`, `error`, `clear` | Required. Any other value drops the sequence. |
+| `app` | `A-Z a-z 0-9 _ . + -`, at most 32 bytes | The program's name, which picks the row's mark (below). Longer drops the sequence; other characters drop the key. |
+| `kind` | `permission`, `question`, `auth` | With `blocked` only: the label is `needs approval`, `has a question`, or `needs login`. Without it the label is `needs you`. |
+| `progress` | `0` to `100` | With `working` or `blocked` only: the text reads `working 40%: …`. |
+| `msg` | base64 of UTF-8, at most 2048 bytes decoded (2732 encoded) | The activity text. |
+| `title` | base64 of UTF-8, at most 192 bytes decoded (256 encoded) | A short name. On the root record it shows only when there is no `msg`. |
+| `id` | a path of `/`-separated segments | Makes the record a child record (below). |
+
+A `msg` or `title` that is not valid base64, exceeds its cap, or decodes to
+control characters drops the whole sequence.
+
+How each `state` renders on the rail (the full matrix is in
+[the activity model](activity-model.md#3-the-state--class-presentation-matrix)):
+
+| `state` | Rail |
 |---|---|
-| `v` | Output format version, independent of the file's `v`. |
-| `sessions[]` | One per live session (dead files and duplicates dropped), the current session first, then by name. |
-| `name` | Zellij session name. |
-| `current` | `true` when `name` equals `$ZELLIJ_SESSION_NAME`. |
-| `stale` | No write for over 90 s (`age_s` > 90). |
-| `age_s` | Seconds since the file was last written, by its mtime. |
-| `running`, `attention` | The file's counts (agent panes working, and needing you); never filtered. |
-| `attention_tab_position` | The file's tab to land on for attention, or `null`. |
-| `tabs` | The file's `tabs` as written (`[{position, name, panes}]`, panes as in the file schema above). Under `--needs-attention`, only matching panes and the tabs holding them. |
+| `working` | Spinner. `app=server` and `app=remote` hold a steady `▸` instead. |
+| `blocked` | `◆`, needs you. A `· 12m` wait tag after a minute, and a `✓` to mark it seen. |
+| `done` | `●`. Once you see the pane, the row goes idle and the completion moves to `earlier`. |
+| `error` | `✗`. Same as `done` for seeing and `earlier`. |
+| `idle` | A muted `○` row, kept while the pane has a record. |
+| `clear` | Removes the records: the row disappears. |
 
-`position` and `attention_tab_position` are 0-based; `zellij action
-go-to-tab` is 1-based, so jump with `go-to-tab $((pos + 1))`. A pane's
-`status` is one of `running`, `pending`, `done`, `error`, `idle` (see
-[the activity model](activity-model.md)); `kind` is an agent (`claude`,
-`codex`, `opencode`, `pi`, `omp`, `gemini`) or a command class (`test`, `build`,
-`deploy`, `server`, `remote`, `command`, `other`), the `Kind` axis in
-[the activity model](activity-model.md#2-the-three-orthogonal-axes).
+The row's text is Zellij's attention text, which already carries the label
+and the progress: `working 40%: uploading assets`, `needs approval: promote to
+production?`, `done: deployed v1.4`. A `working` record without `progress`
+shows its `msg` alone.
 
-`--needs-attention` keeps agent panes that are pending or error and skips
-stale sessions unless `--include-stale` (which requires `--needs-attention`);
-session-level `running` and `attention` stay unfiltered. Pre-v1 files (`v` absent or 0) have
-no pane `origin`, so the match degrades there: their origin-less panes count
-as agents (a command pane in error matches too), and a pre-v1 session with
-`attention` > 0 matches even without a matching pane, listed with `tabs: []`.
+`app` picks the mark. Tokens are case-sensitive.
 
-| Exit | Meaning |
+| `app` | Mark |
 |---|---|
-| 0 | OK, or a `--needs-attention` match. |
-| 1 | `--needs-attention` matched nothing. |
-| 2 | Error, including a stdout write failure and clap usage errors. |
+| `claude-code`, `claude` | `✳` |
+| `codex` | `❉` |
+| `opencode` | `✺` |
+| `pi` | `✴` |
+| `omp` | `✷` |
+| `gemini` | `✦` |
+| `test` | `⚗` |
+| `build` | `⚙` |
+| `deploy` | `⇡` |
+| `server` | `❯`, steady |
+| `remote`, `zellij` | `⇄`, steady |
+| `command` | `$` |
+| anything else, or none | `⦿` |
 
-Jump to the first pane needing you, in the current session:
+### Child records
 
-```sh
-zj-radar state --json --needs-attention \
-  | jq -r '.sessions[] | select(.current) | .tabs[0] | "\(.position + 1) \(.panes[0].pane_id)"' \
-  | { read -r tab pane && zellij action go-to-tab "$tab" && zellij action focus-pane-id "terminal_$pane"; }
-```
+A record without `id` is the pane's root record. A record with `id` is a child
+record: a subagent, a background job, a session. Each child is drawn as a `┊`
+background-task line under the pane's row.
 
-A missing cache is an empty answer. `ZJ_RADAR_CACHE_DIR` (a Zellij cache root)
-replaces the platform root; it is for tests and sandboxes.
-There is no `--refresh`: `state` never queries Zellij, so `age_s` is the
-freshness signal.
+| Child `state` | Task line |
+|---|---|
+| `working`, `blocked` | Spinner and its age, `· 4m` |
+| `done` | `●` |
+| `error` | `✗` |
+| `idle` | Muted `·` |
 
-**Known limits.**
+- A pane shows at most three task lines: two, then `┊ +N more`.
+- `task_lines` in the [configuration](configuration.md#options) switches to a
+  `+N` count or hides them.
+- A task line's label is the child's `title`, else its `msg`, else its `id`.
+- Task lines themselves never feed the tab's status or counts.
+- Zellij lets a child raise the pane's status only when it is `blocked` or
+  `error`.
+- A pane with children and no root record takes its status from its most
+  severe child, which becomes the pane's row.
+- A child without `app` inherits the nearest ancestor's.
 
-- Same-name sessions from separate Zellij servers collapse to one (newest
-  `updated_epoch_s` wins).
-- `state` sees every zj-radar plugin URL; a rail sees only peers under its own.
-- `current` comes from `$ZELLIJ_SESSION_NAME`, which goes stale after
-  `rename-session`.
-- Tab names and task labels are written to the cache directory
-  unconditionally.
+`id` rules: at most 8 segments, each at most 32 bytes of
+`A-Z a-z 0-9 _ . + -`, at most 128 bytes in all. An invalid `id` drops the
+sequence. A pane holds at most 256 records; a new one past that evicts the
+oldest.
+
+### Lifecycle
+
+- Each record is replaced by the next one with the same `id` (or none, for the
+  root).
+- `state=clear:id=job` removes `job` and every record under `job/`.
+  `state=clear` with no `id` removes all of the pane's records.
+- `done` and `error` stay until you see the pane. A focused pane counts as
+  seen shortly after.
+- When the shell prompt returns, the pane's foreground program exits, or the
+  pane closes, Zellij drops the `idle`, `working`, and `blocked` records. A
+  script that dies mid-run leaves no stale spinner.
+- Send `done` or `error` when your script finishes, so the outcome stays on
+  the rail.
+
+Shell commands need no producer: Zellij tracks them and the rail shows them as
+`$` rows ([activity model](activity-model.md#4-where-the-status-comes-from)).
+
+## Remote sessions over ssh
+
+A remote Zellij reports its session to the terminal it runs in. With
+`attention.host_status` (default `true`) it sends an aggregated OSC 7501 with
+`app=zellij`, once that terminal answers its `OSC 7501 ; ?` query. Your local
+Zellij answers it.
+
+So a local pane that runs `ssh host` and then `zellij attach` gets the remote
+session's status, with no setup on either side:
+
+- The row carries the remote mark `⇄` and Zellij's text, which names the
+  remote tab and pane (`Tab #1 › Pane #1: …`).
+- A working remote session holds the steady `▸`, and the tab line shows `⇄`.
+- Needs you, done, and error render as for a local agent.
+- When the remote client detaches or quits, it sends `state=clear` and the row
+  goes away.
+
+A plain `ssh` session with no remote Zellij reports nothing: it is a command
+you type into, which Zellij does not list.

@@ -5,16 +5,19 @@ grid for most scenarios is in [`rail-reference.md`](rail-reference.md)
 (background-task lines are pinned by render snapshots instead); this page is
 the reader's version.
 
+The rail shows the status Zellij already tracks for every pane. Programs
+report it to Zellij themselves ([supported agents](producers.md#supported-agents)),
+and Zellij tracks shell commands on its own.
+
 ## Anatomy
 
 ```
  RADAR                     ·3 1!   ← header: tab count, needs-you badge
 ════════════════════════════════   ← rule (sweeps a ◆ while anything is working)
 ▌⠋ 1 pinky                         ← focused tab: spine, status, number, name
- ◆ 2 review                    ✓   ← tab that needs you; ✓ acknowledges it
- ├ ◆ ✳ migrate schema          ✓   ← pane row: status, kind mark, task
- │   ↳ approve git push?           ← the question it is blocked on
- └ ⠋ ❉ write insta tests           ← last pane in the tab
+ ◆ 2 review                    ✓   ← tab that needs you; ✓ marks it seen
+ ├ ◆ ✳ needs approval: Bash    ✓   ← pane row: status, kind mark, text
+ └ ⠋ ❉ working: write tests        ← last pane in the tab
  ○ 3 notes                         ← plain terminal, nothing tracked
 ─ earlier ──────────────────────   ← recent completions, newest first
 2m ● pinky cargo test
@@ -24,55 +27,66 @@ the reader's version.
 ```
 
 **Header.** ` RADAR` plus `·N` tabs. When a tab needs you, `N!` appears in
-bold. While any bounded work is running, a `◆` marches along the rule once a
-second (compact and comfortable densities only).
+bold. While anything is working, a `◆` marches along the rule once a second
+(compact and comfortable densities only).
 
 **Tab rows.** Column 0 is the spine: `▌` marks the focused tab. The glyph is
 the tab's dominant status, most urgent first: `✗` error, `◆` needs you, `⠋`
 working, `●` done, `○` idle. Then the tab number and name.
 
 **Pane rows.** Every tracked pane in a tab gets a line under it, joined by
-`├` / `└`. Each line is status glyph, kind mark, then text. The text is the
-agent's current task when one is known, otherwise its latest activity. A pane
-waiting on you adds a `↳` line with the question. A tab shows at most six pane
-lines; the rest fold into `+N more`.
+`├` / `└`. Each line is status glyph, kind mark, then the text Zellij shows
+for the pane: the program's state and message, with its progress when it
+reports one (`working 40%: …`). A tab shows at most six pane lines; the rest
+fold into `+N more`.
 
-**Background tasks.** Work an agent started and left running (a
-backgrounded test run, a background subagent, a dev server) gets its own
-lines under the agent's pane row, on a dashed `┊` guide:
+**Focused panes.** Zellij marks a pane that finishes while focused as seen at
+once, so its row goes straight to idle. The finish still lands in
+`─ earlier ─`.
+
+**Background tasks.** Work an agent reports separately from its own turn (a
+subagent, a backgrounded test run) gets its own lines under the agent's pane
+row, on a dashed `┊` guide:
 
 ```
-▌└ ⋯ ✳ fix the flaky e2e retries   ← agent waiting on its background work
+▌└ ⠋ ✳ working: fix the e2e retries
 ▌  ┊ ⠋ Run the test suite · 4m     ← still running
 ▌  ┊ ✗ lint · 2m                   ← failed
-▌  ┊ ▸ npm run dev                 ← a service; never finishes
+▌  ┊ ● explore the repo            ← completed
 ```
 
-A spinner means bounded work the agent is waiting on. When the agent's turn
-is over and only that work remains, the agent's own glyph turns to a steady
-`⋯`. Finished tasks read `●` completed, `✗` failed, `○` killed, or a muted `·`
-when the outcome is unknown, and stay listed until your next prompt. At most
-three lines show per pane (the rest fold into `┊ +N more`); on a short or
-narrow rail they fold into a `+N` count on the pane row, error-coloured when
-one failed. Set `task_lines count` to always show just that count, or
-`task_lines off` to hide background tasks (the agent's `⋯` stays). Claude
-only, for now, and it needs the `zj-radar` CLI installed.
-The full semantics are in [`activity-model.md`](activity-model.md).
+A spinner means the task is still running. Finished tasks read `●` completed,
+`✗` failed, or a muted `·` when the task went idle with no outcome. A line
+stays as long as the agent keeps reporting the task. At most three lines show
+per pane (the rest fold into `┊ +N more`); on a narrow rail they fold into a
+`+N` count on the pane row, error-coloured when one failed. Set
+`task_lines count` to always show just that count, or `task_lines off` to hide
+background tasks ([options](configuration.md#options)). Only agents that
+report sub-tasks get these lines
+([supported agents](producers.md#supported-agents)).
 
-**Kind marks.** `✳` claude · `❉` codex · `✺` opencode · `✴` pi · `✷` omp · `✦` gemini ·
-`$` command · `⚙` build · `⚗` test · `⇡` deploy · `❯` server · `⇄` remote ·
-`⦿` other.
+**Kind marks.** `✳` Claude Code · `❉` Codex · `✺` Opencode · `✴` pi · `✷` omp ·
+`✦` Gemini · `$` shell command · `⇄` remote Zellij session · `⦿` any other
+program. The mark comes from the program name in its status report; a script
+can also pick `⚗` test, `⚙` build, `⇡` deploy, or `❯` server
+([full table](producers.md#field-reference)).
 
-**Time tags.** Time appears only where it costs you something: a pending pane
-shows how long it has waited (`· 4m`), and a long-running build or test shows
-how long it has run. Both are whole minutes, frozen at `1h+`.
+**Shell commands.** Zellij tracks the commands you run in a shell, and each
+one gets a plain `$` row: a spinner while it runs, then `●` or `✗` with its
+exit code (`exit 1`) when it fails. The command text needs the
+`ReadPaneContents` permission ([permissions](install.md#permissions));
+without it the row shows only the state.
 
-**Shell commands.** Builds, tests, and deploys spin like agents. A dev server
-holds a steady `▸` instead, because it never finishes. So does a connected
-remote session (`ssh`, `mosh`); while it is connected, its tab line also
-carries a right-aligned `⇄`, and its ending reads "disconnected" rather than
-"done". Why each class looks the way it does is in
-[`activity-model.md`](activity-model.md).
+**Remote sessions.** `ssh` into a host whose Zellij reports its status (its
+`attention.host_status` setting, on by default), attach there, and the local
+pane shows that session's status with the `⇄` mark. While the remote session
+is working, its row holds a steady `▸` instead of a spinner and its tab line
+carries a right-aligned `⇄`.
+
+**Time tags.** Time appears only where it costs you something: a pane that
+needs you shows how long it has waited (`· 4m`), and a shell command or other
+non-agent program shows how long it has run. Both are whole minutes, from one
+minute up, frozen at `1h+`.
 
 **Overflow.** When tabs outnumber the lines available, trailing idle tabs fold
 into a `+N idle ▾` strip and the header count gains `▲`.
@@ -80,29 +94,38 @@ into a `+N idle ▾` strip and the header count gains `▲`.
 **Footer.** With two or more spare lines the rail pins a rule and a tally to the
 bottom: `N working`, plus `· M need you` when M is nonzero. With
 [`show_mode true`](configuration.md#options) the tally line also carries the
-current Zellij mode (`NORMAL`, `LOCKED`, …) flush right. Above it, an
-`─ earlier ─` section lists recent completions (newest first, up to ten) with
-a relative age. Click one to jump to its tab if the tab still exists. Set
-`ledger false` to hide the section; history is still recorded.
+current Zellij mode (`NORMAL`, `LOCKED`, …) flush right.
+
+**Earlier.** Above the footer, an `─ earlier ─` section lists recent
+completions (newest first, up to ten) with a relative age. Click one to jump
+to its tab if the tab still exists. The list lives in the memory of each
+tab's rail, so a new tab starts with an empty list. Set `ledger false` to
+hide the section; history is still recorded.
 
 **Densities.** `cards` (the default) paints each tab as a tinted band using
 your theme's colors; `comfortable` separates tabs with a blank line;
 `compact` is flush. Card tints need a truecolor terminal.
 
-**Tab names.** With `naming "managed"` (the default) the rail names tabs after
-the repo an agent is working in, falling back to the pane's directory or
-title. It never overwrites a name you set by hand.
+**Tab names.** With `naming "managed"` (the default) the rail names each tab
+after the project its panes are in. A name you set by hand always wins. Next
+comes the project name from the directory's git remote (`origin`), then the
+directory's name, then the pane title. For a remote (`ssh`) pane the name is
+the remote directory's name.
 
 ## Mouse
 
 - **Click a tab row** to switch to that tab. **Click a pane row** to switch to
   the tab and focus that pane.
-- **Click `✓`** on a row that says needs-you to acknowledge it. The row becomes
-  `done` in every tab's rail. Use it when an agent ends a finished turn with a
-  courtesy question ("want me to also…?"). A question that actually blocks the
-  agent clears on its own when you answer it.
+- **Click `✓`** on a row that needs you to mark it seen in Zellij. Zellij then
+  stops reporting it as needing you, in every tab's rail and in Zellij's own
+  tab marker. Use it when an agent ends a finished turn with a courtesy
+  question ("want me to also…?"). A question that actually blocks the agent
+  clears on its own when you answer it.
 - Right-click does nothing yet: Zellij does not deliver right-clicks to
   plugins ([zellij#5350](https://github.com/zellij-org/zellij/issues/5350)).
+
+Desktop notifications come from Zellij itself, through its `attention`
+settings; the rail sends none.
 
 ## Keybinds
 
@@ -118,45 +141,24 @@ Bindings for all four, and for changing options from a key, are in
 
 ## Cross-session badge
 
-Run zj-radar in more than one Zellij session on the same machine and each rail
-grows one line per session: your session first, then sessions that need
-attention, then the rest. Each line shows the session name with its working
-and needs-you agent-pane counts. With a single session the badge is invisible.
+Run more than one Zellij session on the same machine and each rail grows one
+line per session: your session first, then sessions that need attention, then
+the rest. Each line shows the session name with its working and needs-you
+pane counts. With a single session the badge is invisible.
 
-- **Click a line** to switch to that session, landing on its attention tab if
-  it has one.
-- **`session_tree true`** ([configuration](configuration.md)) expands the
-  badge into a tree. Your session's line heads your own tabs; each other
-  session follows them with its tab names and agent rows (tabs without agents
-  still appear). Click a peer tab or agent row to switch to that tab; it does
-  not focus a particular pane there. Peer rows only use the height left after
-  your local tabs, the ledger, and the footer, so a short rail shows fewer of
-  them (or none); session lines always remain visible. `session_tree`
-  controls whether *your* rail draws peers' trees.
+- **Click a line** to switch to that session, landing on a pane that needs
+  you if it has one.
+- **`session_tree true`** ([configuration](configuration.md#options)) expands
+  the badge into a tree. Your session's line heads your own tabs; each other
+  session follows with the tabs and panes Zellij reports activity for. Click
+  a peer pane row to switch there and focus that pane; a peer tab row focuses
+  its first listed pane. Peer rows only use the height left after your local
+  tabs, the ledger, and the footer, so a short rail shows fewer of them (or
+  none); session lines always remain visible. `session_tree` controls whether
+  *your* rail draws peers' trees.
 - **`session-next` / `session-prev`** move a highlight through the same order.
   The switch happens about a second after your last tap; landing back on your
   own session cancels.
 
-Sessions find each other through Zellij's own attention tracking
-(`GlobalAttentionUpdate`): a session Zellij stops reporting leaves the badge.
-
-## Scripting: `zj-radar state`
-
-`zj-radar state` prints what the radar knows about every live session: its
-tabs and the panes the radar tracks (agents and observed commands). It reads
-the files each rail publishes and never queries Zellij; `age_s` says how old
-each session's data is (rails refresh about every 60 s; stale after 90 s).
-
-```sh
-zj-radar state                     # human-readable
-zj-radar state --json              # {"v":1,"sessions":[...]}, schema in producers.md
-zj-radar state --needs-attention   # agent panes waiting on you; exit 1 if none
-zj-radar state --session work
-```
-
-Example: `if zj-radar state --needs-attention >/dev/null; then notify-send "an agent needs you"; fi`.
-
-Pane detail needs sessions running this release's plugin: after upgrading,
-restart existing sessions or start new ones; older rails publish counts only. The
-`--needs-attention` and stale rules, exit codes, the JSON schema, and known
-limits are in [`producers.md`](producers.md#presence-file-and-state---json).
+The sessions come from Zellij's own attention tracking: a session Zellij stops
+reporting leaves the badge.

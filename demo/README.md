@@ -67,10 +67,9 @@ recording flaky:
 - **Permissions** — rewrites this wasm's grant block in Zellij's
   `permissions.kdl` with the full set the plugin requests, so the recording
   shows no first-run prompt (a stale partial grant would block the rail).
-- **Process-tree shape** (in `agent.sh`) — Zellij reports a pane whose root
-  process has no child as "back at the shell prompt", and the plugin rightly
-  exit-clears the pane's pushed status on that signal (that's how it catches
-  killed agents). agent.sh therefore never sits childless while it matters:
+- **Process-tree shape** (in `agent.sh`) — Zellij reads a pane whose root
+  process has no child as "back at the shell prompt", which is not how a live
+  agent looks. agent.sh therefore never sits childless while it matters:
   the beat-3 `read` parks a `sleep` guard child, and `hold` runs `tail` as a
   child rather than `exec`ing it.
 - **Nested Zellij** — unsets `ZELLIJ*` before launching vhs, so the inner

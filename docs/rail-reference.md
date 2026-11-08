@@ -4,7 +4,7 @@
 > proposed 2026-06-28). This file is the **test oracle**: each scenario carries
 > a `rail-input` block (the state) and a `rail-expect` block (the exact
 > ANSI-stripped grid). A crate test (`crates/plugin/src/reference_tests.rs`)
-> parses them, runs the real `aggregate` + `render_rail`, and asserts the grid
+> parses them, feeds each pane as Zellij's native attention through the real `RadarState` + `render_rail`, and asserts the grid
 > matches (see *Using this as tests* at the end). Edit a block → edit the test.
 
 ## Design rules (this revision)
@@ -20,7 +20,7 @@
    a real command) gets its own line regardless of status or tab focus. No
    tally, no `+N verb` — those were hard to parse.
 4. **Prompt programs are not panes.** `starship`/`zsh`/`bash`/… never surface
-   as a pane line. A pane that has only ever run the shell prompt is untracked
+   as a pane line. A pane for which Zellij reports no attention is untracked
    and gets no line. ⟦D4⟧
 5. **Safety cap 6.** At most 6 pane lines per tab; beyond that, a final
    `+N more` line. (High on purpose — the common case never folds.) ⟦D6 ✓ = 6⟧
@@ -31,7 +31,7 @@
 8. **Empty/initial is not a marketing screen.** No legend; just the tab list,
    with a placeholder name for an unnamed tab. The zero-tab onboarding face
    is a one-line ` scanning… no agents yet` and a separate code path from
-   this harness (see §A); `render_rail` and `aggregate` are what this file
+   this harness (see §A); `RadarState` and `render_rail` are what this file
    pins.
 
 ## Vocabulary
@@ -482,7 +482,7 @@ tab 1 "pinky" bell
 
 ## T. Untracked-only tab (D4 prompt-exclusion)
 
-**Author-from-intent.** A tab whose only pane is untracked (never sent a status → `PaneDisplay::Untracked`). The aggregator produces zero tracked panes → the tab renders as idle with no pane line, just like a plain tab.
+**Author-from-intent.** A tab whose only pane is untracked (Zellij reports no attention for it → `PaneDisplay::Untracked`). The aggregator produces zero tracked panes → the tab renders as idle with no pane line, just like a plain tab.
 
 ```rail-input
 width 32
@@ -562,7 +562,7 @@ tab 1 "af" active
 
 **Author-from-intent.** A single command pane that exited successfully (exit 0), as
 Zellij reports a shell command. The `pane_outcome()` function fires only for command
-rows; agent panes never get an outcome tag. `Outcome::Ok` renders as no tag at all — the
+rows; agent panes never get an outcome tag. `ExitOutcome::Ok` renders as no tag at all — the
 line-1 status glyph (`●`, green) is the one done signal, so a second `✓` on line 2 would
 double-mark the same fact. Single-pane path: tab glyph `●` (Done), child line =
 ` └ ● $ cargo build` (same tree shape as multi-pane — §C's note).
@@ -588,14 +588,14 @@ tab 1 "work"
 
 > `exit 0` is the attention's exit code: the row is a command row with
 > `status = Done`. `pane_outcome()` returns
-> `Outcome::Ok`, whose `full()`/`minimal()` forms are both empty — `compose_activity`
+> `ExitOutcome::Ok`, whose `full()`/`minimal()` forms are both empty — `compose_activity`
 > treats an empty tag as no tag: no separator space, no empty SGR pair.
 
 ## Y. Command-origin end-result tag — failed (`exit 1`)
 
 **Author-from-intent.** A single command pane that exited with code 1, as Zellij
 reports a shell command: `status = Error` and `exit_code = Some(1)`; `pane_outcome()`
-returns `Outcome::Failed(Some(1))` → tag `exit 1`. Tab glyph `✗` (Error) already carries the
+returns `ExitOutcome::Failed(Some(1))` → tag `exit 1`. Tab glyph `✗` (Error) already carries the
 failure signal; the tag adds the one thing the glyph can't: the exit code. Child line =
 ` └ ✗ $ cargo build exit 1`.
 
@@ -616,7 +616,7 @@ tab 1 "work"
  └ ✗ $ cargo build exit 1
 ```
 
-> `exit 1` → `status = Error`, `exit_code = Some(1)` → `Outcome::Failed(Some(1))` → `exit 1`
+> `exit 1` → `status = Error`, `exit_code = Some(1)` → `ExitOutcome::Failed(Some(1))` → `exit 1`
 > (no parens — the exit code is the whole tag now that `Ok` carries none). The full form is
 > shown because 19 cols fits within the 28-col avail budget.
 
@@ -723,7 +723,7 @@ so history gets air above the pinned floor; a tab name past 12 columns
 truncates with `…`. The section shows at most **10** entries regardless of
 pane height (`LEDGER_DISPLAY_CAP`) — the rail is a status surface, not a log,
 so spare height past that stays blank filler above the rule rather than
-ever-deeper history (the ring still *stores* 32 for cross-instance merging).
+ever-deeper history (the ring still *stores* 32).
 
 ```rail-input
 width 32
@@ -901,7 +901,7 @@ tab 1 "web"
 
 **Recommendation: the doc is the oracle.** A `#[cfg(test)]` module in the crate
 `include_str!`s this file, parses every `rail-input`/`rail-expect` pair, builds
-the state, runs the **real** pipeline (`aggregate` → `render_rail`), strips ANSI
+the state, runs the **real** pipeline (`RadarState` roll-up → `render_rail`), strips ANSI
 to a grid, and asserts equality. One source of truth; editing a block edits the
 test; no drift between doc and behavior.
 
@@ -920,6 +920,8 @@ tab <pos> "<name>" [active]
 
 - `kind` ∈ claude·codex·opencode·pi·omp·gemini·command·build·test·deploy·server·remote·other
 - `status` ∈ running·pending·done·error·idle
+- `command` builds a shell-command row (OSC 133); every other `kind` builds an
+  OSC 7501 program record with that `app`.
 - `waiting <N>m` backdates the pane's waiting-on-you edge by N minutes so the
   `· Nm` wait tag renders (pending panes only; without it the pane applied
   "now" and rule 2's under-a-minute case keeps the line tagless).
@@ -929,14 +931,14 @@ tab <pos> "<name>" [active]
 ### Test sketch (`crates/plugin/src/reference_tests.rs`, `#[cfg(test)]`)
 
 ```rust
-// pseudocode — lives in-crate so it can call aggregate()/render_rail()
+// pseudocode — lives in-crate so it can drive RadarState and render_rail()
 const DOC: &str = include_str!("../../../docs/rail-reference.md");
 
 #[test]
 fn rail_reference_matches() {
     for case in parse_cases(DOC) {                 // (id, input_dsl, expect_grid)
-        let (rows, ledger, opts) = build_state(&case.input); // DSL → StatusStore/CommandStore
-                                                              //      → aggregate() per tab → TabRow[]
+        let (rows, ledger, opts) = build_state(&case.input); // DSL → native attention per pane
+                                                              //      → RadarState roll-up per tab → TabRow[]
         let rail = render::render_rail(&rows, &ledger, &opts);
         let got = grid(&rail.ansi, opts.width);         // existing vt100 grid() helper
         assert_eq!(got.trim_end(), case.expect.trim_end(),
@@ -949,7 +951,7 @@ fn rail_reference_matches() {
 `parse_cases` is a ~40-line line-scanner (find fenced ```` ```rail-input ````
 / ```` ```rail-expect ```` blocks; the nearest preceding `## <id>` heading names
 the case). `build_state` maps each `<kind> <status> "<msg>"` into a pane
-observation, assigns sequential pane ids, and calls the real `aggregate` — so
+observation, assigns sequential pane ids, and hands the native attention to the real `RadarState` — so
 the test exercises aggregation *and* rendering, exactly the path the bug lived in.
 
 ### Why this over plain `insta`

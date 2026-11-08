@@ -70,8 +70,8 @@ state, and the next manifest carries the result.
 
 Work an agent started that runs without its attention, reported as an OSC 7501
 child record (`id`). Rendered as `┊` sub-lines under the pane line
-(`render::emit_task_lines`); never feeds the roll-up, counts, or
-notifications. Not the activity model's *Job*, which is a class of command.
+(`render::emit_task_lines`); never feeds the roll-up or counts. Not the
+activity model's *Job*, which is a class of command.
 
 ## Information source
 
@@ -128,26 +128,27 @@ Detail: design.md → *Ledger*.
 
 The policy that names tabs and remembers what it applied: `TabNamer::rename(tabs,
 mode) -> Vec<TabRename>` in `crates/plugin/src/tab_namer.rs`, fed resolved
-`TabFacts` by `RadarState::name_facts`. Candidates are one ordered list
+`TabFacts` by `RadarState::tab_facts`. Candidates are one ordered list
 (focused pane's repo, any repo, worktree-resolved cwd, title); an applied name
 sticks while any pane still justifies it, and `Managed` never clobbers a manual
 rename. Ownership is per tab: each instance names only the tab holding its own
 plugin pane, resolved to a stable `TabId`. The once-per-pane cwd bootstrap
 (`Effect::ResolveCwd`) feeds naming but is not naming policy.
 
-## Cross-session presence
+## Cross-session badge
 
 How one session's rail learns another's counts and tab tree: from Zellij's
-`GlobalAttentionUpdate`, converted by `attention::PeerSession::presence` into
-the `Presence` data carrier and fed to `Sessions` (`sessions.rs`), pure state
-that derives the badge on demand. Zellij owns peer liveness; this session's own
-row comes from its rail rows. Badge order and cycling order come from one
-`ordered()`. Detail: design.md → *Cross-session badge*.
+`GlobalAttentionUpdate`, converted by `attention::PeerSession::summary` into a
+`SessionSummary` (with `SummaryTab` and `SummaryPane` children) and fed to
+`Sessions` (`sessions.rs`), pure state that derives the badge on demand.
+Zellij owns peer liveness; this session's own row comes from its rail rows.
+Badge order and cycling order come from one `ordered()`. Detail: design.md → *Cross-session badge*.
 
 ## Setup analysis
 
-How `zj-radar setup` learns the state of the world: pure `analyze_*(&Env) ->
-Facts` functions per target in `crates/cli/src/setup/analyze.rs`, fed
-already-read values by the IO shell. `--check` and the install orchestrators
-both project from `Facts`; the pure mutators (`edit_*`) share only the
-low-level detectors in `setup/detect.rs`.
+How `zj-radar setup` learns the state of the world: the pure
+`analyze_zellij(&ZellijEnv) -> ZellijFacts` in
+`crates/cli/src/setup/analyze.rs`, fed already-read values by the IO shell
+(`read_zellij_env`). `--check` and the installer both project from
+`ZellijFacts`; the pure mutator (`edit_zellij`) shares only the low-level
+detectors in `setup/detect.rs`.

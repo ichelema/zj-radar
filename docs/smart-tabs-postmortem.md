@@ -87,14 +87,15 @@ output-triggered.
 zj-radar is architecturally immune to this specific meltdown, and the postmortem
 crystallizes *why* — these are constraints to preserve, not just happy accidents:
 
-- **Push, not poll (recommendation #5 is already the design).** State arrives via the
-  `zj_radar.status.v1` broadcast pipe from Claude/Codex hooks. The plugin never asks the
-  server "what's running in this pane?" — the hook tells it. There is no per-pane,
+- **Push, not poll (recommendation #5 is already the design).** Agent state arrives
+  as Zellij's own push events (`PaneUpdate` carrying each pane's attention,
+  `PaneAttentionChanged`), computed from the OSC 7501 and OSC 133 sequences the programs print.
+  The plugin never asks the server "what's running in this pane?" — Zellij tells it. There is no per-pane,
   per-output query path, so there is no storm to feed.
 - **No *polled* blocking host calls on the hot path.** The lethal pattern was
   `get_pane_running_command()` / `get_pane_cwd()` re-issued *on every output tick*, per pane —
   unbounded calls driven by output volume. zj-radar must never reintroduce that. Prefer push
-  (`PaneUpdate` manifest, `CwdChanged`, hook payload) for anything that changes over a pane's
+  (`PaneUpdate` manifest, `CwdChanged`, `PaneAttentionChanged`) for anything that changes over a pane's
   life.
   - **Narrow exception (added with cwd-bootstrap naming):** a blocking call is allowed *once
     per pane id, at first sighting*, when it can't be re-triggered by output. The cwd-bootstrap
@@ -114,6 +115,6 @@ crystallizes *why* — these are constraints to preserve, not just happy acciden
   Otherwise it decays to the 60 s *Slow* cadence, which exists to repaint minute-granular ages,
   and then disarms. Even while armed, a tick does no work proportional to pane count. Keep it
   that way; never let a timer tick fan out into N host calls.
-- **Output volume is irrelevant to us.** Because we key off discrete hook events
-  (UserPromptSubmit / Pre/PostToolUse / Notification / Stop), a pane spewing megabytes of
-  output costs us nothing. That is the exact dimension that melted smart-tabs.
+- **Output volume is irrelevant to us.** Because we key off discrete attention
+  changes Zellij pushes (an agent's OSC 7501 record, a shell command's start and exit), a pane
+  spewing megabytes of output costs us nothing. That is the exact dimension that melted smart-tabs.
