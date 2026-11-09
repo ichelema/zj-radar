@@ -257,9 +257,7 @@ next new tab in a running session. To revoke, delete the `zj_radar.wasm`
 block from `permissions.kdl`.
 
 If you declined, the sidebar shows Zellij's own y/n prompt on first load, and
-at rail width that prompt looks blank. Press `y` in the rail pane, or run
-`zj-radar setup zellij --grant` from inside the session to get the prompt in a
-readable floating pane. Details in
+at rail width that prompt looks blank. Press `y` in the rail pane. Details in
 [Sidebar shows "needs permission"](troubleshooting.md#sidebar-shows-needs-permission-or-looks-blank).
 
 ## Check your setup (`--check`)
@@ -273,7 +271,7 @@ zellij:
   ok alias: radar plugin alias present in config.kdl
   ok wasm: wasm plugin file present
   missing layout: `default` layout does not have the radar rail — run `zj-radar setup zellij` or paste the snippet
-  missing grant: wasm not granted — run `zj-radar setup zellij -y` to pre-authorize (or `--grant` from inside Zellij)
+  missing grant: wasm not granted — run `zj-radar setup zellij -y` to pre-authorize (or focus the rail and press y)
 ```
 
 Items are `ok`, `warn`, or `missing`. Any `missing` item makes the command exit

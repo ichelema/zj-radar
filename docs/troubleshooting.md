@@ -25,10 +25,8 @@ Then pick the fix for how the rail was installed:
   pre-authorize, then open a new tab or restart Zellij.
 - **In a `zj-radar run` session:** quit and re-run `zj-radar run`; it
   pre-authorizes its own wasm before launching.
-- **By hand, or when the two above cannot write the grant:** from inside the
-  session, run `zj-radar setup zellij --grant` and press `y` in the floating
-  pane it opens. Without the CLI, focus the blank rail pane and press `y`
-  blind.
+- **By hand, or when the two above cannot write the grant:** focus the blank
+  rail pane and press `y` blind.
 
 A rail on Zellij older than 0.46.0 does not work at all; no grant fixes it.
 

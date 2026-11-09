@@ -114,7 +114,7 @@ pub(crate) fn zellij_check_items(f: &ZellijFacts, layout_name: &str) -> Vec<Chec
         Some(true) => CheckItem::ok("grant", "wasm is granted in permissions.kdl"),
         Some(false) => CheckItem::missing(
             "grant",
-            "wasm not granted — run `zj-radar setup zellij -y` to pre-authorize (or `--grant` from inside Zellij)",
+            "wasm not granted — run `zj-radar setup zellij -y` to pre-authorize (or focus the rail and press y)",
         ),
     });
 
@@ -282,7 +282,7 @@ mod tests {
         let items = zellij_check_items(&f, "default");
         let grant = items.iter().find(|i| i.name == "grant").expect("grant item");
         assert_eq!(grant.level, CheckLevel::Missing, "ungranted wasm must be missing");
-        assert!(grant.detail.contains("--grant"), "hint must mention --grant");
+        assert!(grant.detail.contains("setup zellij -y"), "hint must mention setup zellij -y");
     }
 
     #[test]

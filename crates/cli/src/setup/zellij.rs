@@ -33,59 +33,6 @@ pub(crate) fn inject_mode(inject_flag: bool, yes: bool, dry_run: bool, is_tty: b
     InjectMode::Prompt
 }
 
-/// Pure: the argument vector for `zellij plugin --floating --width 90 --height
-/// 28 -- file:<wasm_path>`. Unit-tested so the exec call stays thin.
-///
-/// The `--` is required: Zellij declares the URL `last(true)`, which clap 4
-/// (Zellij 0.45+) only accepts after `--`. Clap 3 (Zellij 0.44.x) treats the
-/// `--` as optional (`[--] <URL>`), so the one shape works across the floor.
-pub(crate) fn grant_args(wasm_path: &Path) -> Vec<String> {
-    vec![
-        "plugin".to_string(),
-        "--floating".to_string(),
-        "--width".to_string(),
-        "90".to_string(),
-        "--height".to_string(),
-        "28".to_string(),
-        "--".to_string(),
-        format!("file:{}", wasm_path.display()),
-    ]
-}
-
-/// Exec `zellij plugin --floating … -- file:<wasm_dest>` for the one-time
-/// permission grant. Reports the error but does not exit — callers may choose.
-pub(crate) fn run_grant(config_dir: &Path) {
-    use std::process::Command;
-    let wasm_dest = zellij_wasm_dest(config_dir);
-    let args = grant_args(&wasm_dest);
-    match Command::new("zellij").args(&args).status() {
-        Ok(status) if status.success() => {}
-        Ok(status) => {
-            crate::exit::fail_report(
-                "zj-radar",
-                format!(
-                    "zellij plugin exited with {status}; \
-                     try running: zellij {}",
-                    crate::run::shell_join(&args)
-                ),
-            );
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            crate::exit::fail_report("zj-radar", zellij_missing_message());
-        }
-        Err(e) => {
-            crate::exit::fail_report(
-                "zj-radar",
-                format!(
-                    "failed to launch zellij for grant — {e}; \
-                     try running: zellij {}",
-                    crate::run::shell_join(&args)
-                ),
-            );
-        }
-    }
-}
-
 /// `zellij --version` stdout (trimmed), or `None` when the binary is absent
 /// or unrunnable — the raw read behind `ZellijEnv::zellij_version`.
 pub(crate) fn zellij_version_output() -> Option<String> {
@@ -441,8 +388,8 @@ pub(crate) fn setup_zellij(uninstall: bool, opts: ZellijSetupOpts<'_>) {
                 // permissions.kdl is Zellij's cache, not a Nix-managed file:
                 // the doctor's grant remedy (`setup zellij -y`) must still
                 // seed it, keyed by the stable path the home-manager snippet
-                // links the wasm to. Without this, `--grant` was the only
-                // way to authorize on Nix.
+                // links the wasm to. Without this, pressing y in the rail
+                // would be the only way to authorize on Nix.
                 if wasm_dest.is_file() && !run_preseed(&wasm_dest, facts.granted, yes, dry_run, is_tty) {
                     print_grant_hint_if_needed(&facts);
                 }
@@ -675,8 +622,7 @@ fn print_grant_hint_if_needed(facts: &ZellijFacts) {
     println!(
         "zellij: permissions not pre-authorized — on first launch the rail will look \
          BLANK while Zellij's prompt (unreadable at rail width) waits. Focus the rail \
-         and press y to allow access, or run `zj-radar setup zellij --grant` from \
-         inside Zellij for a legible floating prompt. Zellij asks once, then remembers."
+         and press y to allow access. Zellij asks once, then remembers."
     );
 }
 
@@ -1145,26 +1091,6 @@ mod tests {
     fn prompt_when_interactive() {
         // interactive tty, no --inject, no --yes, no --dry-run → Prompt
         assert_eq!(inject_mode(false, false, false, true), InjectMode::Prompt);
-    }
-
-    // ── grant_args tests ─────────────────────────────────────────────────────
-
-    #[test]
-    fn grant_args_produces_exact_zellij_plugin_command() {
-        let path = std::path::Path::new("/home/user/.config/zellij/plugins/zj_radar.wasm");
-        assert_eq!(
-            grant_args(path),
-            vec![
-                "plugin",
-                "--floating",
-                "--width",
-                "90",
-                "--height",
-                "28",
-                "--",
-                "file:/home/user/.config/zellij/plugins/zj_radar.wasm",
-            ]
-        );
     }
 
     // ── setup_path decision table ────────────────────────────────────────────

@@ -1007,7 +1007,7 @@ fn setup_zellij_dry_run_download_skips_the_fetch_and_writes_nothing() {
 
 // ── Test: --check conflicts with --uninstall at the CLI boundary ──────────────
 // `setup --check --uninstall` used to silently run the doctor and never
-// uninstall — reading as "uninstalled". Clap now hard-errors, matching --grant.
+// uninstall — reading as "uninstalled". Clap now hard-errors.
 
 #[test]
 fn setup_check_conflicts_with_uninstall() {

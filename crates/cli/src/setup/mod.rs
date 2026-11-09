@@ -37,9 +37,6 @@ pub struct SetupOptions<'a> {
     /// `detect::resolve_layout_path_from`.
     /// `None` means `default`.
     pub layout: Option<&'a str>,
-    /// Open the plugin in a focused floating pane so Zellij can prompt for
-    /// permissions (one-time grant). Exits after launching; skips wasm/alias/inject.
-    pub grant: bool,
 }
 
 /// Where the wasm artifact comes from. A total type so "both --wasm and
@@ -71,22 +68,19 @@ pub(crate) struct ZellijSetupOpts<'a> {
 }
 
 /// The single operation a `setup` invocation performs. Resolving this once makes
-/// the precedence (grant > check > uninstall > install) explicit instead of
+/// the precedence (check > uninstall > install) explicit instead of
 /// implicit in the order of `if` blocks.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
-    Grant,
     Check,
     Uninstall,
     Install,
 }
 
-/// Clap already hard-errors on `--check --uninstall` (and `--grant` with
-/// either), so the check-beats-uninstall rung is defensive, not a CLI surface.
-pub(crate) fn mode_from_flags(grant: bool, check: bool, uninstall: bool) -> Mode {
-    if grant {
-        Mode::Grant
-    } else if check {
+/// Clap already hard-errors on `--check --uninstall`, so the
+/// check-beats-uninstall rung is defensive, not a CLI surface.
+pub(crate) fn mode_from_flags(check: bool, uninstall: bool) -> Mode {
+    if check {
         Mode::Check
     } else if uninstall {
         Mode::Uninstall
@@ -130,14 +124,7 @@ pub fn run(options: SetupOptions<'_>) {
         return;
     }
 
-    let mode = mode_from_flags(options.grant, options.check, options.uninstall);
-
-    if mode == Mode::Grant {
-        if let Some(config_dir) = zellij_config_dir_or_report() {
-            run_grant(&config_dir);
-        }
-        return;
-    }
+    let mode = mode_from_flags(options.check, options.uninstall);
 
     if mode == Mode::Check {
         // The doctor inspects the zellij install; checking needs no wasm source.
@@ -307,11 +294,10 @@ mod tests {
     }
 
     #[test]
-    fn mode_precedence_grant_beats_check_beats_uninstall() {
-        assert!(matches!(mode_from_flags(true, true, true), Mode::Grant));
-        assert!(matches!(mode_from_flags(false, true, true), Mode::Check));
-        assert!(matches!(mode_from_flags(false, false, true), Mode::Uninstall));
-        assert!(matches!(mode_from_flags(false, false, false), Mode::Install));
+    fn mode_precedence_check_beats_uninstall() {
+        assert!(matches!(mode_from_flags(true, true), Mode::Check));
+        assert!(matches!(mode_from_flags(false, true), Mode::Uninstall));
+        assert!(matches!(mode_from_flags(false, false), Mode::Install));
     }
 
     #[test]

@@ -109,13 +109,6 @@ enum Command {
         /// install, --uninstall, and --check alike.
         #[arg(long, value_name = "NAME")]
         layout: Option<String>,
-        /// Open the plugin in a focused floating pane so Zellij can prompt for
-        /// permissions (one-time grant). Exits after launching; does not run the
-        /// wasm/alias/inject steps.
-        // Conflicts with dry_run/check too: the grant launches a real pane,
-        // which a "write nothing" flag must not.
-        #[arg(long, conflicts_with_all = ["wasm", "download", "inject", "layout", "uninstall", "dry_run", "check"])]
-        grant: bool,
     },
     /// Update the CLI and the sidebar wasm to the latest release together
     /// (set ZJ_RADAR_VERSION to pin a specific release tag).
@@ -150,7 +143,7 @@ pub fn run() -> std::process::ExitCode {
         Command::Run { name, print_cmd } => {
             run::run(run::RunOptions { name, print_cmd });
         }
-        Command::Setup { targets, wasm, download, uninstall, dry_run, yes, check, force, inject, layout, grant } => {
+        Command::Setup { targets, wasm, download, uninstall, dry_run, yes, check, force, inject, layout } => {
             setup::run(setup::SetupOptions {
                 targets: &targets,
                 wasm: wasm.as_deref(),
@@ -162,7 +155,6 @@ pub fn run() -> std::process::ExitCode {
                 force,
                 inject,
                 layout: layout.as_deref(),
-                grant,
             });
         }
         Command::Update { check } => {
