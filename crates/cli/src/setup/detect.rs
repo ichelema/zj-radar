@@ -96,7 +96,10 @@ pub(crate) fn resolve_layout_path_from(
     layout_dir.join(format!("{layout_name}.kdl"))
 }
 
-pub(crate) fn strip_managed_zellij_alias(lines: &mut Vec<String>) {
+/// Remove every well-formed managed alias block and return them, markers
+/// included, in order: `edit_zellij` re-inserts them to keep the user's options.
+pub(crate) fn strip_managed_zellij_alias(lines: &mut Vec<String>) -> Vec<Vec<String>> {
+    let mut blocks = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         if lines[i].trim() != ZELLIJ_ALIAS_BEGIN {
@@ -113,8 +116,9 @@ pub(crate) fn strip_managed_zellij_alias(lines: &mut Vec<String>) {
             i += 1;
             continue;
         };
-        lines.drain(i..=end);
+        blocks.push(lines.drain(i..=end).collect());
     }
+    blocks
 }
 
 pub(crate) fn is_unmanaged_radar_alias_line(line: &str) -> bool {
