@@ -23,3 +23,40 @@ fn run_print_cmd_emits_session_scoped_zellij_invocation() {
     assert!(stdout.contains("zellij "), "stdout:\n{stdout}");
     assert!(stdout.contains("proj"), "stdout:\n{stdout}");
 }
+
+/// ICH-436: a run refused at the foreign-session consent must not have
+/// pre-seeded the grant. A fake `zellij` lists a session named like the
+/// target, which `run` never stamped, so the non-tty path refuses.
+#[cfg(unix)]
+#[test]
+fn run_refused_for_a_foreign_session_leaves_permissions_untouched() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempdir().unwrap();
+    let bin = tempdir().unwrap();
+    let zellij = bin.path().join("zellij");
+    std::fs::write(&zellij, "#!/bin/sh\necho proj\n").unwrap();
+    std::fs::set_permissions(&zellij, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // A stand-in wasm: without an embedded one, `run` would download first.
+    let wasm = home.path().join("stub.wasm");
+    std::fs::write(&wasm, b"\0asm").unwrap();
+    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap_or_default());
+
+    let out = Command::cargo_bin("zj-radar")
+        .unwrap()
+        .env("HOME", home.path())
+        .env("XDG_CACHE_HOME", home.path().join(".cache"))
+        .env("ZJ_RADAR_DATA_DIR", home.path().join("data"))
+        .env("ZJ_RADAR_WASM", &wasm)
+        .env("PATH", path)
+        .env_remove("ZELLIJ")
+        .env_remove("ZELLIJ_CONFIG_FILE")
+        .args(["run", "proj"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("refusing to attach"), "stderr:\n{stderr}");
+    assert!(!stderr.contains("pre-authoriz"), "refused run touched the grant; stderr:\n{stderr}");
+    for perms in [".cache/zellij/permissions.kdl", "Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl"] {
+        assert!(!home.path().join(perms).exists(), "refused run wrote {perms}");
+    }
+}
