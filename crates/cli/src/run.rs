@@ -471,12 +471,7 @@ pub fn run(opts: RunOptions) {
         }
     }
 
-    // Before reading the grant back into the facts. `--print-cmd` writes
-    // nothing outside the owned dir, and a nested `run` is refused below.
-    if let Some(perms_path) = zellij_permissions_path().filter(|_| !opts.print_cmd && !inside_zellij) {
-        preseed_grant(&perms_path, &materialized.wasm_path);
-    }
-    let facts = RunFacts {
+    let mut facts = RunFacts {
         session_owned: session_marker_path(&materialized.config_dir, &session).exists(),
         session,
         config_dir: materialized.config_dir,
@@ -504,10 +499,10 @@ pub fn run(opts: RunOptions) {
     // Advisories are guidance, which belongs on stderr (see the `exit` module
     // doc) — and `--print-cmd`'s stdout must stay machine-readable: a shell
     // doing `$(zj-radar run --print-cmd)` must capture the command, not prose.
-    for advisory in &plan.advisories {
-        eprintln!("{advisory}");
-    }
     if opts.print_cmd {
+        for advisory in &plan.advisories {
+            eprintln!("{advisory}");
+        }
         if plan.foreign_session {
             eprintln!(
                 "note: session '{}' wasn't created by zj-radar — attaching with this command \
@@ -554,6 +549,18 @@ pub fn run(opts: RunOptions) {
             return;
         }
         stamp_session_marker(&facts.config_dir, &facts.session);
+    }
+    // Only a run that will launch pre-seeds: a refused one (nested, declined,
+    // non-interactive foreign session) and `--print-cmd` have returned above,
+    // so they never touch `permissions.kdl`. The grant is then read back so
+    // the advisories reflect whether the pre-seed landed.
+    if let Some(perms_path) = zellij_permissions_path() {
+        preseed_grant(&perms_path, &facts.wasm_path);
+    }
+    facts.permissions_kdl = zellij_permissions_text();
+    let plan = plan_run(&facts);
+    for advisory in &plan.advisories {
+        eprintln!("{advisory}");
     }
     // Stamp the create path before launching: the marker records "this name is
     // radar's" from the moment we ask Zellij to create it.
