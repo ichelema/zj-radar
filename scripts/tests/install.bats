@@ -152,6 +152,16 @@ STUB_DOWNLOADS='download() { cp "$FIXTURE_TGZ" "$2"; }; try_download() { cp "$FI
   [ "$("$TMP/bin/zj-radar")" = "fake-zj-radar" ]
 }
 
+@test "main: next-step hint points at setup zellij, not the removed agent wiring" {
+  make_release_fixture
+  export FIXTURE_TGZ="$TMP/asset.tar.gz" FIXTURE_SHA="$TMP/asset.tar.gz.sha256"
+  ZJ_RADAR_BIN_DIR="$TMP/bin" run run_installer "$(fake_uname Linux x86_64); $STUB_DOWNLOADS; main"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"next: 'zj-radar setup zellij --download'"* ]]
+  [[ "$output" != *"wire every agent"* ]]
+  [[ "$output" != *"then 'zj-radar setup'"* ]]
+}
+
 @test "main: refuses a tarball that fails checksum and installs nothing" {
   make_release_fixture
   printf '%s  zj-radar.tar.gz\n' "$(printf 'b%.0s' $(seq 64))" > "$TMP/asset.tar.gz.sha256"
