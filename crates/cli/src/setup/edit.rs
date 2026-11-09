@@ -21,47 +21,79 @@ fn zellij_alias_lines(location: &str, indent: &str) -> Vec<String> {
 }
 
 /// The alias to splice back: every managed block setup stripped, verbatim with
-/// only its `radar` location rewritten, so a re-run keeps the user's options,
-/// comments and layout. The default block when none holds a `radar` node.
-fn managed_alias_lines(managed: &[Vec<String>], location: &str, indent: &str) -> Vec<String> {
-    let kept: Vec<String> = managed.iter().filter_map(|block| with_location(block, location)).flatten().collect();
-    if kept.is_empty() {
-        zellij_alias_lines(location, indent)
-    } else {
-        kept
+/// only its `radar` location rewritten and moved to `indent`, so a re-run keeps
+/// the user's options and comments. The default block when none holds a
+/// `radar` node.
+fn managed_alias_lines(managed: &[Vec<String>], location: &str, indent: &str) -> Result<Vec<String>, String> {
+    let mut kept = Vec::new();
+    for block in managed {
+        if let Some(block) = with_location(block, location)? {
+            kept.extend(reindent(&block, indent));
+        }
     }
+    Ok(if kept.is_empty() { zellij_alias_lines(location, indent) } else { kept })
+}
+
+/// `block` (starting with its BEGIN marker) moved to `indent`: the marker's
+/// indentation is replaced on every non-blank line that starts with it.
+fn reindent(block: &[String], indent: &str) -> Vec<String> {
+    let base = block.first().map_or("", |l| &l[..l.len() - l.trim_start().len()]);
+    block
+        .iter()
+        .map(|l| match l.strip_prefix(base) {
+            Some(rest) if !l.trim().is_empty() => format!("{indent}{rest}"),
+            _ => l.clone(),
+        })
+        .collect()
 }
 
 /// `block` with the `location` of its first `radar` node set to `location`
-/// (added after `radar` when the node has none). `None` without a `radar`
-/// node, or when its `location` string doesn't end on that line.
-fn with_location(block: &[String], location: &str) -> Option<Vec<String>> {
+/// (added after `radar` when the node has none). `Ok(None)` without a `radar`
+/// node. Fails closed on a `location` that isn't a one-line `location="…"`
+/// (a raw string, a type annotation): adding a second one would leave Zellij
+/// loading the old path, and falling back to the defaults would drop options.
+fn with_location(block: &[String], location: &str) -> Result<Option<Vec<String>>, String> {
     const KEY: &str = "location=\"";
-    let at = block.iter().position(|l| is_unmanaged_radar_alias_line(l))?;
+    let Some(at) = block.iter().position(|l| is_unmanaged_radar_alias_line(l)) else {
+        return Ok(None);
+    };
     let line = &block[at];
+    let unreadable = || {
+        format!(
+            "refusing to write config.kdl: setup can't rewrite the managed radar alias's location in `{}` — write it as location=\"…\" on that line and re-run",
+            line.trim()
+        )
+    };
     let value = format!("{KEY}{}\"", kdl_string(location));
     let head = match line.find(KEY) {
         Some(start) => {
-            let mut chars = line[start + KEY.len()..].char_indices();
-            let end = loop {
-                match chars.next()? {
-                    (i, '"') => break start + KEY.len() + i + 1,
-                    (_, '\\') => {
-                        chars.next()?;
+            let rest = start + KEY.len();
+            let mut chars = line[rest..].char_indices();
+            let mut end = None;
+            while let Some((i, c)) = chars.next() {
+                match c {
+                    '"' => {
+                        end = Some(rest + i + 1);
+                        break;
+                    }
+                    '\\' => {
+                        chars.next();
                     }
                     _ => {}
                 }
-            };
+            }
+            let end = end.ok_or_else(unreadable)?;
             format!("{}{value}{}", &line[..start], &line[end..])
         }
+        None if line.contains("location=") => return Err(unreadable()),
         None => {
-            let name_end = line.find("radar")? + "radar".len();
+            let name_end = line.find("radar").ok_or_else(unreadable)? + "radar".len();
             format!("{} {value}{}", &line[..name_end], &line[name_end..])
         }
     };
     let mut block = block.to_vec();
     block[at] = head;
-    Some(block)
+    Ok(Some(block))
 }
 
 /// Escape `s` for the inside of a KDL double-quoted string. Shared by the
@@ -277,14 +309,14 @@ pub fn edit_zellij(existing: &str, location: &str, install: bool, force: bool) -
             expand_one_line_plugins_block(&mut lines);
         }
         if let Some((idx, indent)) = find_plugins_insert(&lines) {
-            let alias = managed_alias_lines(&managed, location, &indent);
+            let alias = managed_alias_lines(&managed, location, &indent)?;
             lines.splice(idx..idx, alias);
         } else {
             if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
                 lines.push(String::new());
             }
             lines.push("plugins {".to_string());
-            lines.extend(managed_alias_lines(&managed, location, "    "));
+            lines.extend(managed_alias_lines(&managed, location, "    ")?);
             lines.push("}".to_string());
         }
     }
@@ -516,15 +548,48 @@ mod tests {
 
     #[test]
     fn with_location_rewrites_or_adds_the_location() {
-        let set = |line: &str| with_location(&[line.to_string()], "file:/new \"x\".wasm").map(|b| b[0].clone());
+        let set =
+            |line: &str| with_location(&[line.to_string()], "file:/new \"x\".wasm").map(|b| b.map(|b| b[0].clone()));
         let want = r#"location="file:/new \"x\".wasm""#;
         // An escaped quote in the old value doesn't end it early.
-        assert_eq!(set(r#"  radar location="file:/a\"b.wasm" {"#), Some(format!("  radar {want} {{")));
-        assert_eq!(set("  radar {"), Some(format!("  radar {want} {{")));
-        assert_eq!(set("  radar"), Some(format!("  radar {want}")));
-        // No `radar` node, or a location string that doesn't end on its line.
-        assert_eq!(set("  // radar location=\"x\""), None);
-        assert_eq!(set("  radar location=\"file:/a"), None);
+        assert_eq!(set(r#"  radar location="file:/a\"b.wasm" {"#), Ok(Some(format!("  radar {want} {{"))));
+        assert_eq!(set("  radar {"), Ok(Some(format!("  radar {want} {{"))));
+        assert_eq!(set("  radar"), Ok(Some(format!("  radar {want}"))));
+        // No `radar` node: nothing to rewrite.
+        assert_eq!(set("  // radar location=\"x\""), Ok(None));
+        // A location setup can't rewrite in place fails closed, never duplicated.
+        for line in ["  radar location=\"file:/a", "  radar location=r\"file:/a\" {", "  radar location=(path)\"x\""] {
+            assert!(set(line).unwrap_err().contains("refusing to write config.kdl"), "{line}");
+        }
+    }
+
+    /// Regression: a raw-string location got a second `location` added in front,
+    /// and Zellij (last entry wins) kept loading the old wasm.
+    #[test]
+    fn zellij_managed_alias_with_raw_string_location_refuses_to_write() {
+        let existing = format!(
+            "plugins {{\n    {ZELLIJ_ALIAS_BEGIN}\n    radar location=r\"file:/old.wasm\" {{\n        naming \"off\"\n    }}\n    {ZELLIJ_ALIAS_END}\n}}\n"
+        );
+        let err = edit_zellij(&existing, "file:/new.wasm", true, false).unwrap_err();
+        assert!(
+            err.starts_with("refusing to write config.kdl") && err.contains("location=r\"file:/old.wasm\""),
+            "{err}"
+        );
+    }
+
+    /// A managed block outside `plugins` moves inside it at the child indent,
+    /// keeping its options.
+    #[test]
+    fn zellij_top_level_managed_block_moves_into_plugins_reindented() {
+        let existing = format!(
+            "{ZELLIJ_ALIAS_BEGIN}\nradar location=\"file:/old.wasm\" {{\n    naming \"off\"\n}}\n{ZELLIJ_ALIAS_END}\nplugins {{\n    tab-bar location=\"zellij:tab-bar\"\n}}\n"
+        );
+        let new = changed(&existing, "file:/new.wasm");
+        let want = format!(
+            "plugins {{\n    tab-bar location=\"zellij:tab-bar\"\n    {ZELLIJ_ALIAS_BEGIN}\n    radar location=\"file:/new.wasm\" {{\n        naming \"off\"\n    }}\n    {ZELLIJ_ALIAS_END}\n}}\n"
+        );
+        assert_eq!(new, want);
+        assert!(matches!(edit_zellij(&new, "file:/new.wasm", true, false).unwrap(), Outcome::Unchanged));
     }
 
     /// A managed block without a `radar` node holds no alias: setup writes the
