@@ -13,6 +13,15 @@ use std::path::{Path, PathBuf};
 const GRANT_HINT: &str = "First run: Zellij asks for the sidebar's permissions inside the rail — \
     focus the rail and press y.";
 
+/// Shown when the pre-seed just wrote the grant for an existing session: its
+/// rails may sit at a prompt the running server already shows, which the file
+/// can't resolve. Conditional, because the session may show none (resurrected,
+/// or already granted in memory). Only the run that writes the grant can tell:
+/// a later attach finds it already granted and stays silent, leaving the
+/// rail's own "press y" face as the only cue.
+const ATTACH_GRANT_HINT: &str = "If the rail still shows Zellij's permission prompt (a session \
+    started before its grant), focus the rail and press y.";
+
 // ── Pure helpers ─────────────────────────────────────────────────────────────
 
 /// Session name from the cwd basename or an explicit name argument
@@ -317,6 +326,8 @@ struct RunFacts {
     /// Whether we're invoked from inside a Zellij session (`run` can't nest).
     inside_zellij: bool,
     permissions_kdl: Option<String>,
+    /// Whether this run's `preseed_grant` just wrote the grant (false before it).
+    grant_just_written: bool,
 }
 
 /// What to launch and what to advise — the pure result of `plan_run`.
@@ -332,7 +343,8 @@ struct RunPlan {
 }
 
 /// Pure decision: attach if the session exists, otherwise create with the rail
-/// layout; advise the grant prompt when the wasm is still ungranted; surface
+/// layout; advise the grant prompt when the wasm is still ungranted, or when
+/// the grant just landed under an existing session (`ATTACH_GRANT_HINT`); surface
 /// whether we're nested.
 fn plan_run(facts: &RunFacts) -> RunPlan {
     let granted =
@@ -342,7 +354,13 @@ fn plan_run(facts: &RunFacts) -> RunPlan {
     } else {
         create_session_args(&facts.config_dir, &facts.session, "radar")
     };
-    let advisories = if granted { Vec::new() } else { vec![GRANT_HINT.to_string()] };
+    let advisories = if !granted {
+        vec![GRANT_HINT.to_string()]
+    } else if facts.session_exists && facts.grant_just_written {
+        vec![ATTACH_GRANT_HINT.to_string()]
+    } else {
+        Vec::new()
+    };
     RunPlan {
         args,
         advisories,
@@ -386,7 +404,8 @@ fn session_is_live(name: &str) -> bool {
 /// shows. `run` grants only the wasm path it owns. Merge-safe with a `.bak`
 /// (`merge_grant` + `backup_then_write`, as `setup zellij`), and best-effort:
 /// any refusal leaves the prompt in the rail, which `GRANT_HINT` explains.
-fn preseed_grant(perms_path: &Path, wasm_path: &Path) {
+/// Returns true iff it wrote the grant (already granted or refused → false).
+fn preseed_grant(perms_path: &Path, wasm_path: &Path) -> bool {
     use crate::setup::preseed::{merge_grant, Preseed};
     // Only a missing file starts from scratch: an unreadable one is left
     // alone, never replaced by a fresh file that would drop its grants.
@@ -395,15 +414,15 @@ fn preseed_grant(perms_path: &Path, wasm_path: &Path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
             eprintln!("zj-radar: not pre-authorizing the sidebar ({}: {e})", perms_path.display());
-            return;
+            return false;
         }
     };
     let merged = match merge_grant(existing.as_deref(), &wasm_path.to_string_lossy()) {
-        Ok(Preseed::AlreadyGranted) => return,
+        Ok(Preseed::AlreadyGranted) => return false,
         Ok(Preseed::Merged(text)) => text,
         Err(e) => {
             eprintln!("zj-radar: not pre-authorizing the sidebar ({e})");
-            return;
+            return false;
         }
     };
     let written = perms_path
@@ -411,12 +430,18 @@ fn preseed_grant(perms_path: &Path, wasm_path: &Path) {
         .map_or(Ok(()), std::fs::create_dir_all)
         .and_then(|()| crate::setup::backup_then_write(perms_path, &merged));
     match written {
-        Ok(()) => eprintln!(
-            "zj-radar: pre-authorized the sidebar's permissions ({}) in {}",
-            REQUIRED_PLUGIN_PERMISSIONS.join(", "),
-            perms_path.display()
-        ),
-        Err(e) => eprintln!("zj-radar: not pre-authorizing the sidebar (write failed: {e})"),
+        Ok(()) => {
+            eprintln!(
+                "zj-radar: pre-authorized the sidebar's permissions ({}) in {}",
+                REQUIRED_PLUGIN_PERMISSIONS.join(", "),
+                perms_path.display()
+            );
+            true
+        }
+        Err(e) => {
+            eprintln!("zj-radar: not pre-authorizing the sidebar (write failed: {e})");
+            false
+        }
     }
 }
 
@@ -479,6 +504,7 @@ pub fn run(opts: RunOptions) {
         session_exists,
         inside_zellij,
         permissions_kdl: zellij_permissions_text(),
+        grant_just_written: false,
     };
     let plan = plan_run(&facts);
 
@@ -555,7 +581,7 @@ pub fn run(opts: RunOptions) {
     // so they never touch `permissions.kdl`. The grant is then read back so
     // the advisories reflect whether the pre-seed landed.
     if let Some(perms_path) = zellij_permissions_path() {
-        preseed_grant(&perms_path, &facts.wasm_path);
+        facts.grant_just_written = preseed_grant(&perms_path, &facts.wasm_path);
     }
     facts.permissions_kdl = zellij_permissions_text();
     let plan = plan_run(&facts);
@@ -970,8 +996,9 @@ mod tests {
     fn preseed_grant_writes_a_full_grant_when_the_file_is_missing() {
         let d = tempdir().unwrap();
         let perms = d.path().join("zellij/permissions.kdl");
-        preseed_grant(&perms, Path::new(WASM));
+        assert!(preseed_grant(&perms, Path::new(WASM)), "a fresh write reports true");
         assert!(wasm_is_granted(&std::fs::read_to_string(&perms).unwrap(), WASM));
+        assert!(!preseed_grant(&perms, Path::new(WASM)), "an existing grant is no new write");
     }
 
     #[test]
@@ -995,7 +1022,7 @@ mod tests {
         let d = tempdir().unwrap();
         let perms = d.path().join("permissions.kdl");
         std::fs::create_dir(&perms).unwrap();
-        preseed_grant(&perms, Path::new(WASM));
+        assert!(!preseed_grant(&perms, Path::new(WASM)), "a refusal is no write");
         assert!(perms.is_dir(), "the unreadable path must be untouched");
     }
 
@@ -1014,6 +1041,7 @@ mod tests {
             inside_zellij: false,
             permissions_kdl: granted
                 .then(|| format!("\"{WASM}\" {{\n    {}\n}}\n", REQUIRED_PLUGIN_PERMISSIONS.join("\n    "))),
+            grant_just_written: false,
         }
     }
 
@@ -1067,5 +1095,19 @@ mod tests {
         assert_eq!(p.advisories, vec![GRANT_HINT.to_string()]);
         assert!(p.advisories[0].contains("press y"), "names the grant key");
         assert!(!p.advisories[0].contains("Ctrl-y"), "no keybind fallback left");
+    }
+
+    #[test]
+    fn plan_run_advises_the_prompt_when_the_grant_just_landed_under_a_live_session() {
+        // ICH-437: the file now reads granted, but an existing session's rails
+        // may already sit at Zellij's prompt, which the file can't resolve.
+        let mut f = facts(true);
+        f.grant_just_written = true;
+        assert!(plan_run(&f).advisories.is_empty(), "a fresh create loads the grant, no prompt");
+        f.session_exists = true;
+        assert_eq!(plan_run(&f).advisories, vec![ATTACH_GRANT_HINT.to_string()]);
+        assert!(ATTACH_GRANT_HINT.starts_with("If "), "the session may show no prompt: conditional");
+        f.grant_just_written = false;
+        assert!(plan_run(&f).advisories.is_empty(), "a grant older than this run means no pending prompt");
     }
 }
