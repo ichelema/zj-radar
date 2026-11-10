@@ -97,6 +97,25 @@ pub(crate) fn kind_for_app(app: &str) -> Kind {
     }
 }
 
+/// Whole words that mark a shell command as a service (`npm run dev`,
+/// `cargo watch`, `python -m http.server`): unending by design, so its row
+/// holds the steady mark instead of spinning (`docs/activity-model.md` §4).
+const SERVICE_WORDS: &[&str] = &["dev", "serve", "server", "start", "watch"];
+
+/// The kind for a shell-command row, from Zellij's text (`running: npm run
+/// dev`). Words split on anything but alphanumerics and `_`, so `start:dev`
+/// and `http.server` match while `restart` and `watch_mode` do not.
+pub(crate) fn command_kind(text: &str) -> Kind {
+    let service = text
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|w| SERVICE_WORDS.iter().any(|s| w.eq_ignore_ascii_case(s)));
+    if service {
+        Kind::Server
+    } else {
+        Kind::Command
+    }
+}
+
 impl NativePane {
     /// The rail observation for this pane, or `None` when there is nothing to
     /// show (an idle pane no program reports on). `prev` is the pane's
@@ -117,7 +136,9 @@ impl NativePane {
         let (status, origin, kind, msg, since_ms) = match deciding {
             Some((_, r)) => (r.status, ObservationOrigin::Program, program_kind, r.label(), r.updated_ms),
             None => match a.source {
-                Source::Command => (a.status, ObservationOrigin::Command, Kind::Command, a.text.clone(), a.since_ms),
+                Source::Command => {
+                    (a.status, ObservationOrigin::Command, command_kind(&a.text), a.text.clone(), a.since_ms)
+                }
                 Source::Program | Source::Other => {
                     let msg = if a.text.is_empty() {
                         self.records.iter().find(|r| r.id.is_none()).map(Record::label).unwrap_or_default()
@@ -425,5 +446,38 @@ mod tests {
         assert_eq!(kind_for_app("zellij"), Kind::Remote);
         assert_eq!(kind_for_app("omp"), Kind::Omp);
         assert_eq!(kind_for_app("vim"), Kind::Other);
+    }
+
+    #[test]
+    fn service_commands_are_steady_servers() {
+        for text in [
+            "running: npm run dev", "running: npm start", "running: pnpm run start:dev",
+            "running: python -m http.server 8000", "running: cargo watch -x test", "running: hugo server",
+            "running: mkdocs serve", "running: just DEV",
+        ] {
+            assert_eq!(command_kind(text), Kind::Server, "{text}");
+        }
+        for text in [
+            "running: cargo build --release", "running: cargo test watch_mode", "running: ./restart.sh",
+            "running: npm run devtools", "running", "done · 3s: cargo test", "",
+        ] {
+            assert_eq!(command_kind(text), Kind::Command, "{text}");
+        }
+    }
+
+    #[test]
+    fn running_service_command_does_not_animate() {
+        let pane = NativePane {
+            attention: PaneAttention {
+                status: Status::Running,
+                source: Source::Command,
+                text: "running: npm run dev".into(),
+                ..PaneAttention::default()
+            },
+            records: Vec::new(),
+        };
+        let o = pane.observation(None, 1).unwrap();
+        assert_eq!((o.origin, o.kind), (ObservationOrigin::Command, Kind::Server));
+        assert!(!o.animating());
     }
 }

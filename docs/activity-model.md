@@ -32,7 +32,7 @@ Every tracked pane's presentation is a function of three independent facts:
 | Axis | Type | Values | Who owns it |
 |---|---|---|---|
 | **Origin** | `ObservationOrigin` | `Program` \| `Command` | Zellij's attention source: an OSC 7501 record or any other non-command signal (`Program`), or a shell command, command pane, or foreground process (`Command`) |
-| **Kind** | `Kind` | Claude, Codex, Opencode, Pi, Omp, Gemini, Test, Build, Deploy, Server, Remote, Command, Other | `attention::kind_for_app` on the OSC 7501 `app`; every command-origin row is `Command` |
+| **Kind** | `Kind` | Claude, Codex, Opencode, Pi, Omp, Gemini, Test, Build, Deploy, Server, Remote, Command, Other | `attention::kind_for_app` on the OSC 7501 `app`; a command-origin row is `Server` when its text has a service word, else `Command` (`attention::command_kind`) |
 | **Class** | semantic vocabulary, **not** a stored Rust type | `Job` \| `Service` \| `Remote` | this document |
 
 The kind table (`kinds!` in `kind.rs`) maps each `app` token to a kind and its
@@ -47,7 +47,7 @@ The classes are predicates on `Kind`, not an enum:
 - **`Job`**: bounded work with an end. Every kind that is not steady: the
   agent kinds, `Test`, `Build`, `Deploy`, `Command`, `Other`.
 - **`Service`**: unending by design. Kind `Server` (`Kind::is_service`), from
-  `app=server`.
+  `app=server` or a shell command with a service word (§4).
 - **`Remote`**: a live connection to another machine. Kind `Remote`
   (`Kind::is_remote`), from `app=remote` or `app=zellij`. Steady like
   `Service`, and it also marks the tab line while connected.
@@ -144,7 +144,8 @@ the plugin sends none.
 The plugin reads one source, Zellij's native per-pane attention, from the pane
 manifest (`PaneInfo::attention` and `program_status`) and from
 `PaneAttentionChanged`. `attention::NativePane::observation` turns it into the
-row. The plugin never classifies a command and never polls.
+row. The plugin classifies a command only by the words of its text (below)
+and never polls.
 
 **Programs (OSC 7501).** A program reports records; Zellij picks the deciding
 one (the root record, raised by a `blocked` or `error` child). Zellij's text
@@ -166,8 +167,14 @@ command panes, and the foreground process. Its rules, all on the Zellij side:
 - Without the `ReadPaneContents` permission Zellij strips the command text;
   the plugin requests it.
 
-Every command row is `Kind::Command` (`$`) and a `Job`. There is no job,
-service, or editor classification of commands.
+A command row is `Kind::Server` (`❯`), a `Service`, when Zellij's text has
+one of the whole words `dev`, `serve`, `server`, `start`, or `watch`
+(`attention::command_kind`): `npm run dev`, `cargo watch`, `python -m
+http.server`. Words split on anything but letters, digits, and `_`, so
+`start:dev` matches and `restart` or `watch_mode` do not. Every other command
+row is `Kind::Command` (`$`) and a `Job`. A command with one of these words
+that does end (`./start.sh` of a batch) holds the steady mark too. Without
+the command text (`running`) the row is `Command`.
 
 **Other attention.** Zellij's other signals (a bell, a terminal notification,
 a watch) arrive as program-origin rows with no `app`: kind Other (`⦿`),
@@ -187,8 +194,9 @@ badge with the same status vocabulary (`attention::PeerSession`).
   worked example) → a row in the §3 matrix first, then a `Kind` predicate added
   *with its first consumer*, never a speculative enum ahead of a call site
   that matches it.
-- **A command shows wrong** → Zellij's `attention` settings decide it; the
-  plugin keeps no command name lists.
+- **A command shows wrong** → Zellij's `attention` settings decide whether
+  it shows; the plugin's only command list is `SERVICE_WORDS` in
+  `attention.rs`, which picks steady over spinning.
 - **A new agent** → nothing in zj-radar if it emits OSC 7501; add a `kinds!`
   row only for a dedicated mark.
 

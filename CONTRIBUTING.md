@@ -161,7 +161,8 @@ agent needs no code. The one optional entry is its `app` token: map it to a
 `Kind` in the `kinds!` table in `crates/plugin/src/kind.rs`
 (`attention::kind_for_app` routes the token); an unknown `app` renders as
 `Kind::Other`. Shell commands like `cargo test` come from Zellij's OSC 133
-tracking and show as `Kind::Command`; the plugin does not classify them.
+tracking and show as `Kind::Command`, or `Kind::Server` when the text has a
+service word (`attention::command_kind`).
 
 ## License
 
