@@ -104,14 +104,17 @@ const SERVICE_WORDS: &[&str] = &["dev", "serve", "server", "start", "watch"];
 
 /// The kind for a shell-command row, from Zellij's text (`running: npm run
 /// dev`). A token with `/` or `=` is a path, URL, redirect, or assignment
-/// (`2>/dev/null`, `tests/server/`, `env=dev`) and never counts; the rest
-/// lose leading dashes and split on `:` and `.`, so `start:dev`,
-/// `http.server`, and `--watch` match while `api-server` and `restart` do not.
+/// (`2>/dev/null`, `tests/server/`, `env=dev`) and never counts. The rest
+/// lose shell quoting and grouping (`'npm run dev'`, `(… dev)`) and leading
+/// dashes, then split on `:`; a dotted part counts by its last segment only
+/// (`http.server` matches, `webpack.dev.js` and `start.sh` do not). So
+/// `start:dev` and `--watch` match while `api-server` and `restart` do not.
 pub(crate) fn command_kind(text: &str) -> Kind {
     let service = text
         .split_whitespace()
         .filter(|t| !t.contains(['/', '=']))
-        .flat_map(|t| t.trim_start_matches('-').split([':', '.']))
+        .flat_map(|t| t.trim_matches(['\'', '"', '(', ')', ';', '&', '|']).trim_start_matches('-').split(':'))
+        .filter_map(|part| part.rsplit('.').next())
         .any(|w| SERVICE_WORDS.iter().any(|s| w.eq_ignore_ascii_case(s)));
     if service {
         Kind::Server
@@ -458,6 +461,9 @@ mod tests {
             "running: npm run dev", "running: npm start", "running: pnpm run start:dev",
             "running: python -m http.server 8000", "running: cargo watch -x test", "running: hugo server",
             "running: mkdocs serve", "running: just DEV", "running: webpack --watch", "exited 130 · 2m: npm run dev",
+            // Shell quoting and grouping around the words.
+            "running: sh -c 'npm run dev'", "running: bash -c \"npm start\"", "running: (cd web && npm run dev)",
+            "running: npm run dev;",
         ] {
             assert_eq!(command_kind(text), Kind::Server, "{text}");
         }
@@ -479,6 +485,14 @@ mod tests {
             "running: terraform apply -var env=dev",
             "running: git clone https://github.com/x/dev-tools",
             "running: ./start.sh",
+            // A dotted file name counts by its extension only.
+            "running: tsc -p tsconfig.dev.json",
+            "running: webpack --config webpack.dev.js",
+            "running: docker compose -f docker-compose.dev.yml build",
+            "running: terraform apply -var-file dev.tfvars",
+            "running: openssl req -new -key server.key -out server.csr",
+            "running: gzip -9 server.log",
+            "running: start.sh",
         ] {
             assert_eq!(command_kind(text), Kind::Command, "{text}");
         }

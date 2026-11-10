@@ -171,13 +171,19 @@ A command row is `Kind::Server` (`❯`), a `Service`, when Zellij's text has
 one of the whole words `dev`, `serve`, `server`, `start`, or `watch`
 (`attention::command_kind`): `npm run dev`, `cargo watch`, `python -m
 http.server`. The text splits on spaces; a token with `/` or `=` (a path,
-URL, redirect, or `KEY=VAL`: `2>/dev/null`, `tests/server/`) never counts,
-and the rest lose leading dashes and split on `:` and `.`. So `start:dev`,
-`http.server`, and `--watch` match, while `api-server`, `restart`, and
-`watch_mode` do not. Every other command row is `Kind::Command` (`$`) and a
-`Job`. A bounded command with one of these words (`start.sh`, `npm run
-build:dev`, `cargo test -- start`) holds the steady mark too. Without the
-command text (`running`) the row is `Command`.
+URL, redirect, or `KEY=VAL`: `2>/dev/null`, `tests/server/`) never counts.
+The rest lose shell quotes, parentheses, `;`, `&`, `|`, and leading dashes,
+then split on `:`, and a dotted part counts by its last segment only. So
+`start:dev`, `http.server`, `--watch`, and `sh -c 'npm run dev'` match,
+while `api-server`, `restart`, `watch_mode`, `webpack.dev.js`, and
+`server.key` do not. Every other command row is `Kind::Command` (`$`) and a
+`Job`.
+
+The list is a heuristic. A bounded command with one of these words as an
+argument (`npm run build:dev`, `cdk deploy --profile dev`, `cargo test -p
+server`) holds the steady mark too. A server with none of them (`vite`,
+`uvicorn`, `node server.js`, `./dev.sh`) spins. Without the command text
+(`running`) the row is `Command`.
 
 **Other attention.** Zellij's other signals (a bell, a terminal notification,
 a watch) arrive as program-origin rows with no `app`: kind Other (`⦿`),
