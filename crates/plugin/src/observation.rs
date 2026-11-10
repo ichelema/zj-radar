@@ -25,7 +25,8 @@ pub struct TrackedObservation {
     /// Always empty for command-origin panes.
     pub task: String,
     /// The source kind that produced this observation. Classified once at intake
-    /// (`attention::kind_for_app`); the renderer reads it directly rather than
+    /// (`attention::kind_for_app`, or `attention::command_kind` for a shell
+    /// command); the renderer reads it directly rather than
     /// re-parsing a string.
     pub kind: Kind,
     pub last_change_tick: u64,

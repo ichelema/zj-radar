@@ -103,11 +103,15 @@ pub(crate) fn kind_for_app(app: &str) -> Kind {
 const SERVICE_WORDS: &[&str] = &["dev", "serve", "server", "start", "watch"];
 
 /// The kind for a shell-command row, from Zellij's text (`running: npm run
-/// dev`). Words split on anything but alphanumerics and `_`, so `start:dev`
-/// and `http.server` match while `restart` and `watch_mode` do not.
+/// dev`). A token with `/` or `=` is a path, URL, redirect, or assignment
+/// (`2>/dev/null`, `tests/server/`, `env=dev`) and never counts; the rest
+/// lose leading dashes and split on `:` and `.`, so `start:dev`,
+/// `http.server`, and `--watch` match while `api-server` and `restart` do not.
 pub(crate) fn command_kind(text: &str) -> Kind {
     let service = text
-        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .split_whitespace()
+        .filter(|t| !t.contains(['/', '=']))
+        .flat_map(|t| t.trim_start_matches('-').split([':', '.']))
         .any(|w| SERVICE_WORDS.iter().any(|s| w.eq_ignore_ascii_case(s)));
     if service {
         Kind::Server
@@ -453,13 +457,28 @@ mod tests {
         for text in [
             "running: npm run dev", "running: npm start", "running: pnpm run start:dev",
             "running: python -m http.server 8000", "running: cargo watch -x test", "running: hugo server",
-            "running: mkdocs serve", "running: just DEV",
+            "running: mkdocs serve", "running: just DEV", "running: webpack --watch", "exited 130 · 2m: npm run dev",
         ] {
             assert_eq!(command_kind(text), Kind::Server, "{text}");
         }
         for text in [
-            "running: cargo build --release", "running: cargo test watch_mode", "running: ./restart.sh",
-            "running: npm run devtools", "running", "done · 3s: cargo test", "",
+            "running: cargo build --release",
+            "running: cargo test watch_mode",
+            "running: ./restart.sh",
+            "running: npm run devtools",
+            "running",
+            "done · 3s: cargo test",
+            "",
+            // Paths, redirects, URLs, assignments, and dashed names are not service words.
+            "running: cargo build --release 2>/dev/null",
+            "running: make build > /dev/null 2>&1",
+            "running: dd if=/dev/zero of=disk.img bs=1M",
+            "running: ~/dev/proj/scripts/migrate.sh",
+            "running: cargo build -p api-server --release",
+            "running: pytest tests/server/",
+            "running: terraform apply -var env=dev",
+            "running: git clone https://github.com/x/dev-tools",
+            "running: ./start.sh",
         ] {
             assert_eq!(command_kind(text), Kind::Command, "{text}");
         }
