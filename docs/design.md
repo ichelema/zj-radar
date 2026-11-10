@@ -150,9 +150,10 @@ pane reads idle) into the rail's `Status`:
 `TrackedObservation`:
 
 - **Origin and kind.** A shell command, command pane, or foreground process
-  is `ObservationOrigin::Command` with `Kind::Command`; every observed command
-  gets that kind. Anything else is `ObservationOrigin::Program`, with the kind
-  from the OSC 7501 `app` (`attention::kind_for_app`): `claude-code` is
+  is `ObservationOrigin::Command` with `Kind::Command`, or `Kind::Server` when
+  its text has a service word (`attention::command_kind`). Anything else is
+  `ObservationOrigin::Program`, with the kind from the OSC 7501 `app`
+  (`attention::kind_for_app`): `claude-code` is
   Claude, `zellij` is Remote, and any other token goes through
   `Kind::from_source` (`codex`, `pi`, `server`, `build`, …; unknown is
   `Other`).
@@ -369,9 +370,10 @@ speeds or not at all (`PluginRuntime::desired_cadence`):
   ever arrive).
 
 Steady rows never pin Fast: a `server` row or a remote session costs zero
-ticks. A long-running shell command is `Kind::Command`, not steady, so it
-spins and keeps Fast armed while it runs. A `done`, `error`, or `pending` row
-is terminal and does not keep Fast alive.
+ticks. A shell command with a service word (`npm run dev`) is `Kind::Server`
+and steady too; any other long-running shell command is `Kind::Command`, so
+it spins and keeps Fast armed while it runs. A `done`, `error`, or
+`pending` row is terminal and does not keep Fast alive.
 
 ## 7. Render gate
 

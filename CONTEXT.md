@@ -79,7 +79,8 @@ Anything that produces a per-pane observation. Today there is one: Zellij's
 native attention, read from the pane manifest. An agent that emits OSC 7501
 (`app`, `state`, `kind`, `progress`, `title`, `msg`) needs no adapter; a shell
 command shows as an attention row with the command source (`Kind::Command`,
-exit code from the attention).
+or `Kind::Server` for a service word like `dev`; exit code from the
+attention).
 
 ## Tab roll-up
 
