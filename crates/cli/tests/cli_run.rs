@@ -79,6 +79,7 @@ fn run_that_launches_pre_seeds_the_grant() {
     let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("pre-authorized"), "stderr:\n{stderr}");
     assert!(!stderr.contains("First run"), "hint ignores the fresh grant; stderr:\n{stderr}");
+    assert!(!stderr.contains("permission prompt"), "a fresh create has no pending prompt; stderr:\n{stderr}");
     assert!(PERMISSIONS_KDL.iter().any(|p| home.path().join(p).exists()), "no permissions.kdl written");
 }
 
