@@ -9,12 +9,18 @@ use std::path::{Path, PathBuf};
 
 /// Shown when the wasm is still ungranted at launch: `--print-cmd` (which
 /// writes nothing) or a pre-seed that didn't land (see `preseed_grant`).
-/// Zellij then shows its own prompt in place of the rail. Also shown when the
-/// pre-seed just wrote the grant for an existing session: its rails may be
-/// parked at a prompt the running server already shows, which the file can't
-/// resolve.
+/// Zellij then shows its own prompt in place of the rail.
 const GRANT_HINT: &str = "First run: Zellij asks for the sidebar's permissions inside the rail — \
     focus the rail and press y.";
+
+/// Shown when the pre-seed just wrote the grant for an existing session: its
+/// rails may sit at a prompt the running server already shows, which the file
+/// can't resolve. Conditional, because the session may show none (resurrected,
+/// or already granted in memory). Only the run that writes the grant can tell:
+/// a later attach finds it already granted and stays silent, leaving the
+/// rail's own "press y" face as the only cue.
+const ATTACH_GRANT_HINT: &str = "If the rail still shows Zellij's permission prompt (a session \
+    started before its grant), focus the rail and press y.";
 
 // ── Pure helpers ─────────────────────────────────────────────────────────────
 
@@ -338,7 +344,7 @@ struct RunPlan {
 
 /// Pure decision: attach if the session exists, otherwise create with the rail
 /// layout; advise the grant prompt when the wasm is still ungranted, or when
-/// the grant just landed under an existing session (see `GRANT_HINT`); surface
+/// the grant just landed under an existing session (`ATTACH_GRANT_HINT`); surface
 /// whether we're nested.
 fn plan_run(facts: &RunFacts) -> RunPlan {
     let granted =
@@ -348,8 +354,13 @@ fn plan_run(facts: &RunFacts) -> RunPlan {
     } else {
         create_session_args(&facts.config_dir, &facts.session, "radar")
     };
-    let prompt_may_be_pending = !granted || (facts.session_exists && facts.grant_just_written);
-    let advisories = if prompt_may_be_pending { vec![GRANT_HINT.to_string()] } else { Vec::new() };
+    let advisories = if !granted {
+        vec![GRANT_HINT.to_string()]
+    } else if facts.session_exists && facts.grant_just_written {
+        vec![ATTACH_GRANT_HINT.to_string()]
+    } else {
+        Vec::new()
+    };
     RunPlan {
         args,
         advisories,
@@ -1094,7 +1105,8 @@ mod tests {
         f.grant_just_written = true;
         assert!(plan_run(&f).advisories.is_empty(), "a fresh create loads the grant, no prompt");
         f.session_exists = true;
-        assert_eq!(plan_run(&f).advisories, vec![GRANT_HINT.to_string()]);
+        assert_eq!(plan_run(&f).advisories, vec![ATTACH_GRANT_HINT.to_string()]);
+        assert!(ATTACH_GRANT_HINT.starts_with("If "), "the session may show no prompt: conditional");
         f.grant_just_written = false;
         assert!(plan_run(&f).advisories.is_empty(), "a grant older than this run means no pending prompt");
     }

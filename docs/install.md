@@ -63,8 +63,9 @@ edited. Consequences:
 - Before launching, it pre-authorizes its own wasm in Zellij's
   `permissions.kdl` (backup at `permissions.kdl.zj-radar.bak`), so Zellij
   never prompts. If that write is refused, Zellij asks inside the rail: focus
-  it and press `y`. A session already waiting at that prompt keeps it; `run`
-  says so when it attaches.
+  it and press `y`. A session already waiting at that prompt keeps it: the
+  `run` that writes the grant while attaching warns about it, later runs do
+  not.
 - On top of Zellij's defaults it binds `Alt 1`–`Alt 9` (tab jumps), so those
   chords do not reach programs in the panes.
 - It uses the wasm bundled into the binary. A `cargo install` build has no

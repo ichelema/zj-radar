@@ -84,7 +84,8 @@ fn run_that_launches_pre_seeds_the_grant() {
 
 /// ICH-437: attaching to a session `run` created but never granted (e.g. by a
 /// pre-preseed CLI) pre-seeds the file, yet that session's rails may already
-/// sit at Zellij's prompt, which the file can't resolve: the hint still shows.
+/// sit at Zellij's prompt, which the file can't resolve: the attach hint shows.
+/// Only that run can tell: the next one finds the grant already there.
 #[cfg(unix)]
 #[test]
 fn run_attaching_to_an_ungranted_session_still_prints_the_hint() {
@@ -95,5 +96,10 @@ fn run_attaching_to_an_ungranted_session_still_prints_the_hint() {
     let out = sandboxed(home.path(), "proj").args(["run", "proj"]).assert().success();
     let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("pre-authorized"), "stderr:\n{stderr}");
-    assert!(stderr.contains("First run"), "no hint for a prompt already pending; stderr:\n{stderr}");
+    assert!(stderr.contains("still shows Zellij's permission prompt"), "no attach hint; stderr:\n{stderr}");
+    assert!(!stderr.contains("First run"), "the grant is in the file now; stderr:\n{stderr}");
+
+    let out = sandboxed(home.path(), "proj").args(["run", "proj"]).assert().success();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(stderr.is_empty(), "an earlier run's grant leaves this attach silent; stderr:\n{stderr}");
 }
