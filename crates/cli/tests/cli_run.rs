@@ -81,3 +81,19 @@ fn run_that_launches_pre_seeds_the_grant() {
     assert!(!stderr.contains("First run"), "hint ignores the fresh grant; stderr:\n{stderr}");
     assert!(PERMISSIONS_KDL.iter().any(|p| home.path().join(p).exists()), "no permissions.kdl written");
 }
+
+/// ICH-437: attaching to a session `run` created but never granted (e.g. by a
+/// pre-preseed CLI) pre-seeds the file, yet that session's rails may already
+/// sit at Zellij's prompt, which the file can't resolve: the hint still shows.
+#[cfg(unix)]
+#[test]
+fn run_attaching_to_an_ungranted_session_still_prints_the_hint() {
+    let home = tempdir().unwrap();
+    let marker = home.path().join("data/zj-radar/zellij/sessions/proj");
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, "").unwrap();
+    let out = sandboxed(home.path(), "proj").args(["run", "proj"]).assert().success();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("pre-authorized"), "stderr:\n{stderr}");
+    assert!(stderr.contains("First run"), "no hint for a prompt already pending; stderr:\n{stderr}");
+}
