@@ -413,10 +413,7 @@ impl ZellijPlugin for State {
                     .into_iter()
                     .filter(|s| !s.is_current)
                     .map(|s| {
-                        let counts = s.attention.counts;
                         attention::PeerSession {
-                            working: counts.working,
-                            needs_you: counts.needs_you + counts.failed,
                             items: s
                                 .attention
                                 .items

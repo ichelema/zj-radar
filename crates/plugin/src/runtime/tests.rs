@@ -518,29 +518,31 @@ fn own_counts_live_status_panes_not_tab_rollups_or_unseated_payloads() {
 }
 
 #[test]
-fn own_counts_exclude_command_attention_and_use_the_first_status_tab() {
+fn own_counts_follow_the_peer_rule_for_commands() {
     let mut rt = runtime_with_granted_permission();
-    rt.tabs_changed(vec![tab(0, "command", false), tab(3, "agent", true)]);
+    rt.tabs_changed(vec![tab(0, "editor", false), tab(1, "test", false), tab(3, "agent", true)]);
     rt.radar.set_tab_panes_for_position(0, vec![pane(10)]);
     rt.radar.set_tab_panes_for_position(3, vec![pane(20)]);
+    rt.radar.set_tab_panes_for_position(1, vec![pane(30)]);
 
-    // A command-origin Error is urgent in the rail but intentionally absent
-    // from the cross-session agent tally.
-    let failed = PaneAttention {
-        status: Status::Error,
+    // `sessions::reported`, as for peers: a running command (a build) is left out,
+    // a failed one waits on the user like a blocked agent.
+    let command = |status, text: &str| PaneAttention {
+        status,
         source: Source::Command,
-        text: "cargo test".into(),
-        exit_code: Some(1),
+        text: text.into(),
+        exit_code: (status == Status::Error).then_some(1),
         since_ms: 100_000,
         ..PaneAttention::default()
     };
-    rt.attention_changed(10, failed);
+    rt.attention_changed(10, command(Status::Running, "running: cargo build"));
     rt.push(20, Status::from_wire("pending"));
+    rt.attention_changed(30, command(Status::Error, "failed: cargo test"));
 
     let own = rt.own_counts();
-    assert_eq!(own.running, 0);
-    assert_eq!(own.attention, 1, "only the status-origin Pending counts");
-    assert_eq!(own.attention_tab_position, Some(3));
+    assert_eq!(own.running, 0, "a running command never counts");
+    assert_eq!(own.attention, 2, "the blocked agent and the failed command");
+    assert_eq!(own.attention_tab_position, Some(1), "the failed command's tab comes first");
 }
 
 #[test]
@@ -621,7 +623,6 @@ fn a_global_attention_peer_click_focuses_its_waiting_pane() {
     rt.tabs_changed(vec![tab(0, "team", false)]);
     let peer = crate::attention::PeerSession {
         name: "alpha".into(),
-        needs_you: 1,
         items: vec![crate::attention::PeerItem {
             pane_id: 7,
             tab_id: 3,
@@ -633,7 +634,6 @@ fn a_global_attention_peer_click_focuses_its_waiting_pane() {
                 ..Default::default()
             },
         }],
-        ..Default::default()
     };
     assert!(rt.global_attention_changed(vec![peer.summary()]).render);
     rt.render(100, 80);

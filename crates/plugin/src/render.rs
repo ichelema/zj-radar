@@ -1698,7 +1698,7 @@ fn render_session_badge(entries: &[BadgeEntry], opts: &RenderOpts) -> Vec<Line> 
 }
 
 /// A peer session's read-only tab tree (from `GlobalAttentionUpdate`):
-/// one line per tab, then one per agent pane under it, at most `budget`
+/// one line per tab, then one per reported pane under it, at most `budget`
 /// lines in tree order. Every line targets the peer session at that tab.
 /// Local tabs never come through here — they render as full cards.
 ///
@@ -1709,7 +1709,7 @@ fn render_peer_children(entry: &BadgeEntry, budget: usize, opts: &RenderOpts) ->
     let width = opts.width;
     let idle = tc_fg(opts.theme.idle_text);
     // Tree order, clipped: `(tab, None)` is a tab line, `(tab, Some(pane))`
-    // one of its agent lines.
+    // one of its pane lines.
     let shown: Vec<(usize, Option<usize>)> = entry
         .tabs
         .iter()

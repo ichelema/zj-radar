@@ -413,22 +413,24 @@ type RenderKey = (
 /// The ONE derivation of the own badge row's counts. They are deliberately pane-level
 /// while the rail itself remains tab-rolled-up. `rows()` is already
 /// constrained by the current pane topology, so a stale pane id cannot
-/// inflate cross-session counts; command observations
-/// are excluded at this seam (`is_status_origin`), not inferred later from a
-/// tab's dominant status. `attention_tab_position` is the first
-/// (lowest-position) row that `needs_you()`.
+/// inflate cross-session counts. Panes count by the rule peers count by
+/// (`sessions::reported`): a running command is left out, a failed one waits.
+/// `attention_tab_position` is the first (lowest-position) row that
+/// `needs_you()`.
 fn summary_counts(rows: &[TabRow]) -> (usize, usize, Option<usize>) {
     let mut running = 0usize;
     let mut attention = 0usize;
     let mut attention_tab_position = None;
     for r in rows {
         let mut tab_attention = 0usize;
-        for p in r.display.panes.iter().filter(|p| p.is_status_origin()) {
-            match p.status() {
-                Some(Status::Running) => running += 1,
-                Some(st) if st.needs_you() => tab_attention += 1,
-                _ => {}
+        for p in &r.display.panes {
+            let Some(st) = p.status() else { continue };
+            let command = !p.is_status_origin();
+            if !crate::sessions::reported(st, command) {
+                continue;
             }
+            let (r, w) = crate::sessions::counts(st, command);
+            (running, tab_attention) = (running + r, tab_attention + w);
         }
         if tab_attention > 0 {
             attention += tab_attention;
