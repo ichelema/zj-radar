@@ -48,9 +48,10 @@ Show
 #
 # Beat 2 — the flip: `api` goes pending off-screen and the RAIL carries it —
 # bell glyph, header `1!`, footer `3 working · 1 need you`, and the question
-# itself on the agent's line. Anchoring on the question text (it appears nowhere
-# else on screen) syncs the tape to the arc regardless of startup lag.
-Wait+Screen@20s /migration/
+# itself on the agent's line. Anchoring on Zellij's `needs approval` prefix (the
+# rail truncates the question, and the prefix appears nowhere else on screen)
+# syncs the tape to the arc regardless of startup lag.
+Wait+Screen@20s /needs approval/
 Sleep 2s
 Screenshot "__ROOT__/docs/media/needs-you.png"
 Sleep 1s

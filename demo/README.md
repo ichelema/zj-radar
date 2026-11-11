@@ -61,7 +61,7 @@ zellij --config target/demo/config.kdl --layout target/demo/layout.kdl
 
 ## How it stays reproducible
 
-`record.sh` handles the four things that otherwise make a Zellij-in-vhs
+`record.sh` handles the five things that otherwise make a Zellij-in-vhs
 recording flaky:
 
 - **Permissions** — rewrites this wasm's grant block in Zellij's
@@ -74,6 +74,10 @@ recording flaky:
   child rather than `exec`ing it.
 - **Nested Zellij** — unsets `ZELLIJ*` before launching vhs, so the inner
   session starts fresh even when you run `record.sh` from inside Zellij.
+- **Other sessions** — runs vhs with a fresh `ZELLIJ_SOCKET_DIR`, so the
+  machine's other Zellij sessions don't show up in the rail as peer rows.
+  (`config.kdl` also turns off Zellij's release notes and startup tips, which
+  cover the panes on a fresh cache.)
 - **Theme/glyphs** — Tokyo Night + `JetBrainsMono Nerd Font`, pinned in the
   config and tape, so the look doesn't depend on your personal setup.
 

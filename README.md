@@ -31,7 +31,7 @@ jump to that tab.
   <a href="#documentation">Docs</a>
 </p>
 
-![zj-radar — live per-tab agent and command status in a Zellij sidebar](https://raw.githubusercontent.com/marktoda/zj-radar/main/docs/media/hero.gif)
+![zj-radar — live per-tab agent and command status in a Zellij sidebar](https://raw.githubusercontent.com/ichelema/zj-radar/main/docs/media/hero.gif)
 
 `◆ needs you` · `⠋ working` · `● done` · `✗ error` · `○ idle`
 
