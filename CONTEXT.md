@@ -28,7 +28,7 @@ the user sees is the rail clicks resolve on.
 
 What a clickable line resolves to: a tab (`tab_position`), a pane (`pane_id`),
 or a peer session (`session`, carrying its attention tab). Pane targets cover a
-multi-pane tab's tree lines and a single-pane tab's pane and detail lines.
+multi-pane tab's tree lines and a single-pane tab's pane line.
 Header, gap, and idle-strip lines have none. The runtime turns a `RailTarget`
 into a `SwitchTab` / `ShowPane` / `SwitchSession` effect.
 

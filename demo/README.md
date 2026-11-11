@@ -13,7 +13,7 @@ The loop ("the needs-you moment"): a title card → you open focused on a tab
 running **two** Claude agents (rolled up in the rail as a `├`/`└` tree) while
 `api`/`tests`/`infra` work in the rail → the off-screen `api` agent blocks on
 approval and the **rail** carries it: bell, header `1!` badge, footer
-`3 working · 1 need you`, and the actual question on a `↳` line → the demo
+`3 working · 1 need you`, and the actual question on the agent's line → the demo
 jumps to `api` and answers `y` (the arc `read`s the keystroke, so the resume
 is input-driven, not timed) → everything settles into the `●`/`✓`/`✗` spread.
 
@@ -33,7 +33,7 @@ Outputs:
 | File | Beat |
 |------|------|
 | `docs/media/hero.gif` | The full loop |
-| `docs/media/needs-you.png` | The flip, seen from the `web` tab: bell + `1!` badge + footer tally + the `↳` question in the rail |
+| `docs/media/needs-you.png` | The flip, seen from the `web` tab: bell + `1!` badge + footer tally + the question on the agent's line in the rail |
 | `docs/media/states.png` | The settled spread — answered `api`, `✓` web tree and tests, `✗` infra |
 
 ## Try it live (no recording)

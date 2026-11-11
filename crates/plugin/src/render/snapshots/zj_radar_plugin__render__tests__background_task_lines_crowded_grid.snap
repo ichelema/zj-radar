@@ -6,7 +6,7 @@ expression: "grid(&raw, 32)"
  RADAR                        ·1
 ◆═══════════════════════════════
 ▌⠋ 1 zj-radar
-▌└ ⋯ ✳ fix the flaky e2e retries
+▌└ ⠋ ✳ fix the flaky e2e retries
 ▌  ┊ ⠋ unit · 4m
 ▌  ┊ ✗ lint · 2m
 ▌  ┊ +2 more

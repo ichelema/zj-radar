@@ -145,10 +145,10 @@ tab 1 "pinky"
 > mark, activity. One layout to learn — a tab with one pane and a tab with
 > three scan identically.
 
-> **Action glyphs.** An unacknowledged status-origin pending tab header and
+> **Action glyphs.** A status-origin pending tab header and
 > its pane identity line end in `✓`. The glyph is the final visible cell and the only left-click
-> action area; ordinary row cells navigate. Question continuations, `+N more`,
-> card padding, ledger, and headers never carry a hotspot.
+> action area; ordinary row cells navigate. `+N more`, card padding, ledger, and
+> headers never carry a hotspot.
 
 ## D. Single agent — needs you
 

@@ -37,8 +37,8 @@ if [[ "$app" == claude ]]; then app=claude-code; fi
 # emit <status> <msg> — one OSC 7501 record for this pane, status in the rail's
 # vocabulary (running|pending|done|error|idle), msg base64-encoded as the
 # protocol requires. Zellij keeps the latest record, so each emit simply
-# overwrites the pane's previous state. While pending, the rail spends an extra
-# `↳` line on <msg> (the actionable question).
+# overwrites the pane's previous state. While pending, the rail shows <msg>
+# (the actionable question) on the pane's line.
 emit() {
     local status="$1" msg="$2" state kind=""
     case "$status" in
@@ -56,7 +56,7 @@ printf '\033[2m%s · %s\033[0m\n\n' "$repo" "$branch"
 
 case "$scenario" in
 needs-you) # the star of the show: works, blocks on approval
-           # while the viewer is on another tab (the rail carries the ↳
+           # while the viewer is on another tab (the rail carries the
            # question there), and resumes when the recorded `y` lands — the
            # keystroke actually answers the read, so the beat can't misfire.
            # Its stdout reads like a Claude session for the beat-3 jump.

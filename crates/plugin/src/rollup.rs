@@ -61,10 +61,7 @@ pub(crate) enum ExitOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PrimaryDetail {
-    pub repo: String,
-    pub branch: String,
     pub msg: String,
-    pub task: String,
     pub since_tick: u64,
     pub status: Status,
     pub kind: Kind,
@@ -84,13 +81,10 @@ pub(crate) enum PaneDisplay {
         origin: ObservationOrigin,
         status: Status,
         msg: String,
-        task: String,
         since_tick: u64,
         outcome: Option<ExitOutcome>,
         /// Waiting-on-you stamp (Pending only) — see `PrimaryDetail`.
         pending_epoch_s: Option<u64>,
-        /// The user has already seen this status (hides the `✓` hotspot).
-        acknowledged: bool,
         /// Background tasks the agent started (`task.rs`, from OSC 7501 child records), rendered as
         /// `┊` sub-lines under the pane line.
         tasks: BgTasks,
@@ -151,13 +145,6 @@ impl PaneDisplay {
         }
     }
 
-    pub(crate) fn task(&self) -> &str {
-        match self {
-            Self::Tracked { task, .. } => task,
-            Self::Untracked { .. } => "",
-        }
-    }
-
     /// The tick this pane's status last changed (`None` for an untracked
     /// pane, which has no observation to date it from). Feeds `spin_glyph`'s
     /// long-runner easing in `render.rs`.
@@ -184,7 +171,7 @@ impl PaneDisplay {
     }
 
     /// Background tasks (empty for untracked panes) — feeds
-    /// `render`'s task sub-lines and the agent line's waiting glyph.
+    /// `render`'s task sub-lines.
     pub(crate) fn tasks(&self) -> Option<&BgTasks> {
         match self {
             Self::Tracked { tasks, .. } if !tasks.is_empty() => Some(tasks),
@@ -192,16 +179,10 @@ impl PaneDisplay {
         }
     }
 
-    /// The agent's turn is over and it waits on its background work.
-    pub(crate) fn is_waiting(&self) -> bool {
-        matches!(self, Self::Tracked { status: Status::Running, tasks, .. } if tasks.waiting)
-    }
-
-    pub(crate) fn has_unacknowledged_status_pending(&self) -> bool {
-        matches!(
-            self,
-            Self::Tracked { status: Status::Pending, acknowledged: false, origin: ObservationOrigin::Program, .. }
-        )
+    /// A Program-origin pane waiting on the user: it earns the `✓` hotspot
+    /// (the gesture marks it seen in Zellij, which then stops reporting it Pending).
+    pub(crate) fn is_program_pending(&self) -> bool {
+        matches!(self, Self::Tracked { status: Status::Pending, origin: ObservationOrigin::Program, .. })
     }
 
     pub(crate) fn is_status_origin(&self) -> bool {
@@ -288,11 +269,9 @@ pub(crate) fn roll_up<'a>(
                 origin: s.origin,
                 status: s.status,
                 msg: s.msg.clone(),
-                task: s.task.clone(),
                 since_tick: s.last_change_tick,
                 outcome: pane_outcome(s),
                 pending_epoch_s: s.pending_epoch_s,
-                acknowledged: s.acknowledged,
                 tasks: s.tasks.clone(),
             });
         } else {
@@ -312,10 +291,7 @@ pub(crate) fn roll_up<'a>(
             let wins = best.as_ref().is_none_or(|d| key >= (d.status, !d.kind.is_steady(), d.since_tick));
             if wins {
                 best = Some(PrimaryDetail {
-                    repo: s.repo.clone(),
-                    branch: s.branch.clone(),
                     msg: s.msg.clone(),
-                    task: s.task.clone(),
                     since_tick: s.last_change_tick,
                     status: s.status,
                     kind: s.kind,
