@@ -1073,7 +1073,7 @@ struct CompactTasksTag {
 /// and failures — because the finished-fine ones (`●` / `·`) are the
 /// detail the full form has room for and the compact form exists to drop.
 /// A failure turns the tag red: the full form deliberately ranks failures
-/// above services so they never hide behind `+N more`, and the compact form
+/// right after running work so they never hide behind `+N more`, and the compact form
 /// must not hide them behind a neutral count either.
 fn compact_tasks_tag(tasks: &BgTasks) -> Option<CompactTasksTag> {
     let failed = tasks.items.iter().filter(|t| t.state == TaskState::Failed).count();

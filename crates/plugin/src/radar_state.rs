@@ -199,8 +199,8 @@ pub(crate) struct RadarState {
     unfiled: Vec<(u32, Status, String, u64)>,
     /// The last `remembered` completion filed per pane: Zellij re-sends it on
     /// every event until the pane is seen, and the ledger ring alone forgets
-    /// it once 32 newer entries push it out.
-    remembered_filed: HashMap<u32, (Status, u64)>,
+    /// it once 32 newer entries push it out. Keyed by status, stamp and text.
+    remembered_filed: HashMap<u32, (Status, u64, String)>,
     tabs: Vec<RadarTab>,
     tab_panes: HashMap<usize, Vec<TerminalPane>>,
     pane_cwd: HashMap<u32, String>,
@@ -499,8 +499,10 @@ impl RadarState {
         }
         let remembered = self.native_raw.get(&pane_id).and_then(|p| p.attention.remembered.clone());
         if let Some(r) = remembered.filter(|r| r.status.is_completion() && Some(r.status) != status) {
-            if self.remembered_filed.insert(pane_id, (r.status, r.since_ms)) != Some((r.status, r.since_ms)) {
-                self.ledger_native(pane_id, r.status, &r.text, Some(r.since_ms / 1000), index);
+            let key = (r.status, r.since_ms, r.text);
+            if self.remembered_filed.get(&pane_id) != Some(&key) {
+                self.ledger_native(pane_id, key.0, &key.2, Some(key.1 / 1000), index);
+                self.remembered_filed.insert(pane_id, key);
             }
         }
         changed

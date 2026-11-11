@@ -971,3 +971,22 @@ fn an_unfiled_completion_of_a_pane_the_manifest_lacks_is_dropped() {
     radar.panes_changed(native_update(vec![(8, native_working("pi", "Thinking"))]), 2, config::NamingMode::Off);
     assert!(radar.unfiled.is_empty(), "pane 7 is gone: {:?}", radar.unfiled);
 }
+
+#[test]
+fn a_pane_files_each_new_remembered_completion() {
+    // Seen Done, a new turn, a second seen Done: two completions, two rows.
+    let mut radar = RadarState::default();
+    radar.tabs_changed(vec![tab(10, 0, "api", true)]);
+    let mut seen = native_done("claude-code", "");
+    seen.attention.status = Status::Idle;
+    seen.attention.source = crate::attention::Source::Other;
+    let done =
+        |text: &str, since_ms| Some(crate::attention::Remembered { status: Status::Done, text: text.into(), since_ms });
+    seen.attention.remembered = done("done: First", 50_000);
+    radar.panes_changed(native_update(vec![(7, seen.clone())]), 1, config::NamingMode::Off);
+    radar.panes_changed(native_update(vec![(7, native_working("claude-code", "Again"))]), 2, config::NamingMode::Off);
+    seen.attention.remembered = done("done: Second", 90_000);
+    radar.panes_changed(native_update(vec![(7, seen)]), 3, config::NamingMode::Off);
+    let labels: Vec<_> = radar.ledger_lines().iter().map(|l| l.label.clone()).collect();
+    assert_eq!(labels, ["Second", "First"]);
+}

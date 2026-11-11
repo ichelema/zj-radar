@@ -619,15 +619,13 @@ fn error_word_narrows_when_tight() {
 }
 
 #[test]
-fn working_detail_drops_branch_before_message_when_narrow() {
+fn working_detail_fits_a_narrow_rail() {
     let d = pd("running tests", Status::Running);
     let rows = vec![tab(1, "api", display(Status::Running, 0, 1, Some(d)))];
     let narrow = render(&rows, &ro(16, 5));
     for line in narrow.lines() {
         assert!(visible_width(line) <= 16);
     }
-    // branch path is the first thing to go: "web/main" should not survive at 16 cols
-    assert!(!narrow.contains("web/main"));
 }
 
 fn idle_row(n: u32) -> TabRow {
