@@ -525,7 +525,7 @@ fn own_counts_follow_the_peer_rule_for_commands() {
     rt.radar.set_tab_panes_for_position(3, vec![pane(20)]);
     rt.radar.set_tab_panes_for_position(1, vec![pane(30)]);
 
-    // `sessions::reported`, as for peers: a running command (vim) is left out,
+    // `sessions::reported`, as for peers: a running command (a build) is left out,
     // a failed one waits on the user like a blocked agent.
     let command = |status, text: &str| PaneAttention {
         status,
@@ -535,7 +535,7 @@ fn own_counts_follow_the_peer_rule_for_commands() {
         since_ms: 100_000,
         ..PaneAttention::default()
     };
-    rt.attention_changed(10, command(Status::Running, "running: vim"));
+    rt.attention_changed(10, command(Status::Running, "running: cargo build"));
     rt.push(20, Status::from_wire("pending"));
     rt.attention_changed(30, command(Status::Error, "failed: cargo test"));
 

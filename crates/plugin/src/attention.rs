@@ -339,23 +339,31 @@ mod tests {
                 peer_item(2, 2, Source::Program, Some("mybot"), Status::Running, "working: thinking"),
                 peer_item(3, 3, Source::Program, Some("zellij"), Status::Pending, "needs approval: x"),
                 peer_item(4, 4, Source::Command, None, Status::Error, "failed: cargo test"),
-                peer_item(5, 5, Source::Command, None, Status::Running, "running: vim"),
+                peer_item(5, 5, Source::Command, None, Status::Running, "running: cargo build"),
                 // Zellij also lists idle panes (remembered, watched; muted and
                 // new-output ones arrive Idle): no row, no count.
                 peer_item(6, 6, Source::Program, Some("claude-code"), Status::Idle, ""),
                 peer_item(7, 7, Source::Other, None, Status::Idle, "new output"),
                 peer_item(8, 8, Source::Program, Some("pi"), Status::Done, "done: fixed"),
+                peer_item(9, 9, Source::Command, None, Status::Error, "exited 1 · 2m: npm run dev"),
             ],
         }
         .summary();
-        assert_eq!((p.running, p.attention), (2, 2), "vim neither runs nor waits; the failed test waits");
+        assert_eq!((p.running, p.attention), (2, 3), "the build neither runs nor waits; failed commands wait");
         let tree: Vec<(&str, &str)> =
             p.tabs.iter().flat_map(|t| &t.panes).map(|p| (p.kind.as_str(), p.status.as_str())).collect();
         assert_eq!(
             tree,
-            [("claude", "running"), ("other", "running"), ("remote", "pending"), ("command", "error"), ("pi", "done")]
+            [
+                ("claude", "running"),
+                ("other", "running"),
+                ("remote", "pending"),
+                ("command", "error"),
+                ("pi", "done"),
+                ("server", "error")
+            ]
         );
-        assert_eq!(p.tabs.len(), 5, "a tab holding only a running command or idle panes gets no line");
+        assert_eq!(p.tabs.len(), 6, "a tab holding only a running command or idle panes gets no line");
     }
 
     #[test]
@@ -363,6 +371,10 @@ mod tests {
         let items = (0..20).map(|id| peer_item(id, 1, Source::Program, Some("pi"), Status::Pending, "")).collect();
         let p = PeerSession { name: "lab".into(), items }.summary();
         assert_eq!((p.attention, p.tabs[0].panes.len()), (20, MAX_PANES_PER_TAB));
+        let items =
+            (0..70).map(|id| peer_item(id, id as usize, Source::Program, Some("pi"), Status::Pending, "")).collect();
+        let p = PeerSession { name: "lab".into(), items }.summary();
+        assert_eq!((p.attention, p.tabs.len()), (70, MAX_TABS));
     }
 
     fn program(status: Status, app: &str, text: &str) -> NativePane {

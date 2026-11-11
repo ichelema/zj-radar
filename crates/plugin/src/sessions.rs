@@ -21,7 +21,7 @@ pub(crate) const MAX_LABEL_CHARS: usize = 96;
 
 /// The badge's one rule, for this session's row and every peer: a pane counts,
 /// and has a peer-tree row, unless it is Idle (a muted pane arrives Idle) or a
-/// running shell command, which may run for hours (`vim`, a dev server).
+/// running shell command, which may run for hours (a dev server, a long build).
 /// Zellij reports outward by nearly the same rule (`host_program_status`);
 /// there a running `zellij run` pane still counts, here it is a command.
 pub(crate) fn reported(status: Status, command: bool) -> bool {

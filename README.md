@@ -86,7 +86,7 @@ manual setup, and the full removal list are in
 - Desktop notifications when an agent finishes or needs you come from Zellij
   itself (its `attention` settings), not from the rail.
 - Running several Zellij sessions? Each rail lists the others with live counts
-  and click-to-switch (`session_tree true` expands each into its tabs and agents).
+  and click-to-switch (`session_tree true` expands each into its tabs and active panes).
 
 What every glyph and line means:
 [`docs/using.md`](https://github.com/marktoda/zj-radar/blob/main/docs/using.md).
@@ -119,7 +119,7 @@ plugins {
         spinner_fps 4              // working-spinner frames/s (1 = once a second)
         task_lines "lines"         // background tasks: lines · count · off
         ledger true                // recent completions under ─ earlier ─
-        session_tree false         // expand other sessions into tabs + agents
+        session_tree false         // expand other sessions into tabs + panes
         show_mode false            // Zellij mode on the footer (status bar optional)
     }
 }

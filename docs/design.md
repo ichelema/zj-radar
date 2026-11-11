@@ -514,7 +514,7 @@ subscribes. `lib.rs` drops the current session and copies each peer into an
 **One counting rule.** `sessions::reported` decides for this session's row and
 for every peer: a pane counts, and has a peer-tree row, unless it is Idle
 (muted, quiet, and new-output panes arrive Idle) or a running shell command
-(`vim`, a dev server can run for hours). `sessions::counts` turns a counted
+(a dev server or a long build can run for hours). `sessions::counts` turns a counted
 pane into `running` while Running from a program, and into `attention` while
 it needs you, a failed command included. Done panes keep their peer-tree row
 and count in neither. Zellij reports outward by nearly the same rule
@@ -524,8 +524,10 @@ The rule reads the pane's status, and the two sides read it from different
 places. Peers carry Zellij's status only: `GlobalAttentionUpdate` has no OSC
 7501 child records. This session's row reads its rail rows, where a pane with
 child records and no root takes its most severe child (Opencode,
-`NativePane::observation`). So a working Opencode pane counts as running in
-its own session and not in the others, where Zellij reports it Idle.
+`NativePane::observation`). Such a pane can count in its own session and not
+in the others, where Zellij reports it Idle: a working child counts as
+running, and a child error already seen or a child blocked dismissed with `✓`
+still counts as attention.
 
 `PeerSession::summary` folds the items into the badge's `SessionSummary`:
 counts over every reported item, tabs in first-seen item order, the tree

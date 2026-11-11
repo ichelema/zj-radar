@@ -146,16 +146,17 @@ line per session: your session first, then sessions that need attention, then
 the rest. Each line shows the session name with its working and needs-you
 pane counts. Every session counts the same way: an agent that works or waits,
 and a shell command that failed, count; a shell command that is still running
-(`vim`, `cargo test`, a dev server) does not. One exception: a working Opencode
-pane counts only in its own session, because Zellij does not report it as
-working to the others. With a single session the badge is invisible.
+(`cargo test`, a dev server) does not, and neither does a muted pane. One
+exception: a working Opencode pane counts only in its own session, because
+Zellij does not report it as working to the others. With a single session the badge is invisible.
 
 - **Click a line** to switch to that session, landing on a pane that needs
   you if it has one.
 - **`session_tree true`** ([configuration](configuration.md#options)) expands
   the badge into a tree. Your session's line heads your own tabs; each other
-  session follows with the tabs and panes Zellij reports activity for, except
-  running shell commands, so every count has its row. Click
+  session follows with the tabs and panes it counts, plus its finished ones;
+  idle, muted, and running shell-command panes have no row. A tree lists at
+  most 16 panes per tab and 64 tabs. Click
   a peer pane row to switch there and focus that pane; a peer tab row focuses
   its first listed pane. Peer rows only use the height left after your local
   tabs, the ledger, and the footer, so a short rail shows fewer of them (or
