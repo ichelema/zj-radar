@@ -8,7 +8,7 @@
 use crate::kind::Kind;
 use crate::observation::{ObservationOrigin, TrackedObservation};
 use crate::sessions::{
-    reported, SessionSummary, SummaryPane, SummaryTab, MAX_LABEL_CHARS, MAX_PANES_PER_TAB, MAX_TABS,
+    counts, reported, SessionSummary, SummaryPane, SummaryTab, MAX_LABEL_CHARS, MAX_PANES_PER_TAB, MAX_TABS,
 };
 use crate::status::Status;
 use crate::task::{BgTask, BgTasks, TaskState};
@@ -234,8 +234,8 @@ impl PeerSession {
             if !reported(a.status, command) {
                 continue;
             }
-            running += usize::from(a.status == Status::Running && !command);
-            attention += usize::from(a.status.needs_you());
+            let (r, w) = counts(a.status, command);
+            (running, attention) = (running + r, attention + w);
             let i = match tabs.iter().position(|(id, _)| *id == item.tab_id) {
                 Some(i) => i,
                 None if tabs.len() < MAX_TABS => {
@@ -340,14 +340,22 @@ mod tests {
                 peer_item(3, 3, Source::Program, Some("zellij"), Status::Pending, "needs approval: x"),
                 peer_item(4, 4, Source::Command, None, Status::Error, "failed: cargo test"),
                 peer_item(5, 5, Source::Command, None, Status::Running, "running: vim"),
+                // Zellij also lists idle panes (remembered, watched; muted and
+                // new-output ones arrive Idle): no row, no count.
+                peer_item(6, 6, Source::Program, Some("claude-code"), Status::Idle, ""),
+                peer_item(7, 7, Source::Other, None, Status::Idle, "new output"),
+                peer_item(8, 8, Source::Program, Some("pi"), Status::Done, "done: fixed"),
             ],
         }
         .summary();
         assert_eq!((p.running, p.attention), (2, 2), "vim neither runs nor waits; the failed test waits");
         let tree: Vec<(&str, &str)> =
             p.tabs.iter().flat_map(|t| &t.panes).map(|p| (p.kind.as_str(), p.status.as_str())).collect();
-        assert_eq!(tree, [("claude", "running"), ("other", "running"), ("remote", "pending"), ("command", "error")]);
-        assert_eq!(p.tabs.len(), 4, "a tab holding only a running command gets no line");
+        assert_eq!(
+            tree,
+            [("claude", "running"), ("other", "running"), ("remote", "pending"), ("command", "error"), ("pi", "done")]
+        );
+        assert_eq!(p.tabs.len(), 5, "a tab holding only a running command or idle panes gets no line");
     }
 
     #[test]

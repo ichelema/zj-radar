@@ -146,8 +146,9 @@ line per session: your session first, then sessions that need attention, then
 the rest. Each line shows the session name with its working and needs-you
 pane counts. Every session counts the same way: an agent that works or waits,
 and a shell command that failed, count; a shell command that is still running
-(`vim`, `cargo test`, a dev server) does not. With a single session the badge
-is invisible.
+(`vim`, `cargo test`, a dev server) does not. One exception: a working Opencode
+pane counts only in its own session, because Zellij does not report it as
+working to the others. With a single session the badge is invisible.
 
 - **Click a line** to switch to that session, landing on a pane that needs
   you if it has one.

@@ -429,8 +429,8 @@ fn summary_counts(rows: &[TabRow]) -> (usize, usize, Option<usize>) {
             if !crate::sessions::reported(st, command) {
                 continue;
             }
-            running += usize::from(st == Status::Running && !command);
-            tab_attention += usize::from(st.needs_you());
+            let (r, w) = crate::sessions::counts(st, command);
+            (running, tab_attention) = (running + r, tab_attention + w);
         }
         if tab_attention > 0 {
             attention += tab_attention;

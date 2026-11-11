@@ -507,16 +507,25 @@ subscribes. `lib.rs` drops the current session and copies each peer into an
 `attention::PeerSession`:
 
 - Items are the terminal panes with attention, with their tab id, tab name,
-  and attention. Zellij lists every pane that is not idle, without a cap.
+  and attention. Zellij lists every pane that is not idle, plus watched or
+  remembered idle ones, without a cap.
 - Zellij's own counts are dropped: they include running shell commands.
 
 **One counting rule.** `sessions::reported` decides for this session's row and
-for every peer: a pane counts, and has a peer-tree row, unless it is a running
-shell command (`vim`, a dev server can run for hours). It is the rule Zellij
-applies to what a session reports outward (`host_program_status`). A counted
-pane adds to `running` while Running from a program, and to `attention` while
-it needs you, a failed command included. Done panes stay in peer trees and
-count in neither.
+for every peer: a pane counts, and has a peer-tree row, unless it is Idle
+(muted, quiet, and new-output panes arrive Idle) or a running shell command
+(`vim`, a dev server can run for hours). `sessions::counts` turns a counted
+pane into `running` while Running from a program, and into `attention` while
+it needs you, a failed command included. Done panes keep their peer-tree row
+and count in neither. Zellij reports outward by nearly the same rule
+(`host_program_status`); there a running `zellij run` pane still counts.
+
+The rule reads the pane's status, and the two sides read it from different
+places. Peers carry Zellij's status only: `GlobalAttentionUpdate` has no OSC
+7501 child records. This session's row reads its rail rows, where a pane with
+child records and no root takes its most severe child (Opencode,
+`NativePane::observation`). So a working Opencode pane counts as running in
+its own session and not in the others, where Zellij reports it Idle.
 
 `PeerSession::summary` folds the items into the badge's `SessionSummary`:
 counts over every reported item, tabs in first-seen item order, the tree

@@ -20,13 +20,21 @@ pub(crate) const MAX_PANES_PER_TAB: usize = 16;
 pub(crate) const MAX_LABEL_CHARS: usize = 96;
 
 /// The badge's one rule, for this session's row and every peer: a pane counts,
-/// and has a peer-tree row, unless it is a running shell command, which may run
-/// for hours (`vim`, a dev server). It is Zellij's rule for what a session
-/// reports outward (`host_program_status`). A counted pane adds to `running`
-/// while Running from a program, and to `attention` while it `needs_you()`, a
-/// failed command included.
+/// and has a peer-tree row, unless it is Idle (a muted pane arrives Idle) or a
+/// running shell command, which may run for hours (`vim`, a dev server).
+/// Zellij reports outward by nearly the same rule (`host_program_status`);
+/// there a running `zellij run` pane still counts, here it is a command.
 pub(crate) fn reported(status: Status, command: bool) -> bool {
-    !(command && status == Status::Running)
+    status != Status::Idle && !(command && status == Status::Running)
+}
+
+/// One pane's `(running, attention)` in the badge: Running from a program, or
+/// waiting on the user (`needs_you()`, a failed command included).
+pub(crate) fn counts(status: Status, command: bool) -> (usize, usize) {
+    if !reported(status, command) {
+        return (0, 0);
+    }
+    (usize::from(status == Status::Running), usize::from(status.needs_you()))
 }
 
 /// A bounded, display-only view of another session's tab tree.
@@ -334,11 +342,15 @@ mod tests {
     }
 
     #[test]
-    fn reported_drops_only_a_running_command() {
+    fn reported_drops_idle_panes_and_running_commands() {
         for &st in Status::ALL {
-            assert!(reported(st, false), "a program pane always counts: {st:?}");
-            assert_eq!(reported(st, true), st != Status::Running, "command {st:?}");
+            assert_eq!(reported(st, false), st != Status::Idle, "program {st:?}");
+            assert_eq!(reported(st, true), !matches!(st, Status::Idle | Status::Running), "command {st:?}");
         }
+        assert_eq!(counts(Status::Running, false), (1, 0));
+        assert_eq!(counts(Status::Running, true), (0, 0), "a running command never counts");
+        assert_eq!(counts(Status::Error, true), (0, 1), "a failed command waits on the user");
+        assert_eq!(counts(Status::Done, false), (0, 0));
     }
 
     #[test]

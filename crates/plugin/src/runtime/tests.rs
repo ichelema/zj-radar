@@ -520,10 +520,10 @@ fn own_counts_live_status_panes_not_tab_rollups_or_unseated_payloads() {
 #[test]
 fn own_counts_follow_the_peer_rule_for_commands() {
     let mut rt = runtime_with_granted_permission();
-    rt.tabs_changed(vec![tab(0, "editor", false), tab(3, "agent", true), tab(5, "test", false)]);
+    rt.tabs_changed(vec![tab(0, "editor", false), tab(1, "test", false), tab(3, "agent", true)]);
     rt.radar.set_tab_panes_for_position(0, vec![pane(10)]);
     rt.radar.set_tab_panes_for_position(3, vec![pane(20)]);
-    rt.radar.set_tab_panes_for_position(5, vec![pane(30)]);
+    rt.radar.set_tab_panes_for_position(1, vec![pane(30)]);
 
     // `sessions::reported`, as for peers: a running command (vim) is left out,
     // a failed one waits on the user like a blocked agent.
@@ -542,7 +542,7 @@ fn own_counts_follow_the_peer_rule_for_commands() {
     let own = rt.own_counts();
     assert_eq!(own.running, 0, "a running command never counts");
     assert_eq!(own.attention, 2, "the blocked agent and the failed command");
-    assert_eq!(own.attention_tab_position, Some(3));
+    assert_eq!(own.attention_tab_position, Some(1), "the failed command's tab comes first");
 }
 
 #[test]
