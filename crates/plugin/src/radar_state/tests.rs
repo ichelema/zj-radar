@@ -919,3 +919,74 @@ fn a_hidden_rail_ledgers_on_the_manifest_its_reveal_brings() {
     assert_eq!(lines.len(), 1);
     assert_eq!((lines[0].tab_name.as_str(), lines[0].label.as_str()), ("api", "Ship it"));
 }
+
+#[test]
+fn a_remembered_done_is_filed_once_even_after_it_leaves_the_ring() {
+    // Zellij keeps `remembered` until the pane is seen and re-sends it on
+    // every event: once 32 newer completions push its entry out of the ring,
+    // it must not come back at the front with its old stamp.
+    let mut radar = RadarState::default();
+    radar.tabs_changed(vec![tab(10, 0, "api", true)]);
+    radar.panes_changed(
+        native_update(vec![(7, native_done("claude-code", "Turn finished"))]),
+        1,
+        config::NamingMode::Off,
+    );
+    let mut seen = native_done("claude-code", "");
+    seen.attention.status = Status::Idle;
+    seen.attention.source = crate::attention::Source::Other;
+    seen.attention.remembered = Some(crate::attention::Remembered {
+        status: Status::Done,
+        text: "done: Turn finished".into(),
+        since_ms: 50_000,
+    });
+    radar.attention_changed(7, seen.attention.clone(), 2);
+    assert_eq!(radar.ledger_lines().len(), 1);
+    for i in 0..crate::ledger::LEDGER_CAP as u32 {
+        radar.ledger.push(LedgerEntry {
+            at_epoch_s: 100 + u64::from(i),
+            outcome: LedgerOutcome::Done,
+            tab_id: TabId(10),
+            tab_name: "api".into(),
+            label: format!("job {i}"),
+            pane_id: 100 + i,
+        });
+    }
+    assert!(radar.ledger().entries().all(|e| e.pane_id != 7), "pushed out of the ring");
+    radar.attention_changed(7, seen.attention, 3);
+    assert!(radar.ledger().entries().all(|e| e.pane_id != 7), "an old remembered Done is not re-filed");
+}
+
+#[test]
+fn an_unfiled_completion_of_a_pane_the_manifest_lacks_is_dropped() {
+    // Hidden rail: the completion waits for a manifest and tabs to seat its
+    // pane. A manifest without the pane means no tab ever will.
+    let mut radar = RadarState::default();
+    let mut seen = native_done("claude-code", "");
+    seen.attention.status = Status::Idle;
+    seen.attention.remembered =
+        Some(crate::attention::Remembered { status: Status::Done, text: "done: Ship it".into(), since_ms: 70_000 });
+    radar.attention_changed(7, seen.attention, 1);
+    assert_eq!(radar.unfiled.len(), 1);
+    radar.panes_changed(native_update(vec![(8, native_working("pi", "Thinking"))]), 2, config::NamingMode::Off);
+    assert!(radar.unfiled.is_empty(), "pane 7 is gone: {:?}", radar.unfiled);
+}
+
+#[test]
+fn a_pane_files_each_new_remembered_completion() {
+    // Seen Done, a new turn, a second seen Done: two completions, two rows.
+    let mut radar = RadarState::default();
+    radar.tabs_changed(vec![tab(10, 0, "api", true)]);
+    let mut seen = native_done("claude-code", "");
+    seen.attention.status = Status::Idle;
+    seen.attention.source = crate::attention::Source::Other;
+    let done =
+        |text: &str, since_ms| Some(crate::attention::Remembered { status: Status::Done, text: text.into(), since_ms });
+    seen.attention.remembered = done("done: First", 50_000);
+    radar.panes_changed(native_update(vec![(7, seen.clone())]), 1, config::NamingMode::Off);
+    radar.panes_changed(native_update(vec![(7, native_working("claude-code", "Again"))]), 2, config::NamingMode::Off);
+    seen.attention.remembered = done("done: Second", 90_000);
+    radar.panes_changed(native_update(vec![(7, seen)]), 3, config::NamingMode::Off);
+    let labels: Vec<_> = radar.ledger_lines().iter().map(|l| l.label.clone()).collect();
+    assert_eq!(labels, ["Second", "First"]);
+}

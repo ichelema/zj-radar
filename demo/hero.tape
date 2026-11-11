@@ -5,7 +5,7 @@
 #
 # The story ("the needs-you moment"): you're working on `web` while other
 # agents run; `api` blocks on approval and the RAIL tells you — bell, `1!`
-# badge, footer tally, and the actual question on a `↳` line — without you
+# badge, footer tally, and the actual question on the agent's line — without you
 # leaving your tab. You jump over, answer, everything settles.
 
 Require zellij
@@ -48,9 +48,10 @@ Show
 #
 # Beat 2 — the flip: `api` goes pending off-screen and the RAIL carries it —
 # bell glyph, header `1!`, footer `3 working · 1 need you`, and the question
-# itself on the `↳` line. Anchoring on the question text (it appears nowhere
-# else on screen) syncs the tape to the arc regardless of startup lag.
-Wait+Screen@20s /migration/
+# itself on the agent's line. Anchoring on Zellij's `needs approval` prefix (the
+# rail truncates the question, and the prefix appears nowhere else on screen)
+# syncs the tape to the arc regardless of startup lag.
+Wait+Screen@20s /needs approval/
 Sleep 2s
 Screenshot "__ROOT__/docs/media/needs-you.png"
 Sleep 1s
@@ -59,7 +60,7 @@ Sleep 1s
 # the tab number; the digit returns to normal mode, no Escape). The pane shows
 # the Claude session blocked at `Run migration? (y/n)`; the typed `y` is read
 # by the arc itself, so the resume is keystroke-driven, not timed. The rail's
-# question line vanishes and the badge/tally clear.
+# question vanishes and the badge/tally clear.
 Ctrl+t
 Sleep 600ms
 Type "1"

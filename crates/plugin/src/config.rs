@@ -89,8 +89,7 @@ pub enum TaskLines {
     Lines,
     /// Always the compact `+N` count on the pane row, never task lines.
     Count,
-    /// No task lines or count. The agent's `⋯` waiting glyph stays: it is the
-    /// pane's own status, not a task line.
+    /// No task lines or count.
     Off,
 }
 

@@ -62,9 +62,8 @@ fn is_calm(status: Status) -> bool {
 ///      at a time until it fits.
 ///   3. Compress calm non-idle rows (Done, Running) to 1 line each —
 ///      lowest-position first, one at a time until it fits.
-///   4. Compress urgent rows (Pending, Error) toward 1 line — drop msg line
-///      first, then drop the branch/needs-you detail line — lowest-position
-///      first, one step at a time.
+///   4. Compress urgent rows (Pending, Error) toward 1 line, one line at a
+///      time — lowest-position first.
 ///   5. If still over: include rows from the top as long as they fit; drop the
 ///      rest (never panics, never exceeds budget).
 ///
@@ -134,7 +133,6 @@ pub(crate) fn plan_overflow(rows: &[RowMeta], body_budget: usize) -> (Vec<(usize
     }
 
     // Step 4: compress urgent rows (Pending/Error) toward 1 line.
-    // Each urgent row: full -> drop msg -> drop branch/needs-you -> 1 line.
     // We decrement one line at a time per row (lowest-idx first), repeating
     // until the row reaches 1 or the budget is satisfied.
     let mut changed = true;

@@ -9,17 +9,13 @@ fn obs(origin: ObservationOrigin, status: Status, tick: u64) -> TrackedObservati
     TrackedObservation {
         origin,
         status,
-        repo: "repo".into(),
-        branch: "main".into(),
         msg: "msg".into(),
-        task: String::new(),
-        kind: Kind::Build,
+        kind: if origin == ObservationOrigin::Command { Kind::Command } else { Kind::Build },
         last_change_tick: tick,
         ever_active: true,
         exit_code: None,
         completed_epoch_s: None,
         pending_epoch_s: None,
-        acknowledged: false,
         tasks: Default::default(),
     }
 }
@@ -178,23 +174,6 @@ fn tracked_pane_display_carries_last_change_tick_as_since_tick() {
     }
 }
 
-#[test]
-fn task_threads_through_to_pane_display_and_primary_detail() {
-    let panes = [pane(1, "shell")];
-    let mut obs = TrackedObservation::command(Status::Pending, "r".into(), "approve?".into(), Kind::Claude, 3);
-    obs.origin = ObservationOrigin::Program;
-    obs.task = "fix flaky e2e".into();
-    let display = roll_up(&panes, |id| (id == 1).then_some(&obs));
-    match &display.panes[0] {
-        PaneDisplay::Tracked { task, msg, .. } => {
-            assert_eq!(task, "fix flaky e2e");
-            assert_eq!(msg, "approve?");
-        }
-        other => panic!("expected tracked pane, got {other:?}"),
-    }
-    assert_eq!(display.detail.as_ref().unwrap().task, "fix flaky e2e");
-}
-
 // ── Property tests ────────────────────────────────────────────────────────
 //
 // `roll_up` is a pure fold over a tab's panes. These properties pin the
@@ -241,17 +220,13 @@ fn build(specs: &[Spec]) -> (Vec<TerminalPane>, HashMap<u32, TrackedObservation>
                 TrackedObservation {
                     origin,
                     status,
-                    repo: "r".into(),
-                    branch: String::new(),
                     msg: "m".into(),
-                    task: String::new(),
-                    kind: Kind::Build,
+                    kind: if origin == ObservationOrigin::Command { Kind::Command } else { Kind::Build },
                     last_change_tick: tick,
                     ever_active,
                     exit_code,
                     completed_epoch_s: None,
                     pending_epoch_s: None,
-                    acknowledged: false,
                     tasks: Default::default(),
                 },
             );
@@ -347,7 +322,7 @@ fn animating_tracks_running_jobs_not_services_and_sits_outside_the_ever_active_g
     // (docs/activity-model.md §3, TrackedObservation::animating).
     let panes = [pane(1, "p")];
     let mut map = HashMap::new();
-    map.insert(1, obs(ObservationOrigin::Command, Status::Running, 1)); // Kind::Build — a job
+    map.insert(1, obs(ObservationOrigin::Command, Status::Running, 1)); // Kind::Command — a job
     assert!(roll_up(&panes, resolver(&map)).animating, "a running job animates");
     map.insert(1, TrackedObservation { kind: Kind::Server, ..obs(ObservationOrigin::Command, Status::Running, 1) });
     assert!(!roll_up(&panes, resolver(&map)).animating, "a running service holds the steady mark — no sweep");
@@ -376,13 +351,13 @@ fn primary_detail_tie_break_prefers_a_job_over_a_service() {
     // pins the middle key of (status, job, tick): drop it and the recency
     // tie-break hands the header to the server's steady mark.
     let mut map = HashMap::new();
-    let build = TrackedObservation { kind: Kind::Build, ..obs(ObservationOrigin::Command, Status::Running, 1) };
+    let build = obs(ObservationOrigin::Command, Status::Running, 1);
     let server = TrackedObservation { kind: Kind::Server, ..obs(ObservationOrigin::Command, Status::Running, 9) };
     map.insert(1, build);
     map.insert(2, server);
     let panes = [pane(1, "build"), pane(2, "dev")];
     let display = roll_up(&panes, resolver(&map));
-    assert_eq!(display.detail.unwrap().kind, Kind::Build);
+    assert_eq!(display.detail.unwrap().kind, Kind::Command);
     // Severity still wins over the job preference: a Pending service beats a
     // Running job outright.
     map.get_mut(&2).unwrap().status = Status::Pending;
@@ -395,13 +370,13 @@ fn primary_detail_tie_break_prefers_a_job_over_a_remote_session() {
     // Same tie-break, remote flavor: a spinning build outranks a connected
     // ssh session for the tab's primary detail (docs/activity-model.md §3).
     let mut map = HashMap::new();
-    let build = TrackedObservation { kind: Kind::Build, ..obs(ObservationOrigin::Command, Status::Running, 1) };
+    let build = obs(ObservationOrigin::Command, Status::Running, 1);
     let remote = TrackedObservation { kind: Kind::Remote, ..obs(ObservationOrigin::Command, Status::Running, 9) };
     map.insert(1, build);
     map.insert(2, remote);
     let panes = [pane(1, "build"), pane(2, "ssh")];
     let display = roll_up(&panes, resolver(&map));
-    assert_eq!(display.detail.unwrap().kind, Kind::Build);
+    assert_eq!(display.detail.unwrap().kind, Kind::Command);
 }
 
 #[test]
@@ -417,7 +392,7 @@ fn remote_field_set_only_while_a_remote_pane_is_running() {
     let panes = [pane(1, "build"), pane(2, "ssh")];
     let display = roll_up(&panes, resolver(&map));
     assert!(display.remote, "a connected remote pane sets the tab-level fact");
-    assert_eq!(display.detail.unwrap().kind, Kind::Build, "severity winner is unaffected");
+    assert_eq!(display.detail.unwrap().kind, Kind::Command, "severity winner is unaffected");
 
     // Not merely "was remote": a Done remote session clears it.
     map.get_mut(&2).unwrap().status = Status::Done;

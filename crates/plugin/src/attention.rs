@@ -169,7 +169,6 @@ impl NativePane {
             .map(|(_, r)| BgTask {
                 id: r.id.clone().unwrap_or_default(),
                 label: r.label(),
-                holds: true,
                 state: match r.status {
                     Status::Done => TaskState::Completed,
                     Status::Error => TaskState::Failed,
@@ -185,20 +184,14 @@ impl NativePane {
             TrackedObservation {
                 origin,
                 status,
-                repo: String::new(),
-                branch: String::new(),
                 msg,
-                task: String::new(),
                 kind,
                 last_change_tick: prev.filter(|p| p.status == status).map_or(tick, |p| p.last_change_tick),
                 ever_active: true,
                 exit_code: if origin == ObservationOrigin::Command { a.exit_code } else { None },
                 completed_epoch_s: status.is_completion().then_some(since_s),
                 pending_epoch_s: (status == Status::Pending).then_some(since_s),
-                // The `✓` gesture marks the pane seen in Zellij (`Effect::MarkSeen`),
-                // which then stops reporting it Pending: the hotspot shows while it does.
-                acknowledged: false,
-                tasks: BgTasks { items, waiting: false },
+                tasks: BgTasks { items },
             }
             .sanitized(),
         )
@@ -408,7 +401,7 @@ mod tests {
         assert_eq!(o.status, Status::Running);
         assert_eq!(o.msg, "turn");
         let task = &o.tasks.items[0];
-        assert_eq!((task.label.as_str(), task.state, task.holds), ("Explore docs", TaskState::Running, true));
+        assert_eq!((task.label.as_str(), task.state), ("Explore docs", TaskState::Running));
     }
 
     #[test]

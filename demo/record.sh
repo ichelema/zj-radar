@@ -63,7 +63,7 @@ if [ -f "$perm" ] && grep -qF "\"$wasm\"" "$perm"; then
         !skip                { print }
     ' "$perm" >"$perm.tmp" && mv "$perm.tmp" "$perm"
 fi
-printf '\n"%s" {\n    ReadApplicationState\n    ChangeApplicationState\n    ReadCliPipes\n    RunCommands\n}\n' "$wasm" >>"$perm"
+printf '\n"%s" {\n    ReadApplicationState\n    ChangeApplicationState\n    ReadCliPipes\n    RunCommands\n    ReadPaneContents\n}\n' "$wasm" >>"$perm"
 echo "==> seeded permission grant for $wasm"
 
 subst() { # <src-template> <dest> — fill the absolute-path placeholders
@@ -82,6 +82,14 @@ echo "==> recording (vhs)"
 # session instead of panicking on a nested one (this script is often run from
 # inside a Zellij session).
 unset ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID
+# A socket dir of its own: every other session on the machine would show up in
+# the rail as a peer row. Short path: Zellij caps socket paths at 107 bytes.
+ZELLIJ_SOCKET_DIR="$(mktemp -d /tmp/zjr-demo.XXXXXX)"
+export ZELLIJ_SOCKET_DIR
+# A failed tape never reaches its Ctrl+q, and even a clean one can leave the
+# server up: kill it on any exit. Scoped to the private socket dir above. Not
+# delete-all-sessions: that clears exited sessions from the shared cache.
+trap 'zellij kill-all-sessions -y >/dev/null 2>&1 || true' EXIT
 vhs "$gen/hero.tape"
 
 gif="$root/docs/media/hero.gif"

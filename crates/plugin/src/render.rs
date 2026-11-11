@@ -5,7 +5,7 @@
 //!    (the lockstep unit: one text line + its click target + surface class),
 //!    and `RenderedRail::from_lines`, the single derive point where ansi,
 //!    targets, and footprint all come from one `Vec<Line>`.
-//! 2. **Row emission** — `render_row` and the pane/detail line emitters, each
+//! 2. **Row emission** — `render_row` and the pane line emitters, each
 //!    producing `Line`s through `prefixed_line`'s narrow-width guard.
 //! 3. **Layout planning** — delegated to `layout.rs` (pure, no ANSI, no
 //!    targets): overflow folding, card spacing, per-row line budgets.
@@ -68,16 +68,6 @@ const TREE_PREFIX_COLS: usize = 3;
 /// the render gate, and the cadence predicates count only
 /// `TrackedObservation::animating` rows.
 const SERVICE_GLYPH: char = '▸';
-
-/// The agent line's glyph while its turn is over and it waits on background
-/// work it started (`BgTasks::waiting`): steady, because the agent itself is
-/// not progressing — the spinner moves down to the task lines that are.
-fn waiting_glyph(set: GlyphSet) -> char {
-    match set {
-        GlyphSet::Plain => '⋯',
-        GlyphSet::Nerd => '\u{f252}', // nf-fa-hourglass_half
-    }
-}
 
 /// The dashed guide at the head of every background-task line — dashed
 /// because the work is detached from the agent, where the solid `│├└` tree
@@ -582,7 +572,7 @@ fn spine_role(status: Status) -> Role {
 
 /// The rendered col-0 spine cell: status-hued `▌` on the active tab, a plain
 /// space otherwise. The one call path from `spine_role` to emitted ANSI — the
-/// three colored spine sites (line-1 header, pane detail line, child prefix)
+/// three colored spine sites (line-1 header, task lines, child prefix)
 /// all route through here, so the color rule can't be applied at one site and
 /// forgotten at another. (The SGR-free width closures keep their own literal
 /// `if active { "▌" } else { " " }` — they measure, they don't color.)
@@ -671,24 +661,6 @@ pub fn needs_permission(opts: &RenderOpts) -> RenderedRail {
     RenderedRail::from_ansi_without_targets(&out, opts.height)
 }
 
-/// Split an agent pane's text into its identity-line text and an optional
-/// subordinate detail line. The identity is the sticky task when one is known
-/// (falling back to the msg — so task-less panes, i.e. commands and old
-/// producers, render bit-identically to the pre-task rail). The detail is the
-/// actionable question, emitted only for Pending/Error when a distinct,
-/// non-blank msg exists — calm states never spend a second line.
-fn identity_and_detail<'a>(status: Status, task: &'a str, msg: &'a str) -> (&'a str, Option<&'a str>) {
-    if task.trim().is_empty() {
-        return (msg, None);
-    }
-    let trimmed_msg = msg.trim();
-    let detail = match status {
-        Status::Pending | Status::Error if !trimmed_msg.is_empty() && trimmed_msg != task.trim() => Some(trimmed_msg),
-        _ => None,
-    };
-    (task, detail)
-}
-
 /// The `· 12m` wait tag for a pane blocked on the user: whole minutes since
 /// the waiting-on-you edge (`pending_epoch_s`), frozen at `1h+` once saturated
 /// — the same freeze the ledger uses, so the Slow cadence can disarm
@@ -737,7 +709,7 @@ fn tab_header_line(row: &TabRow, opts: &RenderOpts, tab_target: &RailTarget) -> 
         .display
         .panes
         .iter()
-        .any(PaneDisplay::has_unacknowledged_status_pending)
+        .any(PaneDisplay::is_program_pending)
         .then(|| HotspotAction::Acknowledge { target: tab_target.clone() });
     let hotspot = HotspotSlot::new(opts.width, TAB_HEADER_HOTSPOT_MIN, hotspot);
     let width = hotspot.content_width();
@@ -897,7 +869,7 @@ impl HotspotSlot {
 /// compact form too).
 ///
 /// Line 1 (gutter+glyph+num+name+slot) is ALWAYS emitted (via
-/// [`tab_header_line`]), then the pane/detail lines in priority order.
+/// [`tab_header_line`]), then the pane lines in priority order.
 /// Returns the full untruncated set of lines; overflow is the planner's job.
 #[cfg(test)]
 fn render_row(row: &TabRow, opts: &RenderOpts) -> Vec<Line> {
@@ -921,7 +893,6 @@ fn render_row_form(row: &TabRow, opts: &RenderOpts, compact: bool) -> (Vec<Line>
     }
     let mut task_line_count = 0usize;
     let mut lines: Vec<Line> = Vec::new();
-    let width = opts.width;
     let st = row.display.status;
     let tab_target = target_for_row(row);
 
@@ -934,11 +905,11 @@ fn render_row_form(row: &TabRow, opts: &RenderOpts, compact: bool) -> (Vec<Line>
     let idle_color = tc_fg(opts.theme.idle_text);
 
     // Shared per-pane emission: the identity line (wait tag folded in) plus the
-    // optional subordinate `↳ question` line, both click-targeting the pane
-    // itself. The multi-pane roster and the single-pane branch below differ
-    // only in which panes earn lines and which Branch connector they carry.
+    // task lines, all click-targeting the pane itself. The multi-pane roster
+    // and the single-pane branch below differ only in which panes earn lines
+    // and which Branch connector they carry.
     // The one surface class for everything under this row's header (pane
-    // lines, detail lines, `+N more`): agent surface when the tab is active,
+    // lines, `+N more`): agent surface when the tab is active,
     // card tint otherwise.
     //
     // `skip_silent` is the single-pane emptiness gate (see the single-pane
@@ -950,7 +921,7 @@ fn render_row_form(row: &TabRow, opts: &RenderOpts, compact: bool) -> (Vec<Line>
     // Returns the pane's lines plus how many of them are task lines.
     let child_bg = if row.active { LineBg::ActiveChild } else { LineBg::Card };
     // Focus cue: in the active tab's multi-pane roster, the focused pane's
-    // lines (identity, `↳` detail, task lines) climb back to the header's
+    // lines (identity, task lines) climb back to the header's
     // bright surface, so the pane you're typing into stands out from its
     // siblings. Single-pane tabs and inactive tabs never take it — there the
     // focused pane is either obvious or not where you are.
@@ -962,7 +933,7 @@ fn render_row_form(row: &TabRow, opts: &RenderOpts, compact: bool) -> (Vec<Line>
             child_bg
         };
         let pane_status = pane.render_status();
-        let (identity, detail) = identity_and_detail(pane_status, pane.task(), pane.msg());
+        let identity = pane.msg();
         if skip_silent {
             let says_something = !identity.trim().is_empty()
                 || pane.outcome().is_some_and(|o| o.renders_tag())
@@ -987,16 +958,13 @@ fn render_row_form(row: &TabRow, opts: &RenderOpts, compact: bool) -> (Vec<Line>
         let tasks_tag = shown_tasks(pane, opts.task_lines).filter(|_| compact).and_then(compact_tasks_tag);
         let pane_target =
             RailTarget { tab_position: tab_target.tab_position, pane_id: Some(pane.pane_id()), session: None };
-        let hotspot = pane
-            .has_unacknowledged_status_pending()
-            .then(|| HotspotAction::Acknowledge { target: pane_target.clone() });
+        let hotspot = pane.is_program_pending().then(|| HotspotAction::Acknowledge { target: pane_target.clone() });
         let hotspot = HotspotSlot::new(opts.width, PANE_LINE_HOTSPOT_MIN, hotspot);
         let content_width = hotspot.content_width();
         let text = emit_pane_line(
             pane,
             &identity,
             tasks_tag.as_ref(),
-            detail.is_some(),
             opts,
             content_width,
             row.active,
@@ -1005,17 +973,12 @@ fn render_row_form(row: &TabRow, opts: &RenderOpts, compact: bool) -> (Vec<Line>
             &idle_color,
             branch,
         );
-        // `pane_target` is cloned here because a Pending/Error pane also emits
-        // the subordinate `↳ question` line below, targeting the SAME pane —
-        // `RailTarget` dropped `Copy` when `session` (a `String`) joined it.
+        // `pane_target` is cloned: `RailTarget` dropped `Copy` when `session`
+        // (a `String`) joined it.
         let line = Line::new(text, Some(pane_target.clone()), child_bg);
         let line = hotspot.finish(line, Role::Attention.ansi());
         let mut out = vec![line];
         let mut task_lines = 0;
-        if let Some(q) = detail {
-            let text = emit_pane_detail_line(q, row.active, st, pane_status, branch, &idle_color, width);
-            out.push(Line::new(text, Some(pane_target.clone()), child_bg));
-        }
         if let Some(tasks) = shown_tasks(pane, opts.task_lines).filter(|_| !compact) {
             let ctx = TaskLineCtx {
                 opts,
@@ -1076,7 +1039,7 @@ fn render_row_form(row: &TabRow, opts: &RenderOpts, compact: bool) -> (Vec<Line>
     // ── Single-pane pane line (chunk 1) ──────────────────────────────────────
     // The tab's one tracked pane renders through the SAME tree machinery as
     // multi-pane children — `└` elbow, status glyph, identity mark, activity
-    // (wait tag included), and the subordinate `↳ question` line — so single-
+    // (wait tag included) — so single-
     // and multi-pane tabs scan identically: same columns, same glyphs, same
     // click semantics (the line targets the pane directly; a click routes
     // straight to `Effect::ShowPane`) and the same subordinate surface band
@@ -1110,7 +1073,7 @@ struct CompactTasksTag {
 /// and failures — because the finished-fine ones (`●` / `·`) are the
 /// detail the full form has room for and the compact form exists to drop.
 /// A failure turns the tag red: the full form deliberately ranks failures
-/// above services so they never hide behind `+N more`, and the compact form
+/// right after running work so they never hide behind `+N more`, and the compact form
 /// must not hide them behind a neutral count either.
 fn compact_tasks_tag(tasks: &BgTasks) -> Option<CompactTasksTag> {
     let failed = tasks.items.iter().filter(|t| t.state == TaskState::Failed).count();
@@ -1130,24 +1093,22 @@ struct TaskLineCtx<'a> {
     label_color: &'a str,
     /// The pane's last status change — drives the spinner's long-runner ease.
     since_tick: u64,
-    /// Whether the row holds the Fast cadence (it is Running). A holding task
+    /// Whether the row holds the Fast cadence (it is Running). A running task
     /// under a Pending row (a turn that ended on a question) gets no ticks, so
     /// it draws a fixed frame rather than a spinner caught mid-turn.
     animating: bool,
 }
 
-/// Display order: running work the agent waits on (oldest first), then
-/// failures (news — they must not hide behind `+N more`), then running
-/// services, then every other finished task; finished ones most recently
-/// ended first.
+/// Display order: running work (oldest first), then failures (news — they
+/// must not hide behind `+N more`), then every other finished task; finished
+/// ones most recently ended first.
 fn ordered_tasks(tasks: &BgTasks) -> Vec<&BgTask> {
     let mut v: Vec<&BgTask> = tasks.items.iter().collect();
     v.sort_by_key(|t| {
-        let rank = match (t.state, t.holds) {
-            (TaskState::Running, true) => 0,
-            (TaskState::Failed, _) => 1,
-            (TaskState::Running, false) => 2,
-            _ => 3,
+        let rank = match t.state {
+            TaskState::Running => 0,
+            TaskState::Failed => 1,
+            _ => 2,
         };
         let order = match t.state {
             TaskState::Running => t.started_epoch_s,
@@ -1160,15 +1121,15 @@ fn ordered_tasks(tasks: &BgTasks) -> Vec<&BgTask> {
 
 /// One pane's background-task lines: up to [`MAX_TASK_LINES`], or
 /// `MAX_TASK_LINES - 1` plus a closing `┊ +N more`. A fold always keeps the
-/// first failure on a line of its own, even past a crowd of held running
+/// first failure on a line of its own, even past a crowd of running
 /// work (failures are news), and the `+N more` line takes the error hue when
 /// a failure is among the folded tasks, like the compact `+N` tag.
 fn emit_task_lines(tasks: &BgTasks, ctx: &TaskLineCtx) -> Vec<String> {
     let mut ordered = ordered_tasks(tasks);
     let show = if ordered.len() > MAX_TASK_LINES { MAX_TASK_LINES - 1 } else { ordered.len() };
     if let Some(i) = ordered.iter().position(|t| t.state == TaskState::Failed).filter(|&i| i >= show) {
-        // Only held running work outranks a failure, so the slot given up is
-        // a held task's: it folds into the count instead.
+        // Only running work outranks a failure, so the slot given up is
+        // a running task's: it folds into the count instead.
         let failure = ordered.remove(i);
         ordered.insert(show - 1, failure);
     }
@@ -1184,9 +1145,9 @@ fn emit_task_lines(tasks: &BgTasks, ctx: &TaskLineCtx) -> Vec<String> {
 }
 
 /// The shared 5-col task-line prefix — spine/space + connector continuation +
-/// space + `┊` + space. With the glyph and its space that is 7 columns, the
-/// `↳` line's span, so a task's glyph sits under the agent's mark and its
-/// label under the agent's text.
+/// space + `┊` + space. With the glyph and its space that is 7 columns, so a
+/// task's glyph sits under the agent's mark and its label under the agent's
+/// text.
 fn task_prefixed_line(ctx: &TaskLineCtx, plain_tail: &str, styled_tail: impl FnOnce(usize) -> String) -> String {
     let cont = match ctx.branch {
         Branch::Tee => "│",
@@ -1213,26 +1174,22 @@ fn task_prefixed_line(ctx: &TaskLineCtx, plain_tail: &str, styled_tail: impl FnO
 }
 
 /// One background-task line: `┊ ⠋ Run the test suite · 4m`. The glyph reads
-/// the task's state in the status vocabulary's hues (a spinner only for
-/// running work the agent waits on — a service holds the steady `▸`); the age
-/// tag is reserved first so the label absorbs any truncation.
+/// the task's state in the status vocabulary's hues (a spinner for running
+/// work); the age tag is reserved first so the label absorbs any truncation.
 fn emit_task_line(task: &BgTask, ctx: &TaskLineCtx) -> String {
     let opts = ctx.opts;
-    let (glyph, role) = match (task.state, task.holds) {
-        (TaskState::Running, true) if ctx.animating => {
+    let (glyph, role) = match task.state {
+        TaskState::Running if ctx.animating => {
             (spin_glyph(opts.now_tick, opts.now_frame, ctx.since_tick), Role::Working)
         }
-        (TaskState::Running, true) => (crate::status::working_spin(0), Role::Working),
-        (TaskState::Running, false) => (SERVICE_GLYPH, Role::Working),
-        (TaskState::Completed, _) => (Status::Done.glyph_for(opts.glyphs), Role::Success),
-        (TaskState::Failed, _) => (Status::Error.glyph_for(opts.glyphs), Role::Error),
-        (TaskState::Ended, _) => ('·', Role::Muted),
+        TaskState::Running => (crate::status::working_spin(0), Role::Working),
+        TaskState::Completed => (Status::Done.glyph_for(opts.glyphs), Role::Success),
+        TaskState::Failed => (Status::Error.glyph_for(opts.glyphs), Role::Error),
+        TaskState::Ended => ('·', Role::Muted),
     };
     let label = if task.label.trim().is_empty() { "task" } else { task.label.as_str() };
-    // Running services never complete, so — like a dev server row — they wear
-    // no stopwatch; everything else shows its (frozen, once ended) duration.
+    // A running task shows its live age; an ended one its frozen duration.
     let age = match task.state {
-        TaskState::Running if !task.holds => None,
         TaskState::Running => minute_tag(opts.now_epoch_s.saturating_sub(task.started_epoch_s)),
         _ => minute_tag(task.ended_epoch_s.unwrap_or(task.started_epoch_s).saturating_sub(task.started_epoch_s)),
     };
@@ -1313,7 +1270,7 @@ fn compose_activity(cmd: &str, outcome: Option<ExitOutcome>, avail: usize, cmd_c
 /// clamping happens here); `styled` receives the tail budget
 /// (`width - prefix_cols`) and returns the full styled line. Both omit the
 /// trailing newline; it is appended here so "exactly one `\n`" rides the same
-/// owner. Used by the pane, detail, and ledger rows — a new fixed-prefix row
+/// owner. Used by the pane, task, and ledger rows — a new fixed-prefix row
 /// type should route through this rather than re-deriving the guard.
 fn prefixed_line(
     width: usize,
@@ -1331,15 +1288,13 @@ fn prefixed_line(
 /// Emit one pane line in the line-per-pane / tree design:
 /// Inactive: ` {connector} {glyph} {mark} {msg}` (space + `├`/`└` + space)
 /// Active:   `▌{connector} {glyph} {mark} {msg}` (spine + `├`/`└` + space)
-// The `identity`/`has_detail` params push this past clippy's 7-arg default; the
-// params are tightly coupled render-context pieces (no natural sub-struct)
-// shared with `emit_pane_detail_line`'s sibling call in `render_row`.
+// The params push this past clippy's 7-arg default; they are tightly coupled
+// render-context pieces (no natural sub-struct).
 #[allow(clippy::too_many_arguments)]
 fn emit_pane_line(
     pane: &PaneDisplay,
     identity: &str,
     tasks_tag: Option<&CompactTasksTag>,
-    has_detail: bool,
     opts: &RenderOpts,
     width: usize,
     tab_active: bool,
@@ -1351,9 +1306,7 @@ fn emit_pane_line(
     let mark = pane.kind().mark(opts.glyphs);
     let mark_w = UnicodeWidthChar::width(mark).unwrap_or(1);
     let status = pane.render_status();
-    let glyph = if pane.is_waiting() {
-        waiting_glyph(opts.glyphs)
-    } else if status == Status::Running {
+    let glyph = if status == Status::Running {
         let since_tick = pane.since_tick().unwrap_or(opts.now_tick);
         running_glyph(pane.kind(), opts.now_tick, opts.now_frame, since_tick)
     } else {
@@ -1374,11 +1327,8 @@ fn emit_pane_line(
             // Glyph bold on non-idle (matches line 1); mark bold + the stronger dim
             // (vendor-neutral, heavier than the faint idle_text).
             let glyph_color = role_ansi(status.role());
-            let cmd_color = if status == Status::Pending && !has_detail {
-                role_ansi(Role::Attention).to_string()
-            } else {
-                dim_strong.to_string()
-            };
+            let cmd_color =
+                if status == Status::Pending { role_ansi(Role::Attention).to_string() } else { dim_strong.to_string() };
             // The compact form's `+N` task count is reserved first (like the
             // outcome tag inside `compose_activity`), dropped only when not
             // even one identity column would remain beside it.
@@ -1403,45 +1353,6 @@ fn emit_pane_line(
                 glyph_seg,
                 mark_seg,
                 activity,
-            )
-        },
-    )
-}
-
-/// Emit the subordinate `↳ question` line under a Pending/Error pane line.
-/// Prefix (7 cols): spine/space + connector continuation (`│` when siblings
-/// follow, space under the last child) + 3 spaces + `↳` + space. The question
-/// reads in the pane's status hue (attention/error), not bold — subordinate to
-/// the identity line above it.
-fn emit_pane_detail_line(
-    question: &str,
-    tab_active: bool,
-    tab_status: Status,
-    pane_status: Status,
-    branch: Branch,
-    conn_color: &str,
-    width: usize,
-) -> String {
-    let cont = match branch {
-        Branch::Tee => "│",
-        Branch::Elbow => " ",
-    };
-    // The shared tree prefix (spine + connector continuation + its space) + 4
-    // more cols: two further indent spaces + `↳` + its trailing space.
-    const PREFIX_VIS: usize = TREE_PREFIX_COLS + 4;
-    prefixed_line(
-        width,
-        PREFIX_VIS,
-        || {
-            let spine = if tab_active { "▌" } else { " " };
-            format!("{spine}{cont}   ↳ {question}")
-        },
-        |avail| {
-            format!(
-                "{}{}   {}",
-                spine_seg(tab_active, tab_status),
-                Seg::new(conn_color, cont),
-                Seg::new(pane_status.role().ansi(), format!("↳ {}", truncate(question, avail))),
             )
         },
     )

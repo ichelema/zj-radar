@@ -197,6 +197,10 @@ pub(crate) struct RadarState {
     /// hears `PaneAttentionChanged` before any manifest. Filed once a
     /// manifest and the tabs seat the pane (`file_unfiled`).
     unfiled: Vec<(u32, Status, String, u64)>,
+    /// The last `remembered` completion filed per pane: Zellij re-sends it on
+    /// every event until the pane is seen, and the ledger ring alone forgets
+    /// it once 32 newer entries push it out. Keyed by status, stamp and text.
+    remembered_filed: HashMap<u32, (Status, u64, String)>,
     tabs: Vec<RadarTab>,
     tab_panes: HashMap<usize, Vec<TerminalPane>>,
     pane_cwd: HashMap<u32, String>,
@@ -431,6 +435,9 @@ impl RadarState {
             self.native_changed(id, tick, &index);
         }
         self.file_unfiled();
+        // A pane this manifest lacks is gone: no tab will ever seat it.
+        self.unfiled.retain(|(id, ..)| update.live.contains(id));
+        self.remembered_filed.retain(|id, _| update.live.contains(id));
         self.pane_cwd.retain(|id, _| update.live.contains(id));
         self.cwd_bootstrap_attempted.retain(|id| update.live.contains(id));
 
@@ -492,7 +499,11 @@ impl RadarState {
         }
         let remembered = self.native_raw.get(&pane_id).and_then(|p| p.attention.remembered.clone());
         if let Some(r) = remembered.filter(|r| r.status.is_completion() && Some(r.status) != status) {
-            self.ledger_native(pane_id, r.status, &r.text, Some(r.since_ms / 1000), index);
+            let key = (r.status, r.since_ms, r.text);
+            if self.remembered_filed.get(&pane_id) != Some(&key) {
+                self.ledger_native(pane_id, key.0, &key.2, Some(key.1 / 1000), index);
+                self.remembered_filed.insert(pane_id, key);
+            }
         }
         changed
     }
@@ -524,10 +535,9 @@ impl RadarState {
         let text = crate::payload::sanitize(text, crate::payload::MAX_MSG_CHARS);
         let label = crate::attention::completion_label(&text).to_string();
         let Some((tab_id, tab_name)) = index.get(&pane_id) else {
-            // `remembered` re-fires on every event until the pane is seen: queue it once.
+            // Both edges in `native_changed` can report one completion: queue it once.
             let item = (pane_id, status, label, at_epoch_s);
             if !self.unfiled.contains(&item) {
-                // ponytail: a pane no manifest ever seats stays queued (one entry per completion); prune by `live` if it grows
                 self.unfiled.push(item);
             }
             return;

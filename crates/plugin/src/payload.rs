@@ -7,20 +7,14 @@
 pub const MAX_PAYLOAD_BYTES: usize = 65536;
 /// `msg` truncates to this many chars.
 pub const MAX_MSG_CHARS: usize = 60;
-/// `task` truncates to this many chars.
-pub const MAX_TASK_CHARS: usize = 60;
-/// `repo` truncates to this many chars.
-pub const MAX_REPO_CHARS: usize = 40;
-/// `branch` truncates to this many chars.
-pub const MAX_BRANCH_CHARS: usize = 40;
 /// Intake cap for tab names and pane titles. They arrive from the Zellij host
 /// (tab/pane updates) and the plugin sanitizes them to this many chars at
-/// intake (the same 40 as `repo`/`branch`, the other row-column strings).
+/// intake.
 pub const MAX_TAB_NAME_CHARS: usize = 40;
 
 /// Unicode bidi format/override characters. These can visually reorder or hide
 /// surrounding text (the "Trojan Source" class) — e.g. an RLO (U+202E) in a
-/// `repo`/`branch`/`msg` field could make a rail row read differently than its
+/// `msg` field could make a rail row read differently than its
 /// bytes. They have no legitimate use in the short display strings we render, so
 /// they are dropped. `is_control()` does NOT cover them (they are `Cf`, format
 /// characters, not `Cc`). The zero-width JOINER (U+200D) is deliberately NOT here:

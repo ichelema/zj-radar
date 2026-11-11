@@ -4,8 +4,8 @@
 //! kept per pane inside `TrackedObservation` as [`BgTask`]s.
 //!
 //! "Background task", not "job": the activity model already uses *Job* for
-//! bounded work as opposed to a *Service*, and a background task can be either
-//! (the `holds` flag is that split). No zellij-tile dependency.
+//! bounded work as opposed to a *Service*, and a background task can be either.
+//! No zellij-tile dependency.
 
 use crate::payload::sanitize_in_place;
 
@@ -46,18 +46,15 @@ impl TaskState {
 pub struct BgTask {
     pub id: String,
     pub label: String,
-    pub holds: bool,
     pub state: TaskState,
     pub started_epoch_s: u64,
     pub ended_epoch_s: Option<u64>,
 }
 
-/// A pane's background tasks plus whether the agent is waiting on them.
+/// A pane's background tasks.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BgTasks {
     pub items: Vec<BgTask>,
-    /// The agent's turn is over and it is waiting on a holding task.
-    pub waiting: bool,
 }
 
 impl BgTasks {
@@ -84,15 +81,11 @@ mod tests {
         let task = |id: String, label: &str| BgTask {
             id,
             label: label.into(),
-            holds: true,
             state: TaskState::Running,
             started_epoch_s: 0,
             ended_epoch_s: None,
         };
-        let mut t = BgTasks {
-            items: (0..MAX_TASKS + 4).map(|i| task(format!("t{i}"), "\x1b[2Jtests\n")).collect(),
-            waiting: false,
-        };
+        let mut t = BgTasks { items: (0..MAX_TASKS + 4).map(|i| task(format!("t{i}"), "\x1b[2Jtests\n")).collect() };
         t.items[0].id = "x".repeat(MAX_TASK_ID_CHARS + 10);
         t.sanitize();
         assert_eq!(t.items.len(), MAX_TASKS);

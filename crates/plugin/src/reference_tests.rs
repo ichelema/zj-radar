@@ -178,8 +178,8 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
 
     /// Split a leading `"quoted"` token off `s`, returning (contents, rest).
     /// THE quote splitter for every DSL site that reads a quoted string —
-    /// the `ledger` directive, tab names, pane msgs, untracked titles, and
-    /// the `task "…"` trailer. Lenient on malformed input: an unquoted token
+    /// the `ledger` directive, tab names, pane msgs, and untracked titles.
+    /// Lenient on malformed input: an unquoted token
     /// yields the whole (trim-started) remainder, an unterminated quote
     /// everything after the opening `"` — both with an empty rest.
     fn take_quoted(s: &str) -> (&str, &str) {

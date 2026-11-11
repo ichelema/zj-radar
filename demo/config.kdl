@@ -7,6 +7,9 @@ theme "tokyo-night"
 default_mode "normal"
 pane_frames false
 simplified_ui true
+// A fresh cache shows these over the recording on Zellij 0.46.
+show_release_notes false
+show_startup_tips false
 
 // Direct tab switches for the recording (vhs has no mouse, so the demo shows
 // keyboard navigation — which also shows the rail tracking focus). vhs can't
