@@ -7,7 +7,9 @@
 
 use crate::kind::Kind;
 use crate::observation::{ObservationOrigin, TrackedObservation};
-use crate::sessions::{SessionSummary, SummaryPane, SummaryTab, MAX_LABEL_CHARS, MAX_PANES_PER_TAB, MAX_TABS};
+use crate::sessions::{
+    reported, SessionSummary, SummaryPane, SummaryTab, MAX_LABEL_CHARS, MAX_PANES_PER_TAB, MAX_TABS,
+};
 use crate::status::Status;
 use crate::task::{BgTask, BgTasks, TaskState};
 
@@ -208,23 +210,32 @@ pub(crate) struct PeerItem {
 }
 
 /// Another session on this Zellij server, as `GlobalAttention` reports it.
+/// Zellij's own counts are not kept: they include running shell commands, and
+/// the badge counts the items with [`reported`] instead, like the own row.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PeerSession {
     pub name: String,
-    pub working: usize,
-    /// `needs_you + failed`: the panes waiting on the user (`Status::needs_you`).
-    pub needs_you: usize,
     pub items: Vec<PeerItem>,
 }
 
 impl PeerSession {
     /// The peer as the badge's [`SessionSummary`], tabs in first-seen item order.
+    /// Counts and tree both hold the [`reported`] items only; counts take every
+    /// such item, the tree stops at `MAX_TABS` × `MAX_PANES_PER_TAB`.
     /// Tab positions are ordinals, not Zellij positions: peer clicks focus a
     /// pane by id instead (`render_peer_children`).
     pub(crate) fn summary(self) -> SessionSummary {
         use crate::payload::sanitize;
+        let (mut running, mut attention) = (0, 0);
         let mut tabs: Vec<(usize, SummaryTab)> = Vec::new();
         for item in self.items {
+            let a = item.attention;
+            let command = a.source == Source::Command;
+            if !reported(a.status, command) {
+                continue;
+            }
+            running += usize::from(a.status == Status::Running && !command);
+            attention += usize::from(a.status.needs_you());
             let i = match tabs.iter().position(|(id, _)| *id == item.tab_id) {
                 Some(i) => i,
                 None if tabs.len() < MAX_TABS => {
@@ -238,9 +249,8 @@ impl PeerSession {
                 }
                 None => continue,
             };
-            let a = item.attention;
             let kind = match a.source {
-                Source::Command => Kind::Command,
+                Source::Command => command_kind(&a.text),
                 Source::Program | Source::Other => a.app.as_deref().map_or(Kind::Other, kind_for_app),
             };
             let panes = &mut tabs[i].1.panes;
@@ -255,8 +265,8 @@ impl PeerSession {
         }
         SessionSummary {
             session_name: sanitize(&self.name, 128),
-            running: self.working,
-            attention: self.needs_you,
+            running,
+            attention,
             attention_tab_position: None,
             tabs: tabs.into_iter().map(|(_, tab)| tab).collect(),
         }
@@ -283,8 +293,6 @@ mod tests {
         };
         let p = PeerSession {
             name: "work".into(),
-            working: 1,
-            needs_you: 1,
             items: vec![
                 item(3, 7, "claude-code", Status::Pending),
                 item(4, 9, "codex", Status::Running),
@@ -298,6 +306,55 @@ mod tests {
         assert_eq!(tabs, vec![("tab7", vec![3, 5]), ("tab9", vec![4])]);
         let first = &p.tabs[0].panes[0];
         assert_eq!((first.kind.as_str(), first.status.as_str()), ("claude", "pending"));
+    }
+
+    fn peer_item(
+        pane_id: u32,
+        tab_id: usize,
+        source: Source,
+        app: Option<&str>,
+        status: Status,
+        text: &str,
+    ) -> PeerItem {
+        PeerItem {
+            pane_id,
+            tab_id,
+            tab_name: format!("tab{tab_id}"),
+            attention: PaneAttention {
+                status,
+                source,
+                text: text.into(),
+                app: app.map(Into::into),
+                ..PaneAttention::default()
+            },
+        }
+    }
+
+    #[test]
+    fn peer_counts_and_tree_follow_the_one_badge_rule() {
+        let p = PeerSession {
+            name: "lab".into(),
+            items: vec![
+                peer_item(1, 1, Source::Program, Some("claude-code"), Status::Running, "working: parser"),
+                peer_item(2, 2, Source::Program, Some("mybot"), Status::Running, "working: thinking"),
+                peer_item(3, 3, Source::Program, Some("zellij"), Status::Pending, "needs approval: x"),
+                peer_item(4, 4, Source::Command, None, Status::Error, "failed: cargo test"),
+                peer_item(5, 5, Source::Command, None, Status::Running, "running: vim"),
+            ],
+        }
+        .summary();
+        assert_eq!((p.running, p.attention), (2, 2), "vim neither runs nor waits; the failed test waits");
+        let tree: Vec<(&str, &str)> =
+            p.tabs.iter().flat_map(|t| &t.panes).map(|p| (p.kind.as_str(), p.status.as_str())).collect();
+        assert_eq!(tree, [("claude", "running"), ("other", "running"), ("remote", "pending"), ("command", "error")]);
+        assert_eq!(p.tabs.len(), 4, "a tab holding only a running command gets no line");
+    }
+
+    #[test]
+    fn peer_counts_include_items_past_the_tree_caps() {
+        let items = (0..20).map(|id| peer_item(id, 1, Source::Program, Some("pi"), Status::Pending, "")).collect();
+        let p = PeerSession { name: "lab".into(), items }.summary();
+        assert_eq!((p.attention, p.tabs[0].panes.len()), (20, MAX_PANES_PER_TAB));
     }
 
     fn program(status: Status, app: &str, text: &str) -> NativePane {

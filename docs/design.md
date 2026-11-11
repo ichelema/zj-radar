@@ -506,21 +506,29 @@ with click or cycle to switch. Peers are pushed by Zellij's
 subscribes. `lib.rs` drops the current session and copies each peer into an
 `attention::PeerSession`:
 
-- `working` is Zellij's working count; `needs_you` is its needs-you plus
-  failed counts.
 - Items are the terminal panes with attention, with their tab id, tab name,
-  and attention.
+  and attention. Zellij lists every pane that is not idle, without a cap.
+- Zellij's own counts are dropped: they include running shell commands.
 
-`PeerSession::summary` folds that into the badge's `SessionSummary` (tabs in
-first-seen item order, bounded by `MAX_TABS` and `MAX_PANES_PER_TAB`, labels
-sanitized), and `PluginRuntime::global_attention_changed` hands the set to
+**One counting rule.** `sessions::reported` decides for this session's row and
+for every peer: a pane counts, and has a peer-tree row, unless it is a running
+shell command (`vim`, a dev server can run for hours). It is the rule Zellij
+applies to what a session reports outward (`host_program_status`). A counted
+pane adds to `running` while Running from a program, and to `attention` while
+it needs you, a failed command included. Done panes stay in peer trees and
+count in neither.
+
+`PeerSession::summary` folds the items into the badge's `SessionSummary`:
+counts over every reported item, tabs in first-seen item order, the tree
+bounded by `MAX_TABS` and `MAX_PANES_PER_TAB`, labels sanitized.
+`PluginRuntime::global_attention_changed` hands the set to
 `Sessions::update_global`. Zellij owns liveness: a session it reports is live,
 one it stops reporting is gone, so there is no file IO and no staleness
 grading.
 
 This session's own row is `Sessions::set_own`, fed with counts derived from
-the rail rows (`summary_counts`: program-origin panes only, command rows
-excluded) whenever the radar generation moves. The local rail's rows, header
+the rail rows (`summary_counts`, by the same rule) whenever the radar
+generation moves. The local rail's rows, header
 badge, and footer stay tab-level summaries. Pure state in `sessions.rs`,
 wiring in `runtime.rs`, render in `render.rs::render_session_badge`
 (headings) and `render_peer_children` (the `session_tree` tree).
@@ -528,7 +536,7 @@ wiring in `runtime.rs`, render in `render.rs::render_session_badge`
 **Session tree (`session_tree`, display-only).** The option only decides
 whether this rail draws peers' trees. Off, `Sessions::set_show_trees` drops
 peers' trees on read, so their tree-only edges never repaint this rail. On,
-`Sessions::badge()` keeps only agent panes. On screen, the current session's
+`Sessions::badge()` passes the summary's tree through. On screen, the current session's
 heading sits above the local cards and each peer's heading and tree follow the
 cards and the idle strip. Peer rows are the lowest-priority lines on the rail:
 they get only the height left after the planned cards and the bottom region

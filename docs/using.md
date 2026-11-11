@@ -144,13 +144,17 @@ Bindings for all four, and for changing options from a key, are in
 Run more than one Zellij session on the same machine and each rail grows one
 line per session: your session first, then sessions that need attention, then
 the rest. Each line shows the session name with its working and needs-you
-pane counts. With a single session the badge is invisible.
+pane counts. Every session counts the same way: an agent that works or waits,
+and a shell command that failed, count; a shell command that is still running
+(`vim`, `cargo test`, a dev server) does not. With a single session the badge
+is invisible.
 
 - **Click a line** to switch to that session, landing on a pane that needs
   you if it has one.
 - **`session_tree true`** ([configuration](configuration.md#options)) expands
   the badge into a tree. Your session's line heads your own tabs; each other
-  session follows with the tabs and panes Zellij reports activity for. Click
+  session follows with the tabs and panes Zellij reports activity for, except
+  running shell commands, so every count has its row. Click
   a peer pane row to switch there and focus that pane; a peer tab row focuses
   its first listed pane. Peer rows only use the height left after your local
   tabs, the ledger, and the footer, so a short rail shows fewer of them (or

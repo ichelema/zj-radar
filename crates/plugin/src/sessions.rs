@@ -13,10 +13,21 @@
 //! `attention > 0` sessions by name, then the rest by name.
 
 use crate::radar_state::Direction;
+use crate::status::Status;
 
 pub(crate) const MAX_TABS: usize = 64;
 pub(crate) const MAX_PANES_PER_TAB: usize = 16;
 pub(crate) const MAX_LABEL_CHARS: usize = 96;
+
+/// The badge's one rule, for this session's row and every peer: a pane counts,
+/// and has a peer-tree row, unless it is a running shell command, which may run
+/// for hours (`vim`, a dev server). It is Zellij's rule for what a session
+/// reports outward (`host_program_status`). A counted pane adds to `running`
+/// while Running from a program, and to `attention` while it `needs_you()`, a
+/// failed command included.
+pub(crate) fn reported(status: Status, command: bool) -> bool {
+    !(command && status == Status::Running)
+}
 
 /// A bounded, display-only view of another session's tab tree.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -246,26 +257,9 @@ impl Sessions {
                 is_current: s.is_current,
                 selected: selected_name == Some(s.summary.session_name.as_str()),
                 // The current session's own tree never renders (its tabs are
-                // the local cards). Peer trees only when shown, agent panes
-                // only — the filter sits here, upstream of the tab glyph and
-                // the line budget in `render_peer_children`.
-                tabs: if s.is_current || !self.show_trees {
-                    Vec::new()
-                } else {
-                    s.summary
-                        .tabs
-                        .iter()
-                        .map(|tab| SummaryTab {
-                            panes: tab
-                                .panes
-                                .iter()
-                                .filter(|p| crate::kind::Kind::from_source(&p.kind).is_agent())
-                                .cloned()
-                                .collect(),
-                            ..tab.clone()
-                        })
-                        .collect()
-                },
+                // the local cards); peer trees only when shown. A peer's tree
+                // already holds only [`reported`] panes (`PeerSession::summary`).
+                tabs: if s.is_current || !self.show_trees { Vec::new() } else { s.summary.tabs.clone() },
             })
             .collect()
     }
@@ -340,6 +334,14 @@ mod tests {
     }
 
     #[test]
+    fn reported_drops_only_a_running_command() {
+        for &st in Status::ALL {
+            assert!(reported(st, false), "a program pane always counts: {st:?}");
+            assert_eq!(reported(st, true), st != Status::Running, "command {st:?}");
+        }
+    }
+
+    #[test]
     fn global_peers_focus_the_waiting_pane() {
         let mut s = Sessions::default();
         s.set_own(own("work"));
@@ -371,13 +373,13 @@ mod tests {
     }
 
     #[test]
-    fn shown_peer_trees_list_agent_panes_only() {
+    fn shown_peer_trees_keep_every_summary_pane() {
         let mut s = Sessions::default();
         s.update_global(vec![peer_with_tree("one")]);
         assert!(s.set_show_trees(true), "turning trees on changes the badge");
         let entry = s.badge().into_iter().find(|e| e.name == "alpha").unwrap();
-        assert_eq!(entry.tabs[0].panes.len(), 1);
-        assert_eq!(entry.tabs[0].panes[0].kind, "claude");
+        let kinds: Vec<&str> = entry.tabs[0].panes.iter().map(|p| p.kind.as_str()).collect();
+        assert_eq!(kinds, ["claude", "test"], "the summary already applied `reported`; the badge drops nothing");
         assert!(s.update_global(vec![peer_with_tree("two")]), "with trees on, label edges repaint");
     }
 
