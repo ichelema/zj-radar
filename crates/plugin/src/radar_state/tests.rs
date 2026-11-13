@@ -243,6 +243,25 @@ fn cwd_bootstrap_reads_only_the_owned_tab() {
 }
 
 #[test]
+fn cwd_bootstrap_uses_the_manifest_position_before_the_tab_update() {
+    // A new tab's PaneUpdate can precede its TabUpdate: ownership is still
+    // unresolved, so the bootstrap scopes by the position this PaneUpdate
+    // just reported, and the cwd then names the tab once the tabs arrive.
+    let mut radar = RadarState::default();
+    own_tab(&mut radar, 0);
+    let early = radar.panes_changed(
+        pane_update(HashMap::from([(0, vec![focused_pane(7)]), (1, vec![focused_pane(8)])])),
+        1,
+        config::NamingMode::Managed,
+    );
+    assert_eq!(early.cwd_bootstrap, vec![7]);
+
+    radar.tabs_changed(vec![tab(10, 0, "Tab #1", true), tab(20, 1, "Tab #2", false)]);
+    let named = radar.cwd_changed(7, "/work/alpha".into(), config::NamingMode::Managed);
+    assert_eq!(named.renames, vec![TabRename { id: TabId::new(10), name: "alpha".into() }]);
+}
+
+#[test]
 fn bootstrapped_cwd_names_the_tab_and_later_cd_still_renames() {
     let mut radar = RadarState::default();
     radar.tabs_changed(vec![tab(10, 0, "Tab #1", true)]);
