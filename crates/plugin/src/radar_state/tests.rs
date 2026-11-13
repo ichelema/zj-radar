@@ -112,6 +112,7 @@ fn pane_update(tab_panes: HashMap<usize, Vec<TerminalPane>>) -> PaneUpdate {
 fn panes_changed_requests_cwd_bootstrap_for_new_pane_without_cwd() {
     let mut radar = RadarState::default();
     radar.tabs_changed(vec![tab(10, 0, "Tab #1", true)]);
+    own_tab(&mut radar, 0);
 
     let change =
         radar.panes_changed(pane_update(HashMap::from([(0, vec![focused_pane(7)])])), 1, config::NamingMode::Managed);
@@ -123,6 +124,7 @@ fn panes_changed_requests_cwd_bootstrap_for_new_pane_without_cwd() {
 fn panes_changed_requests_no_cwd_bootstrap_when_naming_off() {
     let mut radar = RadarState::default();
     radar.tabs_changed(vec![tab(10, 0, "Tab #1", true)]);
+    own_tab(&mut radar, 0);
 
     let change =
         radar.panes_changed(pane_update(HashMap::from([(0, vec![focused_pane(7)])])), 1, config::NamingMode::Off);
@@ -134,6 +136,7 @@ fn panes_changed_requests_no_cwd_bootstrap_when_naming_off() {
 fn panes_changed_skips_cwd_bootstrap_when_cwd_already_known() {
     let mut radar = RadarState::default();
     radar.tabs_changed(vec![tab(10, 0, "Tab #1", true)]);
+    own_tab(&mut radar, 0);
     radar.cwd_changed(7, "/work/repo".into(), config::NamingMode::Managed);
 
     let change =
@@ -148,6 +151,7 @@ fn panes_changed_requests_each_pane_cwd_only_once_even_if_unresolved() {
     // must never re-issue it, or we rebuild the meltdown re-poll loop.
     let mut radar = RadarState::default();
     radar.tabs_changed(vec![tab(10, 0, "Tab #1", true)]);
+    own_tab(&mut radar, 0);
     let update = || pane_update(HashMap::from([(0, vec![focused_pane(7)])]));
 
     let first = radar.panes_changed(update(), 1, config::NamingMode::Managed);
@@ -161,6 +165,7 @@ fn panes_changed_requests_each_pane_cwd_only_once_even_if_unresolved() {
 fn cwd_bootstrap_attempt_resets_when_pane_id_is_recycled() {
     let mut radar = RadarState::default();
     radar.tabs_changed(vec![tab(10, 0, "Tab #1", true)]);
+    own_tab(&mut radar, 0);
 
     let first =
         radar.panes_changed(pane_update(HashMap::from([(0, vec![focused_pane(7)])])), 1, config::NamingMode::Managed);
@@ -178,6 +183,7 @@ fn cwd_bootstrap_attempt_resets_when_pane_id_is_recycled() {
 fn cwd_bootstrap_prioritizes_focused_panes_and_caps_volume_per_update() {
     let mut radar = RadarState::default();
     radar.tabs_changed(vec![tab(10, 0, "Tab #1", true)]);
+    own_tab(&mut radar, 0);
     // Eight unfocused panes (ids 1..=8) plus one focused pane (id 9): more
     // candidates than the per-update cap.
     let mut panes: Vec<TerminalPane> = (1..=MAX_CWD_BOOTSTRAP_PER_UPDATE as u32).map(pane).collect();
@@ -200,6 +206,40 @@ fn cwd_bootstrap_prioritizes_focused_panes_and_caps_volume_per_update() {
         config::NamingMode::Managed,
     );
     assert_eq!(second.cwd_bootstrap, vec![8]);
+}
+
+#[test]
+fn cwd_bootstrap_reads_only_the_owned_tab() {
+    // Bootstrap feeds the namer, which reads only this instance's tab: the
+    // other tabs' panes belong to their own instances' reads.
+    let mut radar = RadarState::default();
+    radar.tabs_changed(vec![tab(10, 0, "Tab #1", true), tab(20, 1, "Tab #2", false)]);
+    let update = |moved: bool| {
+        let (own, other) = if moved { (vec![pane(1), pane(2)], vec![]) } else { (vec![pane(1)], vec![pane(2)]) };
+        pane_update(HashMap::from([(0, own), (1, other)]))
+    };
+
+    // Ownership unknown: no read at all, and nothing marked attempted.
+    let unowned = radar.panes_changed(update(false), 1, config::NamingMode::Managed);
+    assert!(unowned.cwd_bootstrap.is_empty());
+
+    own_tab(&mut radar, 0);
+    let owned = radar.panes_changed(update(false), 2, config::NamingMode::Managed);
+    assert_eq!(owned.cwd_bootstrap, vec![1]);
+
+    // Pane 2 moves into the owned tab: never attempted, so it gets its read.
+    let moved = radar.panes_changed(update(true), 3, config::NamingMode::Managed);
+    assert_eq!(moved.cwd_bootstrap, vec![2]);
+
+    // The owned tab moves to position 1 (a tab closed before it): the scope
+    // follows the stable TabId, not the position latched at load.
+    radar.tabs_changed(vec![tab(30, 0, "Tab #3", false), tab(10, 1, "Tab #1", true)]);
+    let shifted = radar.panes_changed(
+        pane_update(HashMap::from([(0, vec![pane(3)]), (1, vec![pane(1), pane(2), pane(4)])])),
+        4,
+        config::NamingMode::Managed,
+    );
+    assert_eq!(shifted.cwd_bootstrap, vec![4]);
 }
 
 #[test]

@@ -731,31 +731,42 @@ impl RadarState {
         self.namer.applied_name(tab_id)
     }
 
-    /// Live terminal panes whose cwd we have neither learned (via `CwdChanged`)
-    /// nor yet attempted to read. Focused panes come first — they name their tab
-    /// — and the result is capped at `MAX_CWD_BOOTSTRAP_PER_UPDATE` so one update
-    /// never fans out an unbounded number of blocking host calls. Every returned
-    /// id is recorded as attempted, so it is requested at most once per lifetime.
+    /// Live terminal panes of this instance's own tab whose cwd we have neither
+    /// learned (via `CwdChanged`) nor yet attempted to read. Focused panes come
+    /// first — they name their tab — and the result is capped at
+    /// `MAX_CWD_BOOTSTRAP_PER_UPDATE` so one update never fans out an unbounded
+    /// number of blocking host calls. Every returned id is recorded as
+    /// attempted, so it is requested at most once per lifetime.
     ///
-    /// Bootstrap exists to name tabs, so it is a no-op (and pays for no
-    /// blocking reads) when naming is `Off` — mirroring `rename_tabs`. Unlike
-    /// renames it is NOT scoped to the owned tab.
+    /// Bootstrap exists to name tabs, so it is scoped like `rename_tabs`: a
+    /// no-op under naming `Off`, and only the panes the namer reads (the owned
+    /// tab's), so a large session pays one read per pane per tab, not per
+    /// instance. A pane that later moves into the owned tab is still
+    /// unattempted and gets its read then.
     fn cwd_bootstrap_targets(&mut self, naming_mode: config::NamingMode) -> Vec<u32> {
         if naming_mode == config::NamingMode::Off {
             return Vec::new();
         }
+        // The `TabId`'s current position when ownership has resolved; before
+        // that (a reveal's PaneUpdate can precede its TabUpdate) the position
+        // this same PaneUpdate just reported.
+        let position = match self.naming_tab_id {
+            Some(id) => self.tabs.iter().find(|t| t.id == id).map(|t| t.position),
+            None => self.naming_tab_position,
+        };
+        let Some(panes) = position.and_then(|pos| self.tab_panes.get(&pos)) else {
+            return Vec::new();
+        };
         let mut focused = Vec::new();
         let mut others = Vec::new();
-        for panes in self.tab_panes.values() {
-            for p in panes {
-                if self.pane_cwd.contains_key(&p.id) || self.cwd_bootstrap_attempted.contains(&p.id) {
-                    continue;
-                }
-                if p.focused_in_tab {
-                    focused.push(p.id);
-                } else {
-                    others.push(p.id);
-                }
+        for p in panes {
+            if self.pane_cwd.contains_key(&p.id) || self.cwd_bootstrap_attempted.contains(&p.id) {
+                continue;
+            }
+            if p.focused_in_tab {
+                focused.push(p.id);
+            } else {
+                others.push(p.id);
             }
         }
         // Deterministic order regardless of HashMap iteration; focused first.

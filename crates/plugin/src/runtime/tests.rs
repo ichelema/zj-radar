@@ -228,12 +228,12 @@ fn sidebar_instance_never_renames_a_foreign_tab() {
         theme: None,
         native: HashMap::new(),
     });
-    // The cwd bootstrap is deliberately NOT ownership-scoped (the cwd also
-    // stamps observed commands' repo); only renames are.
+    // The cwd bootstrap is ownership-scoped like renames: only the own tab's
+    // pane is read.
     assert!(topology
         .effects
         .iter()
-        .any(|effect| { matches!(effect, Effect::ResolveCwd { pane_ids } if pane_ids == &vec![10, 11]) }));
+        .any(|effect| { matches!(effect, Effect::ResolveCwd { pane_ids } if pane_ids == &vec![10]) }));
 
     let foreign = runtime.cwd_changed(11, "/work/foreign".into());
     assert!(
