@@ -437,10 +437,12 @@ basename already applied does not stick over it. A cwd with no remote, or
 whose path does not exist locally, keeps the basename. For a remote pane
 that is the basename of the remote cwd the pane reports.
 
-**Cwd.** Cwds arrive from `CwdChanged`. A freshly opened pane that has not
-sent one yet gets one `Effect::ResolveCwd` read (`get_pane_cwd`), focused
-panes first, at most `MAX_CWD_BOOTSTRAP_PER_UPDATE` (8) per manifest, never
-repeated for the same pane id. The bootstrap is skipped under `naming off`.
+**Cwd.** Cwds arrive from `CwdChanged`. A freshly opened pane of the
+instance's own tab that has not sent one yet gets one `Effect::ResolveCwd`
+read (`get_pane_cwd`), focused panes first, at most
+`MAX_CWD_BOOTSTRAP_PER_UPDATE` (8) per manifest, never repeated for the same
+pane id. Other tabs' panes are left to their own instances, the only ones
+that name those tabs. The bootstrap is skipped under `naming off`.
 
 **Write authority is per tab.** Renames are `rename_tab_with_id` (stable
 `TabId`, never position) and fire only on change. Each instance learns its own
