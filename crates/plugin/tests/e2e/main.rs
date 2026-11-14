@@ -924,6 +924,57 @@ fn ungranted_rail_is_enabled_by_its_own_prompt() {
     assert!(!rail.contains("needs permission"), "the answered prompt must enable the rail;\nsidebar:\n{rail}");
 }
 
+/// A session created detached (`zellij attach --create-background`) loads its
+/// rails with no client connected. On Zellij 0.45.1 the cached grant's
+/// `PermissionRequestResult` was lost in that window and the rails stayed on
+/// the `needs_permission` face forever. With a pre-seeded grant, once a client
+/// attaches every rail must be live: both tabs' rails render the tab rows, and
+/// a click on tab one's rail switches to tab two.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn background_created_session_rails_get_their_grant() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+    let session_name = format!("zjr_bg_{}", std::process::id());
+    let session =
+        ZellijSession::start_background(&session_name, &two_sidebar_tabs_layout(&wasm), pre_grant_permissions(&wasm));
+
+    let live = |s: &ZellijSession| {
+        let rail = sidebar_region(&s.screen(), 32);
+        rail.contains("one") && rail.contains("two") && !rail.contains("needs permission")
+    };
+
+    // Tab one's rail: granted, so it lists both tabs.
+    let mut screen = session.screen();
+    let one_live = session.wait_until(Duration::from_secs(10), |s| {
+        screen = s.screen();
+        live(s)
+    });
+    let rail = sidebar_region(&screen, 32);
+    eprintln!("[e2e] tab-one rail after attach:\n{rail}");
+    assert!(one_live, "tab one's rail must leave the needs-permission face after attach;\nsidebar:\n{rail}");
+
+    // A real click on tab two's row must switch tabs: tab one's terminal
+    // (ZPID=pane1) is no longer the focused pane.
+    let pane1 = session.discover_terminal_pane_id();
+    let row = sidebar_row_index(&session.screen(), 32, "two").expect("tab two's row must be in the rail");
+    let switched = session.wait_until(Duration::from_secs(8), |s| {
+        s.click_at(3, (row + 1) as u16);
+        let p = s.discover_terminal_pane_id();
+        p != 0 && p != pane1
+    });
+    assert!(switched, "clicking tab two's row must switch the active tab;\n{}", session.dump_screen());
+
+    // Tab two's rail is a second instance with its own request.
+    let two_live = session.wait_until(Duration::from_secs(10), live);
+    let rail = sidebar_region(&session.screen(), 32);
+    eprintln!("[e2e] tab-two rail:\n{rail}");
+    assert!(two_live, "tab two's rail must leave the needs-permission face;\nsidebar:\n{rail}");
+}
+
 /// Regression pin: the rail paints every column of its pane, not just most of
 /// it. Reported live (ghostty): the focused card's bright background band
 /// appeared to stop 1-2 columns short of the rail pane's right edge. Reading

@@ -228,7 +228,7 @@ impl ZellijSession {
         rows: u16,
         cols: u16,
     ) -> Self {
-        Self::start_internal(name, layout_kdl, isolated, rows, cols)
+        Self::start_internal(name, layout_kdl, isolated, rows, cols, false)
     }
 
     /// Second session on the SAME server socket dir + cache as `self`, so the
@@ -244,12 +244,26 @@ impl ZellijSession {
     /// must outlive it (drop `self` last).
     pub fn start_sibling(&self, name: &str, layout_kdl: &str) -> ZellijSession {
         let (rows, cols) = *self.size.lock().unwrap();
-        Self::start_internal(name, layout_kdl, self.isolated.shared(), rows, cols)
+        Self::start_internal(name, layout_kdl, self.isolated.shared(), rows, cols, false)
     }
 
-    /// Shared implementation behind `start_with_size` (owned environment) and
-    /// `start_sibling` (borrowed environment).
-    fn start_internal(name: &str, layout_kdl: &str, isolated: IsolatedEnvironment, rows: u16, cols: u16) -> Self {
+    /// `start`, but the session is created detached
+    /// (`zellij attach --create-background`) and the PTY client attaches only
+    /// after its plugins have loaded with no client connected.
+    pub fn start_background(name: &str, layout_kdl: &str, isolated: IsolatedEnvironment) -> Self {
+        Self::start_internal(name, layout_kdl, isolated, 40, 100, true)
+    }
+
+    /// Shared implementation behind `start_with_size` (owned environment),
+    /// `start_sibling` (borrowed environment) and `start_background`.
+    fn start_internal(
+        name: &str,
+        layout_kdl: &str,
+        isolated: IsolatedEnvironment,
+        rows: u16,
+        cols: u16,
+        background: bool,
+    ) -> Self {
         assert_zellij_version();
 
         // Kill any previous session with this name to avoid conflicts.
@@ -272,7 +286,30 @@ impl ZellijSession {
         let mut cmd = CommandBuilder::new("zellij");
         let config = isolated.config_home().join("zellij").join("config.kdl");
         cmd.args(["--config", config.to_str().unwrap()]);
-        cmd.args(["--session", name, "--new-session-with-layout", layout_path.to_str().unwrap()]);
+        if background {
+            let created = isolated
+                .command("zellij")
+                .args(["--config", config.to_str().unwrap()])
+                .args(["attach", "--create-background", name, "options", "--default-layout"])
+                .arg(&layout_path)
+                .env_remove("ZELLIJ")
+                .env_remove("ZELLIJ_SESSION_NAME")
+                .env_remove("ZELLIJ_PANE_ID")
+                .env("DIRENV_DISABLE", "1")
+                .output()
+                .expect("zellij attach --create-background failed to spawn");
+            assert!(
+                created.status.success(),
+                "`zellij attach --create-background {name}` failed: {}",
+                String::from_utf8_lossy(&created.stderr)
+            );
+            // The plugins must finish loading while no client is connected:
+            // that is the window in which a permission result can get lost.
+            std::thread::sleep(Duration::from_secs(3));
+            cmd.args(["attach", name]);
+        } else {
+            cmd.args(["--session", name, "--new-session-with-layout", layout_path.to_str().unwrap()]);
+        }
         // Prevent inheriting the outer session's env vars.
         cmd.env_remove("ZELLIJ");
         cmd.env_remove("ZELLIJ_SESSION_NAME");
