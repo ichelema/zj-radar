@@ -38,7 +38,7 @@ the plugin.
 - **MSRV is Rust 1.95** (`rust-version` in the root `Cargo.toml`). CI's `msrv`
   job builds with exactly that toolchain.
 - For the full suite: `just`, `bats`, `shellcheck`, and `zellij` ≥ 0.46.0 for
-  the live E2E layer (CI builds the Zellij rev the plugin pins, `ZELLIJ_REV`
+  the live E2E layer (CI downloads the Zellij release named by `ZELLIJ_VERSION`
   in `e2e.yml`).
 - Optional: Nix. `nix develop` pins all of the above; `nix flake check` runs
   what the `hermetic` CI job runs.

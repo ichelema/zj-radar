@@ -23,11 +23,10 @@ permissions:
   contents: read
 
 env:
-  # Zellij 0.46 (the attention API the rail reads) is not released yet and
-  # nixpkgs has no build of it, so the suite runs against Zellij built from
-  # the same rev the plugin's zellij-tile pin uses (crates/plugin/Cargo.toml).
-  # Drop the build steps and this var once 0.46 ships in nixpkgs.
-  ZELLIJ_REV: 43c8710b3a9845f60d5a567c7410fc1197fabb66
+  # Zellij 0.46 (the attention API the rail reads) is not in the flake's
+  # nixpkgs yet, so the suite runs against the upstream release binary.
+  # Drop the download step and this var once 0.46 ships in nixpkgs.
+  ZELLIJ_VERSION: v0.46.0
 
 # A force-push to a PR shouldn't stack serial PTY suites; never cancel the
 # scheduled/release runs.
@@ -81,21 +80,22 @@ jobs:
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'Cargo.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
-      - uses: actions/cache@v4
-        id: zellij-cache
+      - name: download zellij ${{ env.ZELLIJ_VERSION }}
         if: steps.scope.outputs.run == 'true'
-        with:
-          path: ~/zellij-git
-          key: zellij-git-${{ runner.os }}-${{ env.ZELLIJ_REV }}
-      - name: build zellij ${{ env.ZELLIJ_REV }}
-        if: steps.scope.outputs.run == 'true' && steps.zellij-cache.outputs.cache-hit != 'true'
-        run: cargo install --locked --git https://github.com/zellij-org/zellij --rev "$ZELLIJ_REV" zellij --root ~/zellij-git
+        run: |
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) triple=x86_64-unknown-linux-musl ;;
+            Darwin-arm64) triple=aarch64-apple-darwin ;;
+            *) echo "no zellij release asset mapped for $(uname -sm)"; exit 1 ;;
+          esac
+          mkdir -p ~/zellij-bin
+          curl -LsSf "https://github.com/zellij-org/zellij/releases/download/${ZELLIJ_VERSION}/zellij-${triple}.tar.gz" | tar xz -C ~/zellij-bin
       - name: live e2e (L5)
         if: steps.scope.outputs.run == 'true'
-        # The git build goes ahead of the devshell's nixpkgs zellij on PATH.
+        # The release binary goes ahead of the devshell's nixpkgs zellij on PATH.
         # Set inside the devshell: an outer "$PATH" would expand to the
         # runner's PATH and drop the devshell's (just, bats, …).
-        run: nix develop -c sh -c 'PATH="$HOME/zellij-git/bin:$PATH"; zellij --version && just test-e2e'
+        run: nix develop -c sh -c 'PATH="$HOME/zellij-bin:$PATH"; zellij --version && just test-e2e'
       - name: file a failure issue (nightly visibility)
         if: failure() && github.event_name == 'schedule'
         uses: ./.github/actions/nightly-failure-issue
