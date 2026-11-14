@@ -40,7 +40,10 @@ two terminal signals:
   base64. Claude Code, Codex, pi, Opencode and omp emit it with no setup
   ([`producers.md`](producers.md)).
 - **OSC 133 shell-command tracking.** A shell that marks its prompts lets
-  Zellij see each command start, run, and exit with a code.
+  Zellij see each command start, run, and exit with a code. Zellij reports a
+  running command only with `attention { track_commands true; }`, off by
+  default in 0.46.0; a finished one is reported either way
+  ([`activity-model.md`](activity-model.md#4-where-the-status-comes-from)).
 
 Zellij picks the signal that wins for each pane and hands the plugin the
 result as structured data: `PaneInfo.attention` and `PaneInfo.program_status`

@@ -58,7 +58,9 @@ The installer script honors `ZJ_RADAR_VERSION` (release tag) and
 owns that session's config, so nothing under `~/.config/zellij` is read or
 edited. Consequences:
 
-- Your Zellij keybinds and theme do not apply inside `run` sessions.
+- Your Zellij keybinds and theme do not apply inside `run` sessions, nor
+  does your `attention` block: `track_commands` stays off, so running shell
+  commands get no row there.
 - Attaching to a session `run` did not create asks first.
 - Before launching, it pre-authorizes its own wasm in Zellij's
   `permissions.kdl` (backup at `permissions.kdl.zj-radar.bak`), so Zellij

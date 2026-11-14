@@ -77,8 +77,11 @@ manual setup, and the full removal list are in
 - Jump to the tab that needs you: click its row, or bind `attention-next`
   ([keybinds](https://github.com/marktoda/zj-radar/blob/main/docs/configuration.md#binding-keys-to-commands)).
 - Your Zellij stays yours: no new terminal, no tmux wrapper, no orchestrator.
-- Shell commands show up too, from Zellij's own command tracking: a running
-  command spins with an elapsed tag, a failed one shows its exit code.
+- Shell commands show up too, from Zellij's own command tracking: a failed
+  one shows its exit code when your shell marks its prompts (OSC 133);
+  without the marks Zellij cannot tell a failure from a success. With
+  `attention { track_commands true; }` in Zellij's `config.kdl` (off by
+  default) a running command spins with an elapsed tag.
 - Background work an agent reports separately (a subagent, a backgrounded
   test run) gets its own lines under the agent's row.
 - An `ssh` session into a host that runs Zellij shows that session's status
