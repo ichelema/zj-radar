@@ -21,8 +21,9 @@ sense the user needs animated. A `cargo build` is exactly what the spinner was
 made for.
 
 Zellij applies half of this rule before the plugin sees anything: it lists a
-shell command only once it has run for `done_threshold_secs` (default 10), and
-leaves out full-screen commands and commands you type into. The plugin applies
+running shell command only with `track_commands` on (off by default, §4) and
+once it has run for `done_threshold_secs` (default 10), and leaves out
+full-screen commands and commands you type into. The plugin applies
 the other half with the steady classes (§2).
 
 ## 2. The three orthogonal axes
@@ -157,12 +158,22 @@ program, the most severe record decides (§3). The wire format is in
 **Shell commands.** Zellij tracks commands through OSC 133 prompt marks,
 command panes, and the foreground process. Its rules, all on the Zellij side:
 
-- A command is working only after `done_threshold_secs` (default 10).
-- Full-screen commands and commands you type into are left out
-  (`track_commands`): editors, pagers, `htop`, an `ssh` shell.
+- A running command is working only with `track_commands` on, and only after
+  `done_threshold_secs` (default 10). Zellij 0.46.0 ships `track_commands`
+  off, so a running command gets no row until you turn it on in Zellij's
+  `config.kdl`:
+
+  ```kdl
+  attention {
+      track_commands true
+  }
+  ```
+
+- Full-screen commands and commands you type into are left out: editors,
+  pagers, `htop`, an `ssh` shell.
 - A successful command reports Done only if it ran at least
   `done_threshold_secs`; a failure always reports Error, with its exit code
-  when the shell reports one.
+  when the shell reports one. Both apply with `track_commands` off too.
 - A pane whose program reports OSC 7501 is not command-tracked.
 - Without the `ReadPaneContents` permission Zellij strips the command text;
   the plugin requests it.

@@ -60,4 +60,5 @@ it reads OSC 7501 through Zellij's `PaneInfo.attention` and `program_status`.
 A new agent needs no code; at most it needs an `app` token →
 `Kind` entry in the `kinds!` table in `crates/plugin/src/kind.rs`
 (`attention::kind_for_app` routes the token). Shell commands like `cargo test`
-come from Zellij's OSC 133 tracking, not from a producer.
+come from Zellij's OSC 133 tracking, not from a producer; a running one shows
+only with `attention { track_commands true }` (off by default in Zellij 0.46.0).
