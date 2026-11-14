@@ -62,14 +62,16 @@ A finished turn reads idle, and it never reaches `─ earlier ─`.
 
 ## Running shell commands get no row
 
-**Symptom:** a long `cargo test` or `sleep 30` shows nothing on the rail; the
-row appears only when the command fails or finishes.
+**Symptom:** a long `cargo test` or `sleep 30` shows nothing on the rail while
+it runs.
 
 **Why:** Zellij 0.46.0 ships `track_commands` off, so it never reports a
 running command as working.
 
 **Fix:** turn it on in Zellij's `config.kdl`
-([activity model](activity-model.md#4-where-the-status-comes-from)).
+([activity model](activity-model.md#4-where-the-status-comes-from)). A
+`zj-radar run` session ignores that file
+([install](install.md#try-it-without-touching-your-config-zj-radar-run)).
 
 ## Command rows show no command text
 

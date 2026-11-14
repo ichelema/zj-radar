@@ -172,8 +172,12 @@ command panes, and the foreground process. Its rules, all on the Zellij side:
 - Full-screen commands and commands you type into are left out: editors,
   pagers, `htop`, an `ssh` shell.
 - A successful command reports Done only if it ran at least
-  `done_threshold_secs`; a failure always reports Error, with its exit code
-  when the shell reports one. Both apply with `track_commands` off too.
+  `done_threshold_secs`; a failure always reports Error with its exit code.
+  Both apply with `track_commands` off too.
+- Zellij knows the exit code only from a shell that marks its prompts
+  (OSC 133) or from a command pane. Otherwise it sees only the foreground
+  process end: a command that ran at least `done_threshold_secs` reports
+  Done whatever its exit code, and a shorter one reports nothing.
 - A pane whose program reports OSC 7501 is not command-tracked.
 - Without the `ReadPaneContents` permission Zellij strips the command text;
   the plugin requests it.

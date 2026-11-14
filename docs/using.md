@@ -74,8 +74,9 @@ can also pick `⚗` test, `⚙` build, `⇡` deploy, or `❯` server
 **Shell commands.** Zellij tracks the commands you run in a shell, and each
 one gets a plain `$` row: a spinner while it runs, then `●` or `✗` with its
 exit code (`exit 1`) when it fails. The spinner needs Zellij's
-`track_commands`, off by default
-([how to turn it on](activity-model.md#4-where-the-status-comes-from)). The command text needs the
+`track_commands`, off by default, and the exit code needs a shell that marks
+its prompts (OSC 133)
+([details](activity-model.md#4-where-the-status-comes-from)). The command text needs the
 `ReadPaneContents` permission ([permissions](install.md#permissions));
 without it the row shows only the state.
 
