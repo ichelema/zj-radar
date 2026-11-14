@@ -190,6 +190,10 @@ background-task line under the pane's row.
 - A pane with children and no root record takes its status from its most
   severe child, which becomes the pane's row.
 - A child without `app` inherits the nearest ancestor's.
+- Zellij 0.46 reports a child that appears or goes away under a root that
+  stays `working` only at the pane's next update, such as a new root `msg`
+  or a tab switch, so its task line can show up or stop late
+  ([design](design.md#5-plugin--zellij-wiring)).
 
 `id` rules: at most 8 segments, each at most 32 bytes of
 `A-Z a-z 0-9 _ . + -`, at most 128 bytes in all. An invalid `id` drops the

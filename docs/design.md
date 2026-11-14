@@ -274,7 +274,21 @@ only to the plugins in each client's *active* tab. `PaneAttentionChanged`,
 `GlobalAttentionUpdate`, `CwdChanged`, and pipe messages reach every
 subscribed instance. A hidden rail therefore keeps each pane's attention
 current, but its tabs, topology, and child records wait for the manifest its
-reveal brings.
+reveal brings. That includes a child-only pane (Opencode): its row's status
+follows `PaneAttentionChanged`, its task lines do not.
+
+**Child records arrive late (Zellij 0.46).** `PaneUpdate` is the only event
+that carries `program_status`, and Zellij sends it only when a pane's
+resolved attention or frame marker changes (`attention/tracker.rs::resolve`),
+or its title changes. Storing a record (`on_signal`, `ProgramStatus` arm)
+does not mark the pane changed. So a child record added, changed, or cleared
+under a root that stays `working` produces no event at all, and the task line
+appears, or its spinner stops, only at the pane's next unrelated
+`PaneUpdate`: a new root `msg`, a tab switch, a rename. Claude Code hits it
+on every subagent: it rewrites only the records whose text changed, and under
+Zellij its title is static. No plugin-side fix exists: reading
+`get_pane_info` on a tick is the polling the push-driven rule forbids. The
+fix belongs in Zellij (§13).
 
 **Tab index footgun.** `TabInfo.position` is 0-indexed; `switch_tab_to` is
 1-indexed. `display_tab_number = position + 1` is used for both rendering and
@@ -648,3 +662,7 @@ to remove an old adapter.
 - **Collapse-to-strip toggle.**
 - **Agent-specific adapters.** An agent that does not emit OSC 7501 shows only
   as a shell command; the fix belongs in the agent.
+- **Upstream: report record changes.** Zellij should mark a pane changed
+  when its record set changes (`records.apply` already returns whether it
+  did), so a child record reaches the rail at once (§5, *Child records
+  arrive late*). Not fixed upstream as of 2026-11-13.
