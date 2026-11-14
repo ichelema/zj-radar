@@ -38,7 +38,7 @@ the plugin.
 - **MSRV is Rust 1.95** (`rust-version` in the root `Cargo.toml`). CI's `msrv`
   job builds with exactly that toolchain.
 - For the full suite: `just`, `bats`, `shellcheck`, and `zellij` ≥ 0.46.0 for
-  the live E2E layer (CI builds the Zellij rev the plugin pins, `ZELLIJ_REV`
+  the live E2E layer (CI downloads the Zellij release named by `ZELLIJ_VERSION`
   in `e2e.yml`).
 - Optional: Nix. `nix develop` pins all of the above; `nix flake check` runs
   what the `hermetic` CI job runs.
@@ -81,7 +81,6 @@ Some docs and assets are test inputs. Edit them through their test.
 | `docs/configuration.md` (both pipe names; every `cmd.v1` verb) | `config.rs`, `control.rs` |
 | `examples/radar-sidebar.kdl` | `crates/cli/src/layout.rs` |
 | Grant probe (`REQUIRED_PLUGIN_PERMISSIONS`) and Zellij version floor (`MIN_SUPPORTED_ZELLIJ`) | `cli_grant_probe_covers_the_exact_requested_permission_set` and `doctor_version_gate_matches_the_zellij_tile_pin`, text pins in `crates/plugin/src/lib.rs` |
-| `.github/workflows/e2e.yml` and `funnel.yml` (`ZELLIJ_REV`, the Zellij the live suite and the funnel build) | `workflows_build_the_zellij_rev_the_plugin_pins` in `crates/plugin/src/lib.rs`, against the `zellij-tile` rev |
 | `flake.nix` source filter | the inventory of every non-Rust file the hermetic build reads; a new `include_str!` outside crate sources needs an entry |
 
 The README quick start is run verbatim by `scripts/funnel.sh` on every release.

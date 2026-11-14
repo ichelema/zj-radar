@@ -45,9 +45,6 @@
           || (pkgs.lib.hasSuffix "/examples/radar-sidebar.kdl" path)
           # include_str!'d by the plugin (config.rs, control.rs docs guard tests).
           || (pkgs.lib.hasSuffix "/docs/configuration.md" path)
-          # include_str!'d by the plugin's ZELLIJ_REV guard test (lib.rs).
-          || (pkgs.lib.hasSuffix "/.github/workflows/e2e.yml" path)
-          || (pkgs.lib.hasSuffix "/.github/workflows/funnel.yml" path)
           # Recorded proptest failure seeds: without them the hermetic checks
           # would skip replaying known-bad cases instead of pinning the fixes.
           || (pkgs.lib.hasInfix "/proptest-regressions/" path)
