@@ -665,4 +665,6 @@ to remove an old adapter.
 - **Upstream: report record changes.** Zellij should mark a pane changed
   when its record set changes (`records.apply` already returns whether it
   did), so a child record reaches the rail at once (§5, *Child records
-  arrive late*). Not fixed upstream as of 2026-11-13.
+  arrive late*). Proposed in
+  [zellij#5906](https://github.com/zellij-org/zellij/pull/5906), open as of
+  2026-11-14.
