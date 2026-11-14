@@ -625,10 +625,9 @@ to remove an old adapter.
 
 ## 12. Build and packaging
 
-- Rust, `zellij-tile` pinned to a Zellij git rev at `=0.46.0` (0.46 is not on
-  crates.io yet), target `wasm32-wasip1`. Text-pin tests in `lib.rs` keep
-  `MIN_SUPPORTED_ZELLIJ` and the e2e and funnel workflows' `ZELLIJ_REV` on that pin. The
-  artifact is a binary crate, not `cdylib`: Zellij loads plugins as WASI
+- Rust, `zellij-tile` pinned at `=0.46.0` from crates.io, target
+  `wasm32-wasip1`. A text-pin test in `lib.rs` keeps `MIN_SUPPORTED_ZELLIJ`
+  on that pin. The artifact is a binary crate, not `cdylib`: Zellij loads plugins as WASI
   command modules and calls `_start`, which `register_plugin!`'s generated
   `main` provides.
 - Zellij runs one instance per tab per attached client (a detached client's

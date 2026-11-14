@@ -3,8 +3,7 @@
 #
 # Scope: advisories (RUSTSEC vulns in the tree we ship to users), licenses
 # (everything we statically link must be permissive), and sources (all deps
-# from crates.io, plus the one allowed git source below — no surprise
-# git/registry pulls). `bans` is deliberately
+# from crates.io — no surprise git/registry pulls). `bans` is deliberately
 # absent: duplicate-version noise without a policy need here.
 
 # Scan the SHIPPED tree only: dev-deps (the E2E PTY harness pulls portable-pty
@@ -43,6 +42,3 @@ multiple-versions = "allow"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# zellij-tile 0.46 (the attention API) is not on crates.io yet; the plugin
-# pins its git rev. Drop this once the plugin is back on a crates.io pin.
-allow-git = ["https://github.com/zellij-org/zellij"]
