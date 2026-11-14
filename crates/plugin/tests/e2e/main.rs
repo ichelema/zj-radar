@@ -71,10 +71,10 @@ fn harness_runs_on_a_private_zellij_server() {
 }
 
 /// The pane shells must never touch the caller's files through inherited
-/// variables. A caller `HISTFILE` once reached the bash panes, which loaded
-/// it, kept the last 500 lines and wrote it back on exit: every E2E run
-/// truncated the developer's shell history. A 600-line sentinel must come
-/// out of a session byte for byte.
+/// variables. A caller `HISTFILE` once reached the bash panes, which cut it
+/// to its last 500 lines at startup and rewrote it with their commands on exit:
+/// every E2E run truncated the developer's shell history. A 600-line
+/// sentinel must come out of a session byte for byte.
 #[test]
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
 fn pane_shells_leave_the_callers_history_alone() {
@@ -100,7 +100,8 @@ fn pane_shells_leave_the_callers_history_alone() {
     }
     session.emit_program_status(&osc("working", "history"));
     drop(session);
-    // A non-event: give the killed panes' shells time to write on exit.
+    // A non-event: the startup cut already happened; give the killed panes'
+    // shells time for their exit write too.
     std::thread::sleep(Duration::from_secs(2));
 
     let after = std::fs::read_to_string(&sentinel).unwrap();

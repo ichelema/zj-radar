@@ -15,12 +15,13 @@
 /// `DIRENV_DISABLE=1` to get a fast, clean shell.
 ///
 /// ## Pane shell and environment
-/// Every Zellij process starts from an empty environment plus an allowlist
-/// (`IsolatedEnvironment::env`), and the panes run `bash` from `PATH` with no
-/// user rc file. Caller variables would reach the pane shells otherwise:
-/// `HISTFILE` made bash truncate the developer's history, `ZDOTDIR` loaded
-/// their zsh rc. Typing into a pane goes through `run_in_shell`, which waits
-/// for the shell to answer instead of sleeping a fixed time.
+/// Every Zellij process the harness configures starts from an empty
+/// environment plus an allowlist (`IsolatedEnvironment::env`), and the panes
+/// run `bash` from `PATH` with no user rc file. Caller variables would reach
+/// the pane shells otherwise: `HISTFILE` made bash truncate the developer's
+/// history, `ZDOTDIR` loaded their zsh rc. The harness's typing helpers go
+/// through `run_in_shell`, which waits for the shell to answer instead of
+/// sleeping a fixed time.
 ///
 /// ## Permissions
 /// zj-radar calls `request_permission` on load. Zellij stores grants in:
@@ -129,8 +130,8 @@ impl IsolatedEnvironment {
                     .expect("failed to create isolated Zellij socket dir"),
             ),
             shell: std::env::var_os("PATH")
-                .and_then(|path| std::env::split_paths(&path).map(|dir| dir.join("bash")).find(|bash| bash.is_file()))
-                .expect("the e2e panes run bash, but there is no `bash` on PATH"),
+                .and_then(|path| find_bash(&path))
+                .expect("the e2e panes run bash, but there is no executable `bash` in an absolute PATH entry"),
         };
         // Zellij ≥ 0.46 opens its desktop-setup wizard over the terminal pane
         // of a home where it is not the default terminal yet, swallowing every
@@ -192,13 +193,16 @@ impl IsolatedEnvironment {
         }
     }
 
-    /// The whole environment of every Zellij process, and so of every pane
-    /// shell: the isolated paths plus a few pass-through variables. Anything
-    /// else the caller exports would reach the panes (`HISTFILE`, `ZDOTDIR`,
-    /// `ZELLIJ*` of an outer session). `SHELL` must be explicit: portable-pty
-    /// fills it from passwd, and a developer's zsh ran external commands at
-    /// startup (see `ZellijSession::run_in_shell`). The temp HOME has no
-    /// rc file, so bash reads only the system-wide one (`/etc/bash.bashrc`).
+    /// The whole environment of every Zellij process the harness configures
+    /// (`zellij --version` and the ambient session listing keep the caller's
+    /// on purpose), and so of every pane shell: the isolated paths plus a few
+    /// pass-through variables. Anything else the caller exports would get
+    /// through: `HISTFILE` and `ZDOTDIR` to the pane shells, an outer
+    /// session's `ZELLIJ*` to the client and server. `SHELL` must be explicit:
+    /// portable-pty fills it from passwd, and a developer's zsh ran external
+    /// commands at startup (see `ZellijSession::run_in_shell`). The temp HOME
+    /// has no rc file, so bash reads at most a system-wide one compiled into
+    /// its build (`/etc/bash.bashrc` on Arch).
     fn env(&self) -> Vec<(&'static str, std::ffi::OsString)> {
         let mut env: Vec<_> = ["PATH", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER"]
             .into_iter()
@@ -825,6 +829,44 @@ fn strip_ansi(raw: &[u8]) -> String {
         }
     }
     out
+}
+
+/// The first `bash` in `path` that exec would run. Only absolute entries:
+/// Zellij resolves a relative `SHELL` against the pane's cwd. Only executable
+/// files: a non-executable candidate leaves the pane without a shell, which
+/// surfaces 20 s later as an unanswered probe.
+fn find_bash(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join("bash"))
+        .find(|bash| std::fs::metadata(bash).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0))
+}
+
+#[test]
+fn find_bash_takes_only_what_exec_would_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::TempDir::new().unwrap();
+    let dir = |name: &str| {
+        let dir = root.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    };
+    let script = |dir: &Path, mode: u32| {
+        std::fs::write(dir.join("bash"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(dir.join("bash"), std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let (plain, folder, real, link) = (dir("plain"), dir("folder"), dir("real"), dir("link"));
+    script(&plain, 0o644);
+    std::fs::create_dir(folder.join("bash")).unwrap();
+    script(&real, 0o755);
+    std::os::unix::fs::symlink(real.join("bash"), link.join("bash")).unwrap();
+    let path = |dirs: &[&Path]| std::env::join_paths(dirs).unwrap();
+
+    // A relative entry, a non-executable file and a directory are skipped.
+    assert_eq!(find_bash(&path(&[Path::new("real"), &plain, &folder, &real])), Some(real.join("bash")));
+    assert_eq!(find_bash(&path(&[&link, &real])), Some(link.join("bash")), "a symlink to bash counts");
+    assert_eq!(find_bash(&path(&[&plain, &folder])), None);
 }
 
 /// Find the first occurrence of `marker` followed immediately by one or more
