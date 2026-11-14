@@ -274,21 +274,27 @@ only to the plugins in each client's *active* tab. `PaneAttentionChanged`,
 `GlobalAttentionUpdate`, `CwdChanged`, and pipe messages reach every
 subscribed instance. A hidden rail therefore keeps each pane's attention
 current, but its tabs, topology, and child records wait for the manifest its
-reveal brings. That includes a child-only pane (Opencode): its row's status
-follows `PaneAttentionChanged`, its task lines do not.
+reveal brings. That includes a child-only pane (Opencode): its row takes its
+status from the records (§4.1, *Child-only panes*), so the row waits too,
+unless a `blocked` or `error` child makes Zellij raise the pane, which
+`PaneAttentionChanged` does carry.
 
-**Child records arrive late (Zellij 0.46).** `PaneUpdate` is the only event
-that carries `program_status`, and Zellij sends it only when a pane's
-resolved attention or frame marker changes (`attention/tracker.rs::resolve`),
-or its title changes. Storing a record (`on_signal`, `ProgramStatus` arm)
-does not mark the pane changed. So a child record added, changed, or cleared
-under a root that stays `working` produces no event at all, and the task line
-appears, or its spinner stops, only at the pane's next unrelated
-`PaneUpdate`: a new root `msg`, a tab switch, a rename. Claude Code hits it
-on every subagent: it rewrites only the records whose text changed, and under
-Zellij its title is static. No plugin-side fix exists: reading
-`get_pane_info` on a tick is the polling the push-driven rule forbids. The
-fix belongs in Zellij (§13).
+**Child records arrive late (Zellij 0.46).** Of the events the rail
+subscribes to, only `PaneUpdate` carries `program_status`. `SessionUpdate`
+carries the same manifest to every instance, but Zellij does not send it on a
+record change, and the rail does not subscribe to it (§10). Storing a record
+(`attention/tracker.rs::on_signal`, `ProgramStatus` arm) does not mark the
+pane changed: `PaneUpdate` follows a change in any pane's resolved attention
+or frame marker (`resolve`), a title change, or a focus, layout, or tab
+change, never the record itself. So a `working`, `done`, or `idle` child
+added, changed, or cleared under a root that stays `working` produces no
+event, and its task line appears, or its spinner stops, only at the next
+unrelated `PaneUpdate`. A `blocked` or `error` child is not delayed: it raises
+the pane, so the resolved attention changes and both events follow at once.
+Claude Code 2.1.325 hits it on every subagent: it rewrites only the records
+whose text changed, and under a multiplexer its title does not animate. No
+plugin-side fix exists: reading `get_pane_info` on a tick is the polling the
+push-driven rule forbids. The fix belongs in Zellij (§13).
 
 **Tab index footgun.** `TabInfo.position` is 0-indexed; `switch_tab_to` is
 1-indexed. `display_tab_number = position + 1` is used for both rendering and
