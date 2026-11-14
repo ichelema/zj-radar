@@ -82,6 +82,9 @@ jobs:
           restore-prefixes-first-match: nix-${{ runner.os }}-
       - name: download zellij ${{ env.ZELLIJ_VERSION }}
         if: steps.scope.outputs.run == 'true'
+        # Explicit bash adds pipefail: macOS's bsdtar exits 0 on the empty
+        # stream a failed curl leaves, which would pass this step silently.
+        shell: bash
         run: |
           case "$(uname -s)-$(uname -m)" in
             Linux-x86_64) triple=x86_64-unknown-linux-musl ;;
