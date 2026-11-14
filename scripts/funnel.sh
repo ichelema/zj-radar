@@ -15,7 +15,7 @@
 # before (or regardless of) what `latest` points at.
 set -uo pipefail
 
-ZELLIJ_VERSION="v0.44.3"
+ZELLIJ_VERSION="v0.46.0"
 fail=0
 check() { # check <ok-message> <cmd...>
     local msg="$1"; shift
@@ -27,22 +27,14 @@ apt-get update -qq >/dev/null
 apt-get install -y -qq curl ca-certificates python3 >/dev/null 2>&1 \
     || { echo "FAIL: apt-get install of funnel prerequisites (curl/ca-certificates/python3)"; exit 1; }
 
-# ZELLIJ_BIN: a prebuilt zellij to use instead of the ${ZELLIJ_VERSION} release
-# download. funnel.yml passes the ZELLIJ_REV build while Zellij 0.46 has no
-# release binary (ICH-430).
-if [ -n "${ZELLIJ_BIN:-}" ]; then
-    install -m 0755 "$ZELLIJ_BIN" /usr/local/bin/zellij \
-        || { echo "FAIL: install of zellij from ${ZELLIJ_BIN}"; exit 1; }
-else
-    case "$(uname -m)" in
-        aarch64|arm64) zellij_triple="aarch64-unknown-linux-musl" ;;
-        x86_64)        zellij_triple="x86_64-unknown-linux-musl" ;;
-        *) echo "FAIL: unsupported arch $(uname -m)"; exit 1 ;;
-    esac
-    curl -LsSf "https://github.com/zellij-org/zellij/releases/download/${ZELLIJ_VERSION}/zellij-${zellij_triple}.tar.gz" \
-        | tar xz -C /usr/local/bin \
-        || { echo "FAIL: download/extract of zellij ${ZELLIJ_VERSION}"; exit 1; }
-fi
+case "$(uname -m)" in
+    aarch64|arm64) zellij_triple="aarch64-unknown-linux-musl" ;;
+    x86_64)        zellij_triple="x86_64-unknown-linux-musl" ;;
+    *) echo "FAIL: unsupported arch $(uname -m)"; exit 1 ;;
+esac
+curl -LsSf "https://github.com/zellij-org/zellij/releases/download/${ZELLIJ_VERSION}/zellij-${zellij_triple}.tar.gz" \
+    | tar xz -C /usr/local/bin \
+    || { echo "FAIL: download/extract of zellij ${ZELLIJ_VERSION}"; exit 1; }
 zellij_version="$(zellij --version)" || { echo "FAIL: installed zellij does not run"; exit 1; }
 echo "zellij: ${zellij_version}"
 
