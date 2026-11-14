@@ -389,9 +389,8 @@ fn multi_pane_renders_one_line_per_pane() {
     // Pane A (focused) and pane B (its sibling) each report a distinct message.
     session.emit_program_status(&osc("working", "taska"));
     session.emit_program_status_in_next_pane(&osc("working", "taskb"));
-
-    // Extra settle time so both renders complete before we snapshot.
-    std::thread::sleep(std::time::Duration::from_millis(600));
+    let five = std::time::Duration::from_secs(5);
+    let _ = session.wait_for_sidebar(32, "taska", five) && session.wait_for_sidebar(32, "taskb", five);
 
     // Parse the final PTY frame through vt100 and extract the left 32 columns.
     let screen = session.screen();
@@ -438,7 +437,12 @@ fn focused_pane_line_is_highlighted_and_follows_focus() {
 
     session.emit_program_status(&osc("working", "taska"));
     session.emit_program_status_in_next_pane(&osc("working", "taskb"));
-    assert!(session.wait_for_sidebar(32, "taskb", Duration::from_secs(5)), "both panes must render");
+    assert!(
+        session.wait_for_sidebar(32, "taska", Duration::from_secs(5))
+            && session.wait_for_sidebar(32, "taskb", Duration::from_secs(5)),
+        "both panes must render;\nsidebar:\n{}",
+        sidebar_region(&session.screen(), 32)
+    );
 
     // (row bg of pane A's line, row bg of pane B's line, row bg of the tab header)
     let bands = |s: &ZellijSession| {
@@ -542,7 +546,7 @@ fn rendered_sidebar_paints_focused_card_with_text_and_tint() {
 
     // Working agent on the focused pane → its tab is the active (focused) card.
     session.emit_program_status(&osc("working", "building"));
-    std::thread::sleep(std::time::Duration::from_millis(800));
+    let _ = session.wait_for_sidebar(32, "building", std::time::Duration::from_secs(5));
 
     let screen = session.screen();
     let sidebar = sidebar_region(&screen, 32);
@@ -1021,7 +1025,7 @@ fn rail_paints_every_column_of_its_pane() {
     // one tab exists and it's the focused one) -> card_tint picks
     // theme.surface_active for its row (crates/plugin/src/render.rs card_tint).
     session.emit_program_status(&osc("working", "building"));
-    std::thread::sleep(std::time::Duration::from_millis(800));
+    let _ = session.wait_for_sidebar(40, "building", std::time::Duration::from_secs(5));
 
     let screen = session.screen();
     let (screen_rows, screen_cols) = screen.size();

@@ -48,6 +48,7 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -64,6 +65,8 @@ pub struct ZellijSession {
     /// this test session. The owner removes it after teardown; siblings borrow
     /// the same root so cross-session tests still share one private server.
     isolated: IsolatedEnvironment,
+    /// Counter that makes every `wait_for_shell` marker unique.
+    probes: AtomicU32,
 }
 
 /// Who owns the on-disk lifetime of an isolated test environment.
@@ -175,8 +178,12 @@ impl IsolatedEnvironment {
         }
     }
 
+    // `SHELL` pins the panes to a bare bash: the caller's shell would load its
+    // own rc files (zsh follows an inherited `ZDOTDIR` out of the temp HOME),
+    // and zsh with no rc at all opens its new-user wizard over the pane.
     fn configure_command(&self, command: &mut Command) {
         command
+            .env("SHELL", "/bin/bash")
             .env("HOME", self.home())
             .env("XDG_CACHE_HOME", self.cache_home())
             .env("XDG_CONFIG_HOME", self.config_home())
@@ -193,6 +200,7 @@ impl IsolatedEnvironment {
     }
 
     fn configure_builder(&self, command: &mut CommandBuilder) {
+        command.env("SHELL", "/bin/bash");
         command.env("HOME", self.home());
         command.env("XDG_CACHE_HOME", self.cache_home());
         command.env("XDG_CONFIG_HOME", self.config_home());
@@ -344,6 +352,7 @@ impl ZellijSession {
             buf,
             size: Mutex::new((rows, cols)),
             isolated,
+            probes: AtomicU32::new(0),
         };
         s.wait_until_ready();
         s
@@ -405,15 +414,7 @@ impl ZellijSession {
     /// In a session connected to an existing Zellij server the terminal pane
     /// typically gets pane_id=0, but we verify at runtime to be safe.
     pub fn discover_terminal_pane_id(&self) -> u32 {
-        // Inject: echo "ZPID=$ZELLIJ_PANE_ID"
-        let _ = self
-            .isolated
-            .command("zellij")
-            .args(["--session", &self.name, "action", "write-chars", r#"echo "ZPID=$ZELLIJ_PANE_ID""#])
-            .output();
-        // Send Enter (keycode 13).
-        let _ = self.isolated.command("zellij").args(["--session", &self.name, "action", "write", "13"]).output();
-        std::thread::sleep(Duration::from_millis(800));
+        self.run_in_shell(r#"echo "ZPID=$ZELLIJ_PANE_ID""#);
 
         let screen = self.dump_screen();
         if let Some(cap) = regex_capture_u32(r"ZPID=(\d+)", &screen) {
@@ -430,11 +431,40 @@ impl ZellijSession {
     /// sees it. `body` is the `:`-separated pair list; `msg`/`title` values
     /// must be base64.
     pub fn emit_program_status(&self, body: &str) {
-        let cmd = format!(r"printf '\033]7501;%s\033\\' '{body}'");
-        let _ = self.isolated.command("zellij").args(["--session", &self.name, "action", "write-chars", &cmd]).output();
-        let _ = self.isolated.command("zellij").args(["--session", &self.name, "action", "write", "13"]).output();
-        // Allow Zellij to hand the new attention to the plugin and re-render.
-        std::thread::sleep(Duration::from_millis(500));
+        self.run_in_shell(&format!(r"printf '\033]7501;%s\033\\' '{body}'"));
+    }
+
+    /// Run `line` in the focused pane's shell and return once it has run.
+    /// Text typed before the shell is ready is dropped without a trace, and
+    /// the plugin's " RADAR" can render before the prompt does (ICH-471), so
+    /// wait for the shell first; the probe after `line` returns only once
+    /// the shell has run it.
+    fn run_in_shell(&self, line: &str) {
+        self.wait_for_shell();
+        self.type_line(line);
+        self.wait_for_shell();
+    }
+
+    /// Block until the focused pane's shell answers a unique `echo`, typing it
+    /// again every 2s while it doesn't: a probe lost before the shell was
+    /// ready never comes back. The typed command line never equals the bare
+    /// marker, so only the echo's output matches.
+    fn wait_for_shell(&self) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            let marker = format!("ZJR_READY_{}", self.probes.fetch_add(1, Ordering::Relaxed));
+            self.type_line(&format!("echo {marker}"));
+            if self.wait_until(Duration::from_secs(2), |s| s.dump_screen().lines().any(|l| l.trim() == marker)) {
+                return;
+            }
+        }
+        panic!("the shell in session '{}' never answered a probe;\ndump-screen:\n{}", self.name, self.dump_screen());
+    }
+
+    /// Type `line` into the focused pane, then Enter (keycode 13).
+    fn type_line(&self, line: &str) {
+        let _ = self.action(&["write-chars", line]);
+        let _ = self.action(&["write", "13"]);
     }
 
     /// `emit_program_status` from the next pane in the tab (focus-next, emit,
@@ -457,14 +487,7 @@ impl ZellijSession {
         let _ = self.action(&["focus-next-pane"]);
         std::thread::sleep(Duration::from_millis(300));
 
-        // Inject `echo ZPID2=$ZELLIJ_PANE_ID` into the newly focused pane.
-        let _ = self
-            .isolated
-            .command("zellij")
-            .args(["--session", &self.name, "action", "write-chars", r#"echo "ZPID2=$ZELLIJ_PANE_ID""#])
-            .output();
-        let _ = self.isolated.command("zellij").args(["--session", &self.name, "action", "write", "13"]).output();
-        std::thread::sleep(Duration::from_millis(600));
+        self.run_in_shell(r#"echo "ZPID2=$ZELLIJ_PANE_ID""#);
 
         let screen = self.dump_screen();
         let id = regex_capture_u32(r"ZPID2=(\d+)", &screen);
