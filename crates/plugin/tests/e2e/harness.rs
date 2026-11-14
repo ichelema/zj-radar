@@ -14,6 +14,15 @@
 /// 30+ seconds to initialize. We use `/tmp` as CWD in the test layout and set
 /// `DIRENV_DISABLE=1` to get a fast, clean shell.
 ///
+/// ## Pane shell and environment
+/// Every Zellij process the harness configures starts from an empty
+/// environment plus an allowlist (`IsolatedEnvironment::env`), and the panes
+/// run `bash` from `PATH` with no user rc file. Caller variables would reach
+/// the pane shells otherwise: `HISTFILE` made bash truncate the developer's
+/// history, `ZDOTDIR` loaded their zsh rc. The harness's typing helpers go
+/// through `run_in_shell`, which waits for the shell to answer instead of
+/// sleeping a fixed time.
+///
 /// ## Permissions
 /// zj-radar calls `request_permission` on load. Zellij stores grants in:
 /// - `~/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl` (macOS)
@@ -48,6 +57,7 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -64,6 +74,8 @@ pub struct ZellijSession {
     /// this test session. The owner removes it after teardown; siblings borrow
     /// the same root so cross-session tests still share one private server.
     isolated: IsolatedEnvironment,
+    /// Counter that makes every `wait_for_shell` marker unique.
+    probes: AtomicU32,
 }
 
 /// Who owns the on-disk lifetime of an isolated test environment.
@@ -101,6 +113,8 @@ pub struct IsolatedEnvironment {
     /// macOS the default tempdir (`/var/folders/.../T/...`) leaves a budget of
     /// zero and every `--session` name is rejected.
     socket: EnvironmentRoot,
+    /// `bash` resolved from `PATH`: a fixed `/bin/bash` is absent on NixOS.
+    shell: std::path::PathBuf,
 }
 
 impl IsolatedEnvironment {
@@ -115,6 +129,9 @@ impl IsolatedEnvironment {
                     .tempdir_in("/tmp")
                     .expect("failed to create isolated Zellij socket dir"),
             ),
+            shell: std::env::var_os("PATH")
+                .and_then(|path| find_bash(&path))
+                .expect("the e2e panes run bash, but there is no executable `bash` in an absolute PATH entry"),
         };
         // Zellij ≥ 0.46 opens its desktop-setup wizard over the terminal pane
         // of a home where it is not the default terminal yet, swallowing every
@@ -135,6 +152,7 @@ impl IsolatedEnvironment {
         Self {
             root: EnvironmentRoot::Shared(self.root.path().to_path_buf()),
             socket: EnvironmentRoot::Shared(self.socket.path().to_path_buf()),
+            shell: self.shell.clone(),
         }
     }
 
@@ -175,15 +193,34 @@ impl IsolatedEnvironment {
         }
     }
 
+    /// The whole environment of every Zellij process the harness configures
+    /// (`zellij --version` and the ambient session listing keep the caller's
+    /// on purpose), and so of every pane shell: the isolated paths plus a few
+    /// pass-through variables. Anything else the caller exports would get
+    /// through: `HISTFILE` and `ZDOTDIR` to the pane shells, an outer
+    /// session's `ZELLIJ*` to the client and server. `SHELL` must be explicit:
+    /// portable-pty fills it from passwd, and a developer's zsh ran external
+    /// commands at startup (see `ZellijSession::run_in_shell`). The temp HOME
+    /// has no rc file, so bash reads at most a system-wide one compiled into
+    /// its build (`/etc/bash.bashrc` on Arch).
+    fn env(&self) -> Vec<(&'static str, std::ffi::OsString)> {
+        let mut env: Vec<_> = ["PATH", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER"]
+            .into_iter()
+            .filter_map(|key| std::env::var_os(key).map(|value| (key, value)))
+            .collect();
+        env.extend([
+            ("SHELL", self.shell.clone().into()),
+            ("HOME", self.home().into()),
+            ("XDG_CACHE_HOME", self.cache_home().into()),
+            ("XDG_CONFIG_HOME", self.config_home().into()),
+            ("XDG_DATA_HOME", self.data_home().into()),
+            ("ZELLIJ_SOCKET_DIR", self.socket_dir().into()),
+        ]);
+        env
+    }
+
     fn configure_command(&self, command: &mut Command) {
-        command
-            .env("HOME", self.home())
-            .env("XDG_CACHE_HOME", self.cache_home())
-            .env("XDG_CONFIG_HOME", self.config_home())
-            .env("XDG_DATA_HOME", self.data_home())
-            .env("ZELLIJ_SOCKET_DIR", self.socket_dir())
-            .env_remove("ZELLIJ_CONFIG_FILE")
-            .env_remove("ZELLIJ_CONFIG_DIR");
+        command.env_clear().envs(self.env());
     }
 
     fn command(&self, program: &str) -> Command {
@@ -193,13 +230,10 @@ impl IsolatedEnvironment {
     }
 
     fn configure_builder(&self, command: &mut CommandBuilder) {
-        command.env("HOME", self.home());
-        command.env("XDG_CACHE_HOME", self.cache_home());
-        command.env("XDG_CONFIG_HOME", self.config_home());
-        command.env("XDG_DATA_HOME", self.data_home());
-        command.env("ZELLIJ_SOCKET_DIR", self.socket_dir());
-        command.env_remove("ZELLIJ_CONFIG_FILE");
-        command.env_remove("ZELLIJ_CONFIG_DIR");
+        command.env_clear();
+        for (key, value) in self.env() {
+            command.env(key, value);
+        }
     }
 }
 
@@ -292,9 +326,6 @@ impl ZellijSession {
                 .args(["--config", config.to_str().unwrap()])
                 .args(["attach", "--create-background", name, "options", "--default-layout"])
                 .arg(&layout_path)
-                .env_remove("ZELLIJ")
-                .env_remove("ZELLIJ_SESSION_NAME")
-                .env_remove("ZELLIJ_PANE_ID")
                 .env("DIRENV_DISABLE", "1")
                 .output()
                 .expect("zellij attach --create-background failed to spawn");
@@ -310,10 +341,7 @@ impl ZellijSession {
         } else {
             cmd.args(["--session", name, "--new-session-with-layout", layout_path.to_str().unwrap()]);
         }
-        // Prevent inheriting the outer session's env vars.
-        cmd.env_remove("ZELLIJ");
-        cmd.env_remove("ZELLIJ_SESSION_NAME");
-        cmd.env_remove("ZELLIJ_PANE_ID");
+        // Starts from an empty environment: no outer session's `ZELLIJ*` vars.
         isolated.configure_builder(&mut cmd);
         // Disable direnv/devenv to avoid slow shell initialization (30+ s).
         cmd.env("DIRENV_DISABLE", "1");
@@ -344,6 +372,7 @@ impl ZellijSession {
             buf,
             size: Mutex::new((rows, cols)),
             isolated,
+            probes: AtomicU32::new(0),
         };
         s.wait_until_ready();
         s
@@ -405,15 +434,7 @@ impl ZellijSession {
     /// In a session connected to an existing Zellij server the terminal pane
     /// typically gets pane_id=0, but we verify at runtime to be safe.
     pub fn discover_terminal_pane_id(&self) -> u32 {
-        // Inject: echo "ZPID=$ZELLIJ_PANE_ID"
-        let _ = self
-            .isolated
-            .command("zellij")
-            .args(["--session", &self.name, "action", "write-chars", r#"echo "ZPID=$ZELLIJ_PANE_ID""#])
-            .output();
-        // Send Enter (keycode 13).
-        let _ = self.isolated.command("zellij").args(["--session", &self.name, "action", "write", "13"]).output();
-        std::thread::sleep(Duration::from_millis(800));
+        self.run_in_shell(r#"echo "ZPID=$ZELLIJ_PANE_ID""#);
 
         let screen = self.dump_screen();
         if let Some(cap) = regex_capture_u32(r"ZPID=(\d+)", &screen) {
@@ -430,11 +451,48 @@ impl ZellijSession {
     /// sees it. `body` is the `:`-separated pair list; `msg`/`title` values
     /// must be base64.
     pub fn emit_program_status(&self, body: &str) {
-        let cmd = format!(r"printf '\033]7501;%s\033\\' '{body}'");
-        let _ = self.isolated.command("zellij").args(["--session", &self.name, "action", "write-chars", &cmd]).output();
-        let _ = self.isolated.command("zellij").args(["--session", &self.name, "action", "write", "13"]).output();
-        // Allow Zellij to hand the new attention to the plugin and re-render.
-        std::thread::sleep(Duration::from_millis(500));
+        self.run_in_shell(&format!(r"printf '\033]7501;%s\033\\' '{body}'"));
+    }
+
+    /// Run `line` in the focused pane's shell and return once it has run: the
+    /// probe before proves the shell reads input, the probe after proves
+    /// `line` ran. No fixed sleep to under-wait on a loaded machine.
+    ///
+    /// Invariant: no external command may hold the pane's foreground around
+    /// an emitted status. Zellij samples each pane's foreground process about
+    /// once a second, and when it goes from a command to none after a status
+    /// arrived it drops the pane's transient records
+    /// (`attention::tracker::foreground_changed`): the status renders, then
+    /// vanishes. A developer's zsh running external commands at startup did
+    /// exactly that to a test's first status (ICH-471). The probes cannot see
+    /// it, since builtins like `echo` and `printf` never become the foreground.
+    fn run_in_shell(&self, line: &str) {
+        self.wait_for_shell();
+        self.type_line(line);
+        self.wait_for_shell();
+    }
+
+    /// Block until the focused pane's shell answers a unique `echo`, typing it
+    /// again every 2s while it doesn't. A slow shell runs the queued probes
+    /// later, and only the newest marker counts; text typed before the pane
+    /// exists is lost, which a retry covers. The typed command line never
+    /// equals the bare marker, so only the echo's output matches.
+    fn wait_for_shell(&self) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            let marker = format!("ZJR_READY_{}", self.probes.fetch_add(1, Ordering::Relaxed));
+            self.type_line(&format!("echo {marker}"));
+            if self.wait_until(Duration::from_secs(2), |s| s.dump_screen().lines().any(|l| l.trim() == marker)) {
+                return;
+            }
+        }
+        panic!("the shell in session '{}' never answered a probe;\ndump-screen:\n{}", self.name, self.dump_screen());
+    }
+
+    /// Type `line` into the focused pane, then Enter (keycode 13).
+    fn type_line(&self, line: &str) {
+        let _ = self.action(&["write-chars", line]);
+        let _ = self.action(&["write", "13"]);
     }
 
     /// `emit_program_status` from the next pane in the tab (focus-next, emit,
@@ -457,14 +515,7 @@ impl ZellijSession {
         let _ = self.action(&["focus-next-pane"]);
         std::thread::sleep(Duration::from_millis(300));
 
-        // Inject `echo ZPID2=$ZELLIJ_PANE_ID` into the newly focused pane.
-        let _ = self
-            .isolated
-            .command("zellij")
-            .args(["--session", &self.name, "action", "write-chars", r#"echo "ZPID2=$ZELLIJ_PANE_ID""#])
-            .output();
-        let _ = self.isolated.command("zellij").args(["--session", &self.name, "action", "write", "13"]).output();
-        std::thread::sleep(Duration::from_millis(600));
+        self.run_in_shell(r#"echo "ZPID2=$ZELLIJ_PANE_ID""#);
 
         let screen = self.dump_screen();
         let id = regex_capture_u32(r"ZPID2=(\d+)", &screen);
@@ -778,6 +829,44 @@ fn strip_ansi(raw: &[u8]) -> String {
         }
     }
     out
+}
+
+/// The first `bash` in `path` that exec would run. Only absolute entries:
+/// Zellij resolves a relative `SHELL` against the pane's cwd. Only executable
+/// files: a non-executable candidate leaves the pane without a shell, which
+/// surfaces 20 s later as an unanswered probe.
+fn find_bash(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join("bash"))
+        .find(|bash| std::fs::metadata(bash).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0))
+}
+
+#[test]
+fn find_bash_takes_only_what_exec_would_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::TempDir::new().unwrap();
+    let dir = |name: &str| {
+        let dir = root.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    };
+    let script = |dir: &Path, mode: u32| {
+        std::fs::write(dir.join("bash"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(dir.join("bash"), std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let (plain, folder, real, link) = (dir("plain"), dir("folder"), dir("real"), dir("link"));
+    script(&plain, 0o644);
+    std::fs::create_dir(folder.join("bash")).unwrap();
+    script(&real, 0o755);
+    std::os::unix::fs::symlink(real.join("bash"), link.join("bash")).unwrap();
+    let path = |dirs: &[&Path]| std::env::join_paths(dirs).unwrap();
+
+    // A relative entry, a non-executable file and a directory are skipped.
+    assert_eq!(find_bash(&path(&[Path::new("real"), &plain, &folder, &real])), Some(real.join("bash")));
+    assert_eq!(find_bash(&path(&[&link, &real])), Some(link.join("bash")), "a symlink to bash counts");
+    assert_eq!(find_bash(&path(&[&plain, &folder])), None);
 }
 
 /// Find the first occurrence of `marker` followed immediately by one or more
