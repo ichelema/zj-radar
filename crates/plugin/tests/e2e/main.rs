@@ -70,6 +70,48 @@ fn harness_runs_on_a_private_zellij_server() {
     );
 }
 
+/// The pane shells must never touch the caller's files through inherited
+/// variables. A caller `HISTFILE` once reached the bash panes, which loaded
+/// it, kept the last 500 lines and wrote it back on exit: every E2E run
+/// truncated the developer's shell history. A 600-line sentinel must come
+/// out of a session byte for byte.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn pane_shells_leave_the_callers_history_alone() {
+    let wasm = plugin_wasm_path();
+    assert!(wasm.exists(), "Plugin wasm not found at {:?}", wasm);
+    let sentinel_dir = tempfile::TempDir::new().unwrap();
+    let sentinel = sentinel_dir.path().join("history");
+    let lines: String = (0..600).map(|n| format!("echo sentinel-{n}\n")).collect();
+    std::fs::write(&sentinel, &lines).unwrap();
+
+    // The server, and with it every pane, takes its environment at `start`.
+    let previous = std::env::var_os("HISTFILE");
+    std::env::set_var("HISTFILE", &sentinel);
+    let session = ZellijSession::start(
+        &format!("zjr_histfile_{}", std::process::id()),
+        &sidebar_layout(&wasm),
+        &wasm,
+        pre_grant_permissions(&wasm),
+    );
+    match previous {
+        Some(value) => std::env::set_var("HISTFILE", value),
+        None => std::env::remove_var("HISTFILE"),
+    }
+    session.emit_program_status(&osc("working", "history"));
+    drop(session);
+    // A non-event: give the killed panes' shells time to write on exit.
+    std::thread::sleep(Duration::from_secs(2));
+
+    let after = std::fs::read_to_string(&sentinel).unwrap();
+    assert!(
+        after == lines,
+        "a pane shell rewrote the caller's HISTFILE: {} lines now, last: {:?}",
+        after.lines().count(),
+        after.lines().last()
+    );
+}
+
 /// Smoke test: start Zellij with the plugin sidebar, report a working agent
 /// over OSC 7501, and assert that its message appears in the rendered screen.
 ///

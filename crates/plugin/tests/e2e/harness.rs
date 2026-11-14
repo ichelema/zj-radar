@@ -14,6 +14,14 @@
 /// 30+ seconds to initialize. We use `/tmp` as CWD in the test layout and set
 /// `DIRENV_DISABLE=1` to get a fast, clean shell.
 ///
+/// ## Pane shell and environment
+/// Every Zellij process starts from an empty environment plus an allowlist
+/// (`IsolatedEnvironment::env`), and the panes run `bash` from `PATH` with no
+/// user rc file. Caller variables would reach the pane shells otherwise:
+/// `HISTFILE` made bash truncate the developer's history, `ZDOTDIR` loaded
+/// their zsh rc. Typing into a pane goes through `run_in_shell`, which waits
+/// for the shell to answer instead of sleeping a fixed time.
+///
 /// ## Permissions
 /// zj-radar calls `request_permission` on load. Zellij stores grants in:
 /// - `~/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl` (macOS)
@@ -104,6 +112,8 @@ pub struct IsolatedEnvironment {
     /// macOS the default tempdir (`/var/folders/.../T/...`) leaves a budget of
     /// zero and every `--session` name is rejected.
     socket: EnvironmentRoot,
+    /// `bash` resolved from `PATH`: a fixed `/bin/bash` is absent on NixOS.
+    shell: std::path::PathBuf,
 }
 
 impl IsolatedEnvironment {
@@ -118,6 +128,9 @@ impl IsolatedEnvironment {
                     .tempdir_in("/tmp")
                     .expect("failed to create isolated Zellij socket dir"),
             ),
+            shell: std::env::var_os("PATH")
+                .and_then(|path| std::env::split_paths(&path).map(|dir| dir.join("bash")).find(|bash| bash.is_file()))
+                .expect("the e2e panes run bash, but there is no `bash` on PATH"),
         };
         // Zellij ≥ 0.46 opens its desktop-setup wizard over the terminal pane
         // of a home where it is not the default terminal yet, swallowing every
@@ -138,6 +151,7 @@ impl IsolatedEnvironment {
         Self {
             root: EnvironmentRoot::Shared(self.root.path().to_path_buf()),
             socket: EnvironmentRoot::Shared(self.socket.path().to_path_buf()),
+            shell: self.shell.clone(),
         }
     }
 
@@ -178,19 +192,31 @@ impl IsolatedEnvironment {
         }
     }
 
-    // `SHELL` pins the panes to a bare bash: the caller's shell would load its
-    // own rc files (zsh follows an inherited `ZDOTDIR` out of the temp HOME),
-    // and zsh with no rc at all opens its new-user wizard over the pane.
+    /// The whole environment of every Zellij process, and so of every pane
+    /// shell: the isolated paths plus a few pass-through variables. Anything
+    /// else the caller exports would reach the panes (`HISTFILE`, `ZDOTDIR`,
+    /// `ZELLIJ*` of an outer session). `SHELL` must be explicit: portable-pty
+    /// fills it from passwd, and a developer's zsh ran external commands at
+    /// startup (see `ZellijSession::run_in_shell`). The temp HOME has no
+    /// rc file, so bash reads only the system-wide one (`/etc/bash.bashrc`).
+    fn env(&self) -> Vec<(&'static str, std::ffi::OsString)> {
+        let mut env: Vec<_> = ["PATH", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER"]
+            .into_iter()
+            .filter_map(|key| std::env::var_os(key).map(|value| (key, value)))
+            .collect();
+        env.extend([
+            ("SHELL", self.shell.clone().into()),
+            ("HOME", self.home().into()),
+            ("XDG_CACHE_HOME", self.cache_home().into()),
+            ("XDG_CONFIG_HOME", self.config_home().into()),
+            ("XDG_DATA_HOME", self.data_home().into()),
+            ("ZELLIJ_SOCKET_DIR", self.socket_dir().into()),
+        ]);
+        env
+    }
+
     fn configure_command(&self, command: &mut Command) {
-        command
-            .env("SHELL", "/bin/bash")
-            .env("HOME", self.home())
-            .env("XDG_CACHE_HOME", self.cache_home())
-            .env("XDG_CONFIG_HOME", self.config_home())
-            .env("XDG_DATA_HOME", self.data_home())
-            .env("ZELLIJ_SOCKET_DIR", self.socket_dir())
-            .env_remove("ZELLIJ_CONFIG_FILE")
-            .env_remove("ZELLIJ_CONFIG_DIR");
+        command.env_clear().envs(self.env());
     }
 
     fn command(&self, program: &str) -> Command {
@@ -200,14 +226,10 @@ impl IsolatedEnvironment {
     }
 
     fn configure_builder(&self, command: &mut CommandBuilder) {
-        command.env("SHELL", "/bin/bash");
-        command.env("HOME", self.home());
-        command.env("XDG_CACHE_HOME", self.cache_home());
-        command.env("XDG_CONFIG_HOME", self.config_home());
-        command.env("XDG_DATA_HOME", self.data_home());
-        command.env("ZELLIJ_SOCKET_DIR", self.socket_dir());
-        command.env_remove("ZELLIJ_CONFIG_FILE");
-        command.env_remove("ZELLIJ_CONFIG_DIR");
+        command.env_clear();
+        for (key, value) in self.env() {
+            command.env(key, value);
+        }
     }
 }
 
@@ -300,9 +322,6 @@ impl ZellijSession {
                 .args(["--config", config.to_str().unwrap()])
                 .args(["attach", "--create-background", name, "options", "--default-layout"])
                 .arg(&layout_path)
-                .env_remove("ZELLIJ")
-                .env_remove("ZELLIJ_SESSION_NAME")
-                .env_remove("ZELLIJ_PANE_ID")
                 .env("DIRENV_DISABLE", "1")
                 .output()
                 .expect("zellij attach --create-background failed to spawn");
@@ -318,10 +337,7 @@ impl ZellijSession {
         } else {
             cmd.args(["--session", name, "--new-session-with-layout", layout_path.to_str().unwrap()]);
         }
-        // Prevent inheriting the outer session's env vars.
-        cmd.env_remove("ZELLIJ");
-        cmd.env_remove("ZELLIJ_SESSION_NAME");
-        cmd.env_remove("ZELLIJ_PANE_ID");
+        // Starts from an empty environment: no outer session's `ZELLIJ*` vars.
         isolated.configure_builder(&mut cmd);
         // Disable direnv/devenv to avoid slow shell initialization (30+ s).
         cmd.env("DIRENV_DISABLE", "1");
@@ -434,11 +450,18 @@ impl ZellijSession {
         self.run_in_shell(&format!(r"printf '\033]7501;%s\033\\' '{body}'"));
     }
 
-    /// Run `line` in the focused pane's shell and return once it has run.
-    /// Text typed before the shell is ready is dropped without a trace, and
-    /// the plugin's " RADAR" can render before the prompt does (ICH-471), so
-    /// wait for the shell first; the probe after `line` returns only once
-    /// the shell has run it.
+    /// Run `line` in the focused pane's shell and return once it has run: the
+    /// probe before proves the shell reads input, the probe after proves
+    /// `line` ran. No fixed sleep to under-wait on a loaded machine.
+    ///
+    /// Invariant: no external command may hold the pane's foreground around
+    /// an emitted status. Zellij samples each pane's foreground process about
+    /// once a second, and when it goes from a command to none after a status
+    /// arrived it drops the pane's transient records
+    /// (`attention::tracker::foreground_changed`): the status renders, then
+    /// vanishes. A developer's zsh running external commands at startup did
+    /// exactly that to a test's first status (ICH-471). The probes cannot see
+    /// it, since builtins like `echo` and `printf` never become the foreground.
     fn run_in_shell(&self, line: &str) {
         self.wait_for_shell();
         self.type_line(line);
@@ -446,9 +469,10 @@ impl ZellijSession {
     }
 
     /// Block until the focused pane's shell answers a unique `echo`, typing it
-    /// again every 2s while it doesn't: a probe lost before the shell was
-    /// ready never comes back. The typed command line never equals the bare
-    /// marker, so only the echo's output matches.
+    /// again every 2s while it doesn't. A slow shell runs the queued probes
+    /// later, and only the newest marker counts; text typed before the pane
+    /// exists is lost, which a retry covers. The typed command line never
+    /// equals the bare marker, so only the echo's output matches.
     fn wait_for_shell(&self) {
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
