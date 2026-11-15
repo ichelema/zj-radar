@@ -15,6 +15,7 @@ pub(crate) enum Verb {
     AttentionPrev,
     SessionNext,
     SessionPrev,
+    SidebarToggle,
 }
 
 /// Parse a bare verb string. Trims surrounding whitespace; case-sensitive
@@ -25,6 +26,7 @@ pub(crate) fn parse(s: &str) -> Option<Verb> {
         "attention-prev" => Some(Verb::AttentionPrev),
         "session-next" => Some(Verb::SessionNext),
         "session-prev" => Some(Verb::SessionPrev),
+        "sidebar-toggle" => Some(Verb::SidebarToggle),
         _ => None,
     }
 }
@@ -50,6 +52,11 @@ mod tests {
     fn session_cycle_verbs_parse() {
         assert_eq!(parse("session-next"), Some(Verb::SessionNext));
         assert_eq!(parse("session-prev"), Some(Verb::SessionPrev));
+    }
+
+    #[test]
+    fn sidebar_toggle_verb_parses() {
+        assert_eq!(parse("sidebar-toggle"), Some(Verb::SidebarToggle));
     }
 
     /// docs/configuration.md is where users copy their `MessagePlugin`

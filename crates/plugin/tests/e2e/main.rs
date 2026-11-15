@@ -1453,3 +1453,52 @@ keybinds {
     }
     eprintln!("[e2e] PASS: attention-next followed the pressing client's own tab 10 times");
 }
+
+/// ICH-494: `sidebar-toggle` swaps every tab between the full rail (32
+/// columns) and the mini rail (4 columns), and a click on the mini rail's `»`
+/// brings the full rail back through `zellij pipe` run by the plugin.
+/// The terminal's `pane_x` is the width the rails take on its left.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn sidebar_toggle_swaps_the_full_and_mini_rail_in_every_tab() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+    let s = ZellijSession::start(
+        &format!("zjr_mini_{}", std::process::id()),
+        &mini_rail_tabs_layout(&wasm),
+        &wasm,
+        pre_grant_permissions(&wasm),
+    );
+    let terminal_x = |s: &ZellijSession, tab: u64| {
+        s.panes()
+            .into_iter()
+            .find_map(|p| (p["is_plugin"] == false && p["tab_position"] == tab).then(|| p["pane_x"].as_u64()).flatten())
+    };
+    let mini_named = |s: &ZellijSession| s.panes().iter().any(|p| p["title"] == "zj-radar mini");
+    let wait = Duration::from_secs(10);
+
+    assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(32)), "full rail first: {:?}", s.panes());
+    assert!(s.wait_until(wait, mini_named), "the granted mini rail never named its pane: {:?}", s.panes());
+
+    s.run_action_checked(&["pipe", "--name", "zj_radar.cmd.v1", "--", "sidebar-toggle"]);
+    assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(4)), "toggle → mini: {:?}", s.panes());
+
+    // Tab two's full rail never saw a manifest, so it learns the toggle from
+    // its mini on the first one, when the tab opens.
+    s.run_action_checked(&["go-to-tab", "2"]);
+    assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(4)), "tab two follows: {:?}", s.panes());
+
+    s.run_action_checked(&["pipe", "--name", "zj_radar.cmd.v1", "--", "sidebar-toggle"]);
+    assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(32)), "toggle → full: {:?}", s.panes());
+    s.run_action_checked(&["pipe", "--name", "zj_radar.cmd.v1", "--", "sidebar-toggle"]);
+    assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(4)), "toggle → mini again: {:?}", s.panes());
+
+    // `»` sits in the mini rail's top line, column 1 (1-based: col 2, row 1).
+    s.click_at(2, 1);
+    assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(32)), "» click → full: {:?}", s.panes());
+    assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(32)), "» reaches tab one too: {:?}", s.panes());
+    eprintln!("[e2e] PASS: sidebar-toggle and » swap the rails in every tab");
+}

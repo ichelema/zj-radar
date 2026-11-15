@@ -9,7 +9,8 @@
 
 ## Design rules (this revision)
 
-1. **Width 32 columns.** The layout snippets all use `size=32` to match. ⟦D8⟧
+1. **Width 32 columns.** The layout snippets all use `size=32` to match. The
+   mini face (§AI) is the one exception: 4 columns. ⟦D8⟧
 2. **Elapsed marks cost, nothing else.** No timer on tab lines or calm pane
    lines. Two per-pane exceptions, both whole minutes ≥ 1m and frozen at
    `1h+`: a `pending` pane's identity line carries a `· Nm` wait tag (T5), and
@@ -881,6 +882,145 @@ tab 1 "web"
 0 working                 LOCKED
 ```
 
+## AI. Mini rail — mixed statuses at width 4
+
+**Render-derived.** The mini face (`mini`) is a 4-column strip for a collapsed
+sidebar: line 0 is the `»` toggle (column 1); then one line per tab — its
+number right-aligned in 2 columns, a space, the tab's status glyph (the same
+glyph and colors as the full rail). Each tab line clicks through to its tab.
+No header, ledger, pane lines, or footer. `height` is explicit: the face is
+always as tall as the pane, never padded.
+
+```rail-input
+width 4
+height 6
+mini
+tab 1 "web" active
+  claude running "editing"
+tab 2 "api"
+  claude pending "approve?"
+tab 3 "db"
+  command error "migrate" exit 1
+tab 4 "notes"
+```
+```rail-expect
+ »
+ 1 ⠋
+ 2 ◆
+ 3 ✗
+ 4 ○
+```
+
+## AJ. Mini rail — two-digit numbers
+
+Numbers stay right-aligned in 2 columns, so the glyph column holds at 12 tabs
+(three-digit numbers drop the space and still fill 4 cells).
+
+```rail-input
+width 4
+height 20
+mini
+tab 1 "t1"
+tab 2 "t2"
+tab 3 "t3"
+tab 4 "t4"
+tab 5 "t5"
+tab 6 "t6"
+tab 7 "t7"
+tab 8 "t8"
+tab 9 "t9"
+tab 10 "t10"
+tab 11 "t11"
+tab 12 "t12"
+```
+```rail-expect
+ »
+ 1 ○
+ 2 ○
+ 3 ○
+ 4 ○
+ 5 ○
+ 6 ○
+ 7 ○
+ 8 ○
+ 9 ○
+10 ○
+11 ○
+12 ○
+```
+
+## AK. Mini rail — overflow folds idle tabs, then truncates
+
+Overflow follows the full rail's priority (§L): idle tabs fold into one final
+muted `+N` line (no click target) while the rest keep position order. If the
+non-idle tabs plus the `+N` line still don't fit, the `+N` line is dropped and
+the non-idle tabs are cut from the bottom. Height 5 leaves 4 tab lines: three
+non-idle tabs and the `+2`.
+
+```rail-input
+width 4
+height 5
+mini
+tab 1 "a"
+tab 2 "b"
+  claude running "x"
+tab 3 "c"
+tab 4 "d"
+  claude pending "y"
+tab 5 "e"
+  claude done "z"
+```
+```rail-expect
+ »
+ 2 ⠋
+ 4 ◆
+ 5 ●
++2
+```
+
+## AL. Mini rail — non-idle tabs alone overflow
+
+Height 3 leaves 2 tab lines for 4 non-idle tabs — no strip, bottom cut:
+
+```rail-input
+width 4
+height 3
+mini
+tab 1 "a"
+  claude done "w"
+tab 2 "b"
+  claude running "x"
+tab 3 "c"
+  claude pending "y"
+tab 4 "d"
+  claude error "z"
+```
+```rail-expect
+ »
+ 1 ●
+ 2 ⠋
+```
+
+## AM. Full header with the `«` toggle
+
+**Render-derived.** With `toggle` (the runtime turns it on only while a mini
+rail shares the tab), the title line's last cell is `«`, a click target that
+collapses the sidebar. The right slot (census, badge, `N▲`) gives up two cells
+to stay left of it, one space apart. Without `toggle` the header is unchanged.
+
+```rail-input
+width 32
+toggle
+tab 1 "web"
+  claude pending "approve?"
+```
+```rail-expect
+ RADAR                   ·1 1! «
+════════════════════════════════
+ ◆ 1 web                       ✓
+ └ ◆ ✳ approve?                ✓
+```
+
 ---
 
 ## Open decisions
@@ -912,6 +1052,8 @@ width <n>            # optional, default 32
 height <n>           # optional, default = enough to fit (no overflow)
 glyphs plain|nerd    # optional, default plain
 jump_hint            # optional; footer advertises `alt-[n] jump` (default hidden)
+mini                 # optional; draw the 4-column mini face (give it `width 4` and a `height`)
+toggle               # optional; draw the full header's `«` toggle cell
 mode <name>          # optional; footer shows that Zellij mode (default none, as show_mode off)
 tab <pos> "<name>" [active]
   <kind> <status> "<msg>" [waiting <N>m] [exit <N>|?]   # one line per pane, indented

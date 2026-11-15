@@ -1,0 +1,14 @@
+---
+source: crates/plugin/src/render/tests.rs
+expression: "grid(&render(&rows, &opts), 30)"
+---
+ RADAR                 ·4 1! «
+◆═════════════════════════════
+▌⠋ 1 web
+▌└ ⠋ ✳ building…
+
+ ◆ 2 api                     ✓
+
+ ● 3 worker
+
+ ○ 4 notes

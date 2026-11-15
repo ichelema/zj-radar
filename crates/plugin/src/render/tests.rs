@@ -139,6 +139,8 @@ fn ro(width: usize, now_tick: u64) -> RenderOpts {
         task_lines: crate::config::TaskLines::default(),
         session_tree: false,
         mode: None,
+        mini: false,
+        sidebar_toggle: false,
     }
 }
 
@@ -3112,13 +3114,15 @@ proptest! {
         rows in arb_rows(),
         width in 4usize..=120,
         height in 1usize..=60,
+        mini in any::<bool>(),
+        sidebar_toggle in any::<bool>(),
     ) {
         for (density, glyphs) in [
             (Density::Compact, GlyphSet::Plain),
             (Density::Comfortable, GlyphSet::Plain),
             (Density::Cards, GlyphSet::Nerd),
         ] {
-            let opts = ro_full(width, height, density, glyphs);
+            let opts = RenderOpts { mini, sidebar_toggle, ..ro_full(width, height, density, glyphs) };
             let s = render(&rows, &opts); // must not panic
             // Height budget holds for EVERY density — not just Cards (whose
             // 1-line header always fit). The 2-line Compact/Comfortable header
@@ -3187,13 +3191,18 @@ proptest! {
         width in 1usize..=120,
         height in 1usize..=60,
         ledger in arb_ledger(),
+        mini in any::<bool>(),
+        sidebar_toggle in any::<bool>(),
     ) {
         let mut opts = ro(width, 0);
         opts.height = height;
         opts.now_epoch_s = 500_000;
+        opts.mini = mini;
+        opts.sidebar_toggle = sidebar_toggle;
         let rail = render_rail(&rows, &ledger, &opts);
         // 1:1 correspondence between physical lines and target slots.
         prop_assert_eq!(rail.line_count(), rail.ansi.lines().count());
+        prop_assert!(rail.line_count() <= height);
         // Every in-range line resolves without panic; out-of-range is None.
         for line in 0..rail.line_count() {
             let _ = rail.target_at_line(line as isize);
@@ -3201,7 +3210,7 @@ proptest! {
         prop_assert_eq!(rail.target_at_line(-1), None);
         prop_assert_eq!(rail.target_at_line(rail.line_count() as isize), None);
 
-        if !rows.is_empty() {
+        if !rows.is_empty() && !mini {
             let leftover = height.saturating_sub(body_line_count(&rows, &ledger, &opts));
             let bottom = render_bottom(&rows, &ledger, leftover, &opts);
             // Every bottom-region line (rule/entries/footer) must clamp to the
@@ -4046,4 +4055,169 @@ fn snapshot_cards_footer_with_mode_grid() {
         ..ro_full(30, 24, crate::config::Density::Cards, GlyphSet::Plain)
     };
     insta::assert_snapshot!("cards_footer_with_mode_grid", grid(&render(&rows, &opts), 30));
+}
+
+// ── Mini rail (ICH-494) ──
+
+fn mini_opts(height: usize) -> RenderOpts {
+    RenderOpts { mini: true, height, ..ro(4, 0) }
+}
+
+fn snapshot_mini(rows: &[TabRow], opts: &RenderOpts) -> String {
+    grid(&render(rows, opts), 4)
+}
+
+fn rows_of(statuses: &[Status]) -> Vec<TabRow> {
+    statuses.iter().enumerate().map(|(i, &st)| tab(i as u32 + 1, "t", display(st, 0, 0, None))).collect()
+}
+
+#[test]
+fn snapshot_mini_one_tab() {
+    let rows = rows_of(&[Status::Done]);
+    insta::assert_snapshot!("mini_one_tab", snapshot_mini(&rows, &mini_opts(10)));
+}
+
+#[test]
+fn snapshot_mini_nine_tabs() {
+    let rows = rows_of(&[Status::Idle; 9]);
+    insta::assert_snapshot!("mini_nine_tabs", snapshot_mini(&rows, &mini_opts(20)));
+}
+
+#[test]
+fn snapshot_mini_twelve_tabs_two_digit_numbers() {
+    let rows = rows_of(&[Status::Idle; 12]);
+    insta::assert_snapshot!("mini_twelve_tabs", snapshot_mini(&rows, &mini_opts(20)));
+}
+
+#[test]
+fn snapshot_mini_every_status_and_active_tab() {
+    let mut rows = rows_of(&[Status::Idle, Status::Done, Status::Running, Status::Pending, Status::Error]);
+    rows[2].active = true;
+    insta::assert_snapshot!("mini_every_status", snapshot_mini(&rows, &mini_opts(10)));
+}
+
+#[test]
+fn snapshot_mini_overflow_folds_idle_tabs() {
+    let rows = rows_of(&[Status::Idle, Status::Running, Status::Idle, Status::Pending, Status::Idle, Status::Done]);
+    // height 5 = `»` + 3 non-idle + `+3`.
+    insta::assert_snapshot!("mini_overflow_folds_idle", snapshot_mini(&rows, &mini_opts(5)));
+}
+
+#[test]
+fn snapshot_mini_overflow_all_non_idle_truncates_bottom() {
+    let rows = rows_of(&[Status::Idle, Status::Running, Status::Pending, Status::Error, Status::Done]);
+    insta::assert_snapshot!("mini_overflow_truncates_bottom", snapshot_mini(&rows, &mini_opts(3)));
+}
+
+#[test]
+fn snapshot_mini_nerd_glyphs() {
+    let rows = rows_of(&[Status::Idle, Status::Done, Status::Running, Status::Pending, Status::Error]);
+    let opts = RenderOpts { glyphs: GlyphSet::Nerd, ..mini_opts(10) };
+    insta::assert_snapshot!("mini_nerd_glyphs", snapshot_mini(&rows, &opts));
+}
+
+#[test]
+fn mini_zero_rows_is_only_the_toggle_line() {
+    let rail = render_rail(&[], &[], &mini_opts(10));
+    assert_eq!(rail.line_count(), 1);
+    assert_eq!(strip_sgr(&rail.ansi), " »");
+}
+
+#[test]
+fn mini_toggle_hotspot_and_tab_targets() {
+    let rows = rows_of(&[Status::Idle, Status::Running, Status::Idle, Status::Pending, Status::Idle]);
+    // height 4 = `»` + 2 non-idle + `+3` (strip fits exactly).
+    let rail = render_rail(&rows, &[], &mini_opts(4));
+    assert_eq!(strip_sgr(&rail.ansi), " »\n 2 ⠋\n 4 ◆\n+3");
+    assert_eq!(rail.hotspot_at(0, 1), Some(HotspotAction::ToggleSidebar));
+    assert_eq!(rail.hotspot_at(0, 0), None);
+    assert_eq!(rail.hotspot_at(1, 1), None);
+    assert_eq!(rail.target_at_line(0), None, "the `»` line has no target");
+    assert_eq!(rail.target_at_line(1).map(|t| t.tab_position), Some(1));
+    assert_eq!(rail.target_at_line(2).map(|t| t.tab_position), Some(3));
+    assert_eq!(rail.target_at_line(1), Some(target_for_row(&rows[1])));
+    assert_eq!(rail.target_at_line(3), None, "the `+N` line has no target");
+}
+
+#[test]
+fn mini_three_digit_numbers_drop_the_space_and_fit_four_cells() {
+    let rows = vec![tab(100, "t", display(Status::Done, 0, 0, None)), tab(7, "t", display(Status::Done, 0, 0, None))];
+    let plain = strip_sgr(&render(&rows, &mini_opts(10)));
+    assert_eq!(plain, " »\n100✓\n 7 ✓".replace('✓', &Status::Done.glyph_for(GlyphSet::Plain).to_string()));
+}
+
+#[test]
+fn mini_active_number_takes_the_spine_color() {
+    let rows = vec![
+        TabRow { active: true, ..tab(1, "t", display(Status::Done, 0, 0, None)) },
+        tab(2, "t", display(Status::Done, 0, 0, None)),
+    ];
+    let lines: Vec<String> = render(&rows, &mini_opts(10)).lines().map(str::to_string).collect();
+    assert!(lines[1].starts_with(Role::Accent.ansi()), "active: {:?}", lines[1]);
+    assert!(!lines[2].contains(Role::Accent.ansi()), "inactive: {:?}", lines[2]);
+}
+
+// ── Full header `«` (ICH-494) ──
+
+fn toggle_opts(width: usize, density: Density) -> RenderOpts {
+    RenderOpts { sidebar_toggle: true, density, height: 10, ..ro(width, 0) }
+}
+
+#[test]
+fn snapshot_header_toggle_compact() {
+    let rows = scenario_canonical();
+    let opts = RenderOpts { height: 6, ..toggle_opts(30, Density::Compact) };
+    insta::assert_snapshot!("header_toggle_compact", grid(&render(&rows, &opts), 30));
+}
+
+#[test]
+fn snapshot_header_toggle_comfortable() {
+    let rows = scenario_canonical();
+    let opts = RenderOpts { height: 12, ..toggle_opts(30, Density::Comfortable) };
+    insta::assert_snapshot!("header_toggle_comfortable", grid(&render(&rows, &opts), 30));
+}
+
+#[test]
+fn snapshot_header_toggle_cards() {
+    let rows = scenario_canonical();
+    let opts = RenderOpts { height: 14, ..toggle_opts(30, Density::Cards) };
+    insta::assert_snapshot!("header_toggle_cards", grid(&render(&rows, &opts), 30));
+}
+
+#[test]
+fn snapshot_header_toggle_narrow_with_census_and_badge() {
+    let rows = scenario_canonical();
+    let opts = RenderOpts { height: 8, ..toggle_opts(14, Density::Compact) };
+    insta::assert_snapshot!("header_toggle_narrow_census_badge", grid(&render(&rows, &opts), 14));
+}
+
+#[test]
+fn header_toggle_hotspot_is_the_last_cell_and_header_off_has_none() {
+    let rows = scenario_canonical();
+    for density in [Density::Compact, Density::Comfortable, Density::Cards] {
+        let rail = render_rail(&rows, &[], &toggle_opts(30, density));
+        assert_eq!(rail.hotspot_at(0, 29), Some(HotspotAction::ToggleSidebar), "{density:?}");
+        assert_eq!(rail.hotspot_at(0, 28), None, "{density:?}");
+        assert_eq!(rail.target_at_line(0), None, "{density:?}");
+        let title = strip_sgr(rail.ansi.lines().next().unwrap());
+        assert!(title.ends_with(" «") && visible_width(&title) == 30, "{title:?}");
+    }
+    let off = render_rail(&rows, &[], &RenderOpts { header: false, ..toggle_opts(30, Density::Compact) });
+    assert!(!strip_sgr(&off.ansi).contains('«'));
+    assert!(
+        (0..off.line_count()).all(|l| off.hotspot_at(l as isize, 29).is_none_or(|a| a != HotspotAction::ToggleSidebar))
+    );
+}
+
+#[test]
+fn header_without_toggle_is_unchanged() {
+    let rows = scenario_canonical();
+    for density in [Density::Compact, Density::Comfortable, Density::Cards] {
+        let off = RenderOpts { sidebar_toggle: false, ..toggle_opts(30, density) };
+        let on = toggle_opts(30, density);
+        let (off, on) = (render_rail(&rows, &[], &off), render_rail(&rows, &[], &on));
+        assert!(!strip_sgr(&off.ansi).contains('«'));
+        // Only the title line differs; everything below it is byte-identical.
+        assert_eq!(off.ansi.split_once('\n').unwrap().1, on.ansi.split_once('\n').unwrap().1);
+    }
 }

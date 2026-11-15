@@ -187,7 +187,24 @@ pub(crate) enum Effect {
         session: String,
         pane_id: u32,
     },
+    /// Collapse (`true`) or expand this rail's own pane (`set_self_collapsed`):
+    /// the column goes back to the neighbours, and expanding restores the
+    /// layout width. Needs no permission.
+    SetCollapsed(bool),
+    /// Broadcast `sidebar-toggle` on `zj_radar.cmd.v1` to every rail of the
+    /// session (`zellij pipe` through `run_command`). A `«`/`»` click reaches
+    /// only the clicked instance; every instance, this one included, toggles
+    /// when the broadcast comes back.
+    BroadcastSidebarToggle,
+    /// Name this mini rail's pane [`MINI_PANE_TITLE`] (`rename_plugin_pane`):
+    /// the full rail's only way to tell a ready mini sibling from any other
+    /// plugin pane, since `PaneInfo` carries no alias options.
+    NameMiniPane,
 }
+
+/// The pane title a granted mini rail gives itself (`Effect::NameMiniPane`).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // read by the wasm glue only
+pub(crate) const MINI_PANE_TITLE: &str = "zj-radar mini";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Outcome {
@@ -415,6 +432,15 @@ pub(crate) struct PluginRuntime {
     /// emits on change only — the first sync always emits, declaring the
     /// initial state explicitly rather than trusting the host's default.
     selectable_sent: Option<bool>,
+    /// This rail's own pane is collapsed: the last `SetCollapsed` this
+    /// instance emitted (a fresh pane is expanded, as the layout draws it). A
+    /// collapsed rail paints nothing, like a hidden one (see [`paints`](Self::paints)).
+    collapsed: bool,
+    /// Full rail only: the collapse state of the ready mini rail sharing this
+    /// tab, from the latest manifest (`None` = no ready mini, as in a layout
+    /// that predates the mini rail). A full rail only collapses while one is
+    /// known, so it can never leave its tab with no rail at all.
+    mini_sibling: Option<bool>,
 }
 
 /// See [`PluginRuntime::last_render_key`].
@@ -475,6 +501,12 @@ impl PluginRuntime {
         // manifest it can only be *selectable*: going passive here is what
         // closed a rail-only tab (`desired_selectable`).
         self.sync_selectable(&mut effects);
+        // The mini rail starts collapsed, granted or not: until it is, Zellij's
+        // permission prompt would be squeezed into 4 columns.
+        if self.config.mini {
+            self.collapsed = true;
+            effects.push(Effect::SetCollapsed(true));
+        }
         Outcome::with_effects(false, effects)
     }
 
@@ -637,7 +669,14 @@ impl PluginRuntime {
     fn frame_fire(&mut self, now_epoch_s: u64) -> Outcome {
         let mut effects = Vec::new();
         self.arm_timer_if_needed(now_epoch_s, &mut effects);
-        Outcome::with_effects(!self.hidden, effects)
+        Outcome::with_effects(self.paints(), effects)
+    }
+
+    /// Whether a paint would reach anyone: this rail is on screen (`hidden`)
+    /// and its pane is not collapsed (`collapsed`). Both pairs of a tab run
+    /// the full state machine; only the expanded one draws.
+    fn paints(&self) -> bool {
+        !self.hidden && !self.collapsed
     }
 
     pub(crate) fn mouse_click(&mut self, line: isize, col: usize) -> Outcome {
@@ -651,6 +690,9 @@ impl PluginRuntime {
             return match action {
                 render::HotspotAction::Acknowledge { target } => {
                     Outcome::with_effects(false, self.acknowledge_pending_targets(&target))
+                }
+                render::HotspotAction::ToggleSidebar => {
+                    Outcome::with_effects(false, vec![Effect::BroadcastSidebarToggle])
                 }
             };
         }
@@ -752,29 +794,91 @@ impl PluginRuntime {
     /// before the gate existed.
     /// ponytail: the read is at handling time, not at the press; a frozen rail on the tab the first `SwitchTab` lands on can still step again (ICH-479, design.md §5).
     pub(crate) fn control(&mut self, verb: Verb) -> Outcome {
-        if !self.permission.granted() || self.hidden || !self.on_clients_tab() {
-            return Outcome::none();
-        }
         let dir = match verb {
+            // Session-wide, so none of the gates below apply (see `sidebar_toggle`).
+            Verb::SidebarToggle => return self.sidebar_toggle(),
             Verb::AttentionNext | Verb::SessionNext => Direction::Next,
             Verb::AttentionPrev | Verb::SessionPrev => Direction::Prev,
         };
-        match verb {
-            Verb::AttentionNext | Verb::AttentionPrev => match self.radar.next_attention_tab(dir) {
+        if !self.permission.granted() || self.hidden || !self.on_clients_tab() {
+            return Outcome::none();
+        }
+        if matches!(verb, Verb::AttentionNext | Verb::AttentionPrev) {
+            match self.radar.next_attention_tab(dir) {
                 Some(position) => Outcome::with_effects(false, vec![Effect::SwitchTab { position }]),
                 None => Outcome::none(),
-            },
-            Verb::SessionNext | Verb::SessionPrev => {
-                let render = self.sessions.cycle(dir);
-                // A fresh tap must arm Fast immediately (not wait for the next
-                // domain change to pass through `project`), so the idle-commit
-                // in `timer` fires promptly rather than stalling behind a Slow
-                // or fully-disarmed chain.
-                let mut effects = Vec::new();
-                self.arm_timer_if_needed(self.last_now_epoch_s, &mut effects);
-                Outcome::with_effects(render, effects)
             }
+        } else {
+            let render = self.sessions.cycle(dir);
+            // A fresh tap must arm Fast immediately (not wait for the next
+            // domain change to pass through `project`), so the idle-commit
+            // in `timer` fires promptly rather than stalling behind a Slow
+            // or fully-disarmed chain.
+            let mut effects = Vec::new();
+            self.arm_timer_if_needed(self.last_now_epoch_s, &mut effects);
+            Outcome::with_effects(render, effects)
         }
+    }
+
+    /// `sidebar-toggle`: flip this rail between collapsed and expanded. Unlike
+    /// the other verbs it acts on EVERY instance, hidden or not and whatever
+    /// the client's tab, with no `client_tab` read: collapse is pane-level,
+    /// so each tab's pair must flip together for the next tab switch to show
+    /// the same width. Within a tab exactly one of the pair is expanded: both
+    /// start that way and receive the same broadcast. A full rail with no
+    /// known ready mini is a no-op, so an old layout never loses its rail.
+    /// Inert until granted: an ungranted mini stays collapsed.
+    fn sidebar_toggle(&mut self) -> Outcome {
+        if !self.permission.granted() || (!self.config.mini && self.mini_sibling.is_none()) {
+            return Outcome::none();
+        }
+        let mut effects = Vec::new();
+        self.set_collapsed(!self.collapsed, &mut effects);
+        self.collapse_outcome(effects)
+    }
+
+    /// A manifest's word on the ready mini rail in this rail's tab
+    /// (`Some(collapsed)`, or `None` for none). Full rails follow it: on each
+    /// change they take the opposite state, which re-pairs a full rail that
+    /// missed a toggle (a background tab's rail that never saw a manifest
+    /// knows no mini, so it ignored the toggle). Edge-triggered: a manifest
+    /// that repeats the mini's state moves nothing, so a stale one racing
+    /// the toggle cannot flip the pair back. A mini that leaves expands it.
+    pub(crate) fn mini_sibling_changed(&mut self, mini: Option<bool>) -> Outcome {
+        if self.config.mini || mini == self.mini_sibling {
+            return Outcome::none();
+        }
+        let button_changed = mini.is_some() != self.mini_sibling.is_some();
+        self.mini_sibling = mini;
+        let mut effects = Vec::new();
+        let changed = self.set_collapsed(mini == Some(false), &mut effects);
+        if button_changed && !changed {
+            // The header's `«` comes or goes: repaint past the rows-diff gate.
+            let change = RadarChange { render: true, force_render: true, ..RadarChange::default() };
+            return self.project(effects, change, self.last_now_epoch_s);
+        }
+        self.collapse_outcome(effects)
+    }
+
+    /// Record and emit a collapse change; `false` when already in that state.
+    fn set_collapsed(&mut self, collapsed: bool, effects: &mut Vec<Effect>) -> bool {
+        if self.collapsed == collapsed {
+            return false;
+        }
+        self.collapsed = collapsed;
+        effects.push(Effect::SetCollapsed(collapsed));
+        true
+    }
+
+    /// The outcome of a collapse change: an expanded rail repaints at once,
+    /// forced past the rows-diff gate (the frames it skipped while collapsed
+    /// were never drawn), and re-arms its cadence for the spinner.
+    fn collapse_outcome(&mut self, effects: Vec<Effect>) -> Outcome {
+        if self.collapsed || effects.is_empty() {
+            return Outcome::with_effects(false, effects);
+        }
+        let change = RadarChange { render: true, force_render: true, ..RadarChange::default() };
+        self.project(effects, change, self.last_now_epoch_s)
     }
 
     /// Whether this instance's client has this rail's tab active (see `control`).
@@ -817,7 +921,8 @@ impl PluginRuntime {
             .input_at_ms
             .take()
             .is_some_and(|at| now_ms.checked_sub(at).is_some_and(|age| age <= KEYBIND_INPUT_WINDOW_MS));
-        if !pressed_here {
+        // `sidebar-toggle` is session-wide: every client's instances must flip.
+        if !pressed_here && crate::control::parse(payload) != Some(Verb::SidebarToggle) {
             return Outcome::none();
         }
         self.control_pipe(payload)
@@ -943,6 +1048,12 @@ impl PluginRuntime {
         // terminal neighbor is known (`desired_selectable`); a rail-only tab
         // keeps it reachable.
         self.sync_selectable(&mut effects);
+        // A granted mini names its pane, which is what tells its full sibling
+        // it is ready: an ungranted mini (its prompt answered nowhere) never
+        // gets a full rail to collapse in its favour.
+        if granted && self.config.mini {
+            effects.push(Effect::NameMiniPane);
+        }
         Outcome::with_effects(true, effects)
     }
 
@@ -1022,6 +1133,8 @@ impl PluginRuntime {
             task_lines: self.config.task_lines,
             session_tree: self.config.session_tree,
             mode: self.shown_mode(),
+            mini: self.config.mini,
+            sidebar_toggle: !self.config.mini && self.mini_sibling.is_some(),
         }
     }
 
@@ -1121,7 +1234,7 @@ impl PluginRuntime {
     /// spinner), and something spinning at full speed — else plain `Fast`.
     fn fast_cadence(&self) -> Cadence {
         let fps = self.config.spinner_fps;
-        if fps > 1 && !self.hidden && self.permission.granted() && self.radar.has_full_speed_spinner(self.tick) {
+        if fps > 1 && self.paints() && self.permission.granted() && self.radar.has_full_speed_spinner(self.tick) {
             Cadence::Frame(fps)
         } else {
             Cadence::Fast
@@ -1208,7 +1321,7 @@ impl PluginRuntime {
         // a hidden tab's rail paints nothing, ticks included — the paint is
         // the bulk of a tick's interpreter cost and no one can see it.
         // `visibility_changed(true)` repaints on reveal.
-        if self.hidden {
+        if !self.paints() {
             render = false;
         }
         if !c.cwd_bootstrap.is_empty() {

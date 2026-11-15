@@ -172,6 +172,8 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
     let mut glyphs = GlyphSet::Plain;
     let mut density = Density::Compact;
     let mut jump_hint = false;
+    let mut mini = false;
+    let mut sidebar_toggle = false;
     let mut mode: Option<crate::mode::Mode> = None;
     let mut now_tick: u64 = 0;
     let mut ledger_lines: Vec<crate::rollup::LedgerLine> = Vec::new();
@@ -256,6 +258,15 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
         // — default hidden, mirroring `JumpHint`.
         if line.trim() == "jump_hint" {
             jump_hint = true;
+            continue;
+        }
+        // Mini face (`mini`) / full header `«` cell (`toggle`): both off by default.
+        if line.trim() == "mini" {
+            mini = true;
+            continue;
+        }
+        if line.trim() == "toggle" {
+            sidebar_toggle = true;
             continue;
         }
         // Footer mode label (`show_mode` on): `mode <name>`, the lowercase
@@ -517,6 +528,8 @@ fn build(input: &str) -> (Vec<TabRow>, Vec<crate::rollup::LedgerLine>, RenderOpt
         task_lines: crate::config::TaskLines::default(),
         session_tree: false,
         mode,
+        mini,
+        sidebar_toggle,
     };
     // Scenarios that don't declare an explicit `height` used the old
     // "unboundedly large" sentinel to mean "enough to fit, no overflow, no

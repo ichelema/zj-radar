@@ -573,6 +573,15 @@ impl ZellijSession {
             .expect("zellij action failed to spawn")
     }
 
+    /// Every pane of the session with its geometry and tab
+    /// (`zellij action list-panes -g -t -j`): one JSON object per pane, with
+    /// `pane_x`, `is_plugin`, `title`, `is_collapsed` and `tab_position`.
+    /// Empty when the action fails, so a poll simply retries.
+    pub fn panes(&self) -> Vec<serde_json::Value> {
+        let out = self.action(&["list-panes", "-g", "-t", "-j"]);
+        serde_json::from_slice(&out.stdout).unwrap_or_default()
+    }
+
     /// Dump the focused terminal pane as plain text (may contain ANSI).
     pub fn dump_screen(&self) -> String {
         let out = self.action(&["dump-screen"]);
@@ -1078,6 +1087,36 @@ pub fn two_sidebar_tabs_layout(plugin_wasm: &Path) -> String {
         pane split_direction="vertical" {{
             pane size=32 borderless=true {{
                 plugin location="file:{w}"
+            }}
+            children
+        }}
+    }}
+    tab name="one" focus=true {{
+        pane focus=true cwd="/tmp"
+    }}
+    tab name="two" {{
+        pane focus=true cwd="/tmp"
+    }}
+}}"#
+    )
+}
+
+/// The two-rail shape `setup zellij --inject` writes (ICH-494): the full rail
+/// and, right of it, the 4-column mini rail, in every tab of two.
+pub fn mini_rail_tabs_layout(plugin_wasm: &Path) -> String {
+    let wasm_abs = plugin_wasm.canonicalize().unwrap_or_else(|_| plugin_wasm.to_path_buf());
+    let w = wasm_abs.display();
+    format!(
+        r#"layout {{
+    default_tab_template {{
+        pane split_direction="vertical" {{
+            pane size=32 borderless=true {{
+                plugin location="file:{w}"
+            }}
+            pane size=4 borderless=true {{
+                plugin location="file:{w}" {{
+                    mini true
+                }}
             }}
             children
         }}

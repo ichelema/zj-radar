@@ -232,6 +232,19 @@ impl State {
                 Effect::MarkSeen { session, pane_id } => {
                     mark_session_pane_seen(&session, PaneId::Terminal(pane_id));
                 }
+                Effect::SetCollapsed(collapsed) => set_self_collapsed(collapsed),
+                // The child inherits the server's environment (ZELLIJ_SESSION_NAME),
+                // so the bare `zellij pipe` reaches this session; no plugin url
+                // means a broadcast to every rail. Its result is not read.
+                Effect::BroadcastSidebarToggle => run_command(
+                    &["zellij", "pipe", "--name", CMD_PIPE, "--", "sidebar-toggle"],
+                    BTreeMap::from([("zj_radar".to_string(), "sidebar-toggle".to_string())]),
+                ),
+                Effect::NameMiniPane => {
+                    if let Some(plugin_id) = self.plugin_id {
+                        rename_plugin_pane(plugin_id, runtime::MINI_PANE_TITLE);
+                    }
+                }
             }
         }
     }
@@ -383,6 +396,17 @@ impl ZellijPlugin for State {
                     })
                 });
                 self.runtime.own_plugin_tab_changed(own_tab_position);
+                // The ready mini rail in our tab: another tiled plugin pane that
+                // named itself (`Effect::NameMiniPane`); `PaneInfo` has no options.
+                let mini_sibling = own_tab_position.and_then(|tab| {
+                    manifest.panes.get(&tab)?.iter().find_map(|pane| {
+                        let sibling = pane.is_plugin
+                            && !pane.is_floating
+                            && Some(pane.id) != self.plugin_id
+                            && pane.title == runtime::MINI_PANE_TITLE;
+                        sibling.then_some(pane.is_collapsed)
+                    })
+                });
                 // Pure adapter: copy the host's `PaneInfo` fields into `RawPane`s.
                 // All policy — plugin-skip, title sanitize, theme-color precedence —
                 // lives in the host-tested `PaneUpdate::from_raw`.
@@ -418,7 +442,9 @@ impl ZellijPlugin for State {
                     })
                     .collect();
                 let outcome = self.runtime.panes_changed(radar_state::PaneUpdate::from_raw(raw));
-                self.handle_outcome(outcome)
+                let rendered = self.handle_outcome(outcome);
+                let outcome = self.runtime.mini_sibling_changed(mini_sibling);
+                self.handle_outcome(outcome) || rendered
             }
             Event::GlobalAttentionUpdate(global) => {
                 let peers = global
