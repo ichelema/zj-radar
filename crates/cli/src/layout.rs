@@ -124,12 +124,13 @@ pub(crate) fn full_layout() -> String {
 /// starter tab "shell" (removed in 0.1.4: an explicitly named tab reads as a
 /// manual rename to the plugin's TabNamer and permanently disables smart
 /// naming). Versions before the mini rail wrote no mini pane.
-pub(crate) fn setup_authored_layouts() -> [String; 3] {
+pub(crate) fn setup_authored_layouts() -> [String; 4] {
     let current = full_layout();
     let mini = "            pane size=4 borderless=true {\n                plugin location=\"radar\" {\n                    mini true\n                }\n            }\n";
     let pre_mini = current.replace(mini, "");
-    let v013 = pre_mini.replace("    tab focus=true {", "    tab name=\"shell\" focus=true {");
-    [current, pre_mini, v013]
+    let shell = |layout: &str| layout.replace("    tab focus=true {", "    tab name=\"shell\" focus=true {");
+    // The v0.1.3 form keeps its upgraded twin (`add_mini`) so `--uninstall` still deletes it.
+    [shell(&current), shell(&pre_mini), current, pre_mini]
 }
 
 /// Facts inferred from a raw layout string by pure substring scanning.
@@ -363,35 +364,38 @@ pub(crate) fn inject(layout: &str, facts: &LayoutFacts) -> Result<String, Refusa
     Ok(out)
 }
 
-/// Upgrade a layout injected before the mini rail: insert the mini pane right
-/// after every full rail pane inside a zj-radar marker region, leaving every
-/// other byte as it was (so `uninstall` still collapses/deletes the regions).
-/// Rail panes outside our markers belong to the user and are never touched.
-/// `None` when there is nothing to add, which includes a layout that already
-/// has a mini pane (that is what makes re-injection idempotent).
+/// Upgrade a layout written before the mini rail: insert the mini pane right
+/// after every full rail pane that lacks one, inside a zj-radar marker region
+/// or anywhere in a layout `setup` wrote whole (`setup_authored_layouts`),
+/// leaving every other byte as it was (so `uninstall` still collapses/deletes
+/// it). Other rail panes belong to the user and are never touched. `None`
+/// when there is nothing to add: checking each pair, not the file, is what
+/// makes re-injection idempotent and finishes a partial upgrade.
 pub(crate) fn add_mini(layout: &str) -> Option<String> {
-    if layout.contains("mini true") {
-        return None;
-    }
+    let whole = setup_authored_layouts().iter().any(|l| l == layout);
+    let lines: Vec<&str> = layout.split_inclusive('\n').collect();
     let mut out = String::with_capacity(layout.len() + 256);
-    let (mut in_region, mut changed) = (false, false);
-    let (mut prev, mut prev2) = ("", "");
-    for line in layout.split_inclusive('\n') {
+    let (mut in_region, mut changed) = (whole, false);
+    for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
         if t.starts_with(WRAP_BEGIN) || t.starts_with(BLOCK_BEGIN) {
             in_region = true;
-        } else if t.starts_with(WRAP_END) || t.starts_with(BLOCK_END) {
+        } else if !whole && (t.starts_with(WRAP_END) || t.starts_with(BLOCK_END)) {
             in_region = false;
         }
         out.push_str(line);
-        if in_region && t == "}" && prev == "plugin location=\"radar\"" && prev2 == "pane size=32 borderless=true {" {
+        let closes_rail = t == "}"
+            && i >= 2
+            && lines[i - 1].trim() == "plugin location=\"radar\""
+            && lines[i - 2].trim() == "pane size=32 borderless=true {";
+        let has_mini = lines.get(i + 1).is_some_and(|l| l.trim() == MINI_PANE[0]);
+        if in_region && closes_rail && !has_mini {
             let indent = &line[..line.len() - line.trim_start().len()];
             for mini in &MINI_PANE {
                 out.push_str(&format!("{indent}{mini}\n"));
             }
             changed = true;
         }
-        (prev2, prev) = (prev, t);
     }
     changed.then_some(out)
 }
@@ -993,11 +997,41 @@ layout {
         assert_eq!(uninstall(&pre_mini).unwrap(), USER_LAYOUT, "a pre-mini injection still uninstalls");
     }
 
-    /// A rail pane the user pasted by hand (no markers) is theirs: never touched.
+    /// A rail pane the user pasted by hand (no markers, not a layout setup
+    /// wrote whole) is theirs: never touched.
     #[test]
     fn add_mini_ignores_a_rail_outside_our_markers() {
-        let manual = strip_mini(&full_layout());
+        let manual = format!("// my own layout\n{}", strip_mini(&full_layout()));
         assert!(analyze(&manual).has_rail && add_mini(&manual).is_none());
+    }
+
+    /// A layout `setup` wrote whole (no markers) before the mini rail is
+    /// upgraded to the current one, the v0.1.3 form included, and stays
+    /// recognised for whole-file uninstall.
+    #[test]
+    fn add_mini_upgrades_a_pre_mini_setup_authored_layout() {
+        let pre_mini = strip_mini(&full_layout());
+        assert_eq!(add_mini(&pre_mini).as_deref(), Some(full_layout().as_str()));
+        let shell = |l: &str| l.replace("    tab focus=true {", "    tab name=\"shell\" focus=true {");
+        let upgraded = add_mini(&shell(&pre_mini)).expect("the v0.1.3 form upgrades too");
+        assert_eq!(upgraded, shell(&full_layout()));
+        assert!(setup_authored_layouts().contains(&upgraded));
+        assert!(add_mini(&full_layout()).is_none());
+    }
+
+    /// Idempotence is per pair: `mini true` in a comment proves nothing, and
+    /// a partly upgraded layout gets only its missing mini panes.
+    #[test]
+    fn add_mini_checks_each_rail_not_the_file() {
+        let fresh = inject(USER_LAYOUT, &analyze(USER_LAYOUT)).unwrap();
+        let pre_mini = strip_mini(&fresh);
+        let commented = format!("// see mini true in the docs\n{pre_mini}");
+        assert_eq!(add_mini(&commented), Some(format!("// see mini true in the docs\n{fresh}")));
+        // Keep the first rail's mini only: the other rails still need theirs.
+        let first_mini = fresh.find("mini true").unwrap();
+        let (head, tail) = fresh.split_at(first_mini);
+        let partial = format!("{head}{}", strip_mini(tail));
+        assert_eq!(add_mini(&partial).as_deref(), Some(fresh.as_str()));
     }
 
     /// Whole-file uninstall must still recognise what the pre-mini setup wrote.

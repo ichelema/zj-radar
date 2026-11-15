@@ -564,6 +564,22 @@ fn setup_zellij_uninstall_deletes_a_pre_mini_authored_layout() {
     assert!(!layout_path.exists(), "the pre-mini full layout is setup-authored and must be deleted");
 }
 
+/// A layout setup created whole before the mini rail has no markers, yet it
+/// is entirely ours: `--inject` upgrades it to the current one, then no-ops.
+#[test]
+fn setup_zellij_inject_upgrades_a_pre_mini_authored_layout() {
+    let config_dir = TempDir::new().unwrap();
+    let layout_path = config_dir.path().join("layouts/default.kdl");
+    setup_zellij(&config_dir, &["--inject"]);
+    let whole = fs::read_to_string(&layout_path).unwrap();
+    fs::write(&layout_path, strip_mini(&whole)).unwrap();
+    let stdout = setup_zellij(&config_dir, &["--inject"]);
+    assert!(stdout.contains("added the mini rail"), "{stdout}");
+    assert_eq!(fs::read_to_string(&layout_path).unwrap(), whole);
+    let stdout = setup_zellij(&config_dir, &["--inject"]);
+    assert!(stdout.contains("already has the rail"), "{stdout}");
+}
+
 // ── --uninstall deletes a layout that setup created whole ─────────────────────
 // The no-layout `--inject` path writes `full_layout()` as a new file — no
 // markers, but it references the `radar` alias. Uninstall strips the alias, so
