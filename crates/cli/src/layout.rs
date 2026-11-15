@@ -378,9 +378,10 @@ pub(crate) fn add_mini(layout: &str) -> Option<String> {
     let (mut in_region, mut changed) = (whole, false);
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
-        if t.starts_with(WRAP_BEGIN) || t.starts_with(BLOCK_BEGIN) {
+        // `contains`: an inline `children` anchor puts the marker mid-line.
+        if t.contains(WRAP_BEGIN) || t.contains(BLOCK_BEGIN) {
             in_region = true;
-        } else if !whole && (t.starts_with(WRAP_END) || t.starts_with(BLOCK_END)) {
+        } else if !whole && (t.contains(WRAP_END) || t.contains(BLOCK_END)) {
             in_region = false;
         }
         out.push_str(line);
@@ -388,7 +389,9 @@ pub(crate) fn add_mini(layout: &str) -> Option<String> {
             && i >= 2
             && lines[i - 1].trim() == "plugin location=\"radar\""
             && lines[i - 2].trim() == "pane size=32 borderless=true {";
-        let has_mini = lines.get(i + 1).is_some_and(|l| l.trim() == MINI_PANE[0]);
+        // The rail's next pane, past blank and comment lines a user may add.
+        let next = lines[i + 1..].iter().map(|l| l.trim()).find(|l| !l.is_empty() && !l.starts_with("//"));
+        let has_mini = next == Some(MINI_PANE[0]);
         if in_region && closes_rail && !has_mini {
             let indent = &line[..line.len() - line.trim_start().len()];
             for mini in &MINI_PANE {
@@ -997,6 +1000,16 @@ layout {
         assert_eq!(uninstall(&pre_mini).unwrap(), USER_LAYOUT, "a pre-mini injection still uninstalls");
     }
 
+    /// An inline `children` anchor gets its wrap marker mid-line: the upgrade
+    /// must still find that region's rail.
+    #[test]
+    fn add_mini_upgrades_an_inline_anchor_wrap() {
+        let user = "layout {\n    default_tab_template { children }\n    tab { pane; }\n}\n";
+        let fresh = inject(user, &analyze(user)).unwrap();
+        assert_eq!(fresh.matches("mini true").count(), 3, "{fresh}");
+        assert_eq!(add_mini(&strip_mini(&fresh)).as_deref(), Some(fresh.as_str()));
+    }
+
     /// A rail pane the user pasted by hand (no markers, not a layout setup
     /// wrote whole) is theirs: never touched.
     #[test]
@@ -1032,6 +1045,16 @@ layout {
         let (head, tail) = fresh.split_at(first_mini);
         let partial = format!("{head}{}", strip_mini(tail));
         assert_eq!(add_mini(&partial).as_deref(), Some(fresh.as_str()));
+        // A blank or comment line between a rail and its mini still pairs them.
+        for gap in ["\n", "            // mini rail\n"] {
+            let spaced = fresh.replacen(
+                "            }\n            pane size=4",
+                &format!("            }}\n{gap}            pane size=4"),
+                1,
+            );
+            assert_ne!(spaced, fresh, "the fixture must hold a rail/mini pair at this indent");
+            assert!(add_mini(&spaced).is_none(), "gap {gap:?} must not duplicate the mini");
+        }
     }
 
     /// Whole-file uninstall must still recognise what the pre-mini setup wrote.
