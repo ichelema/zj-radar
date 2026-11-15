@@ -704,6 +704,27 @@ fn run_layout_inject(layout_path: &Path, inject_flag: bool, yes: bool, dry_run: 
 
     // Already injected → idempotent no-op for Inject/Prompt; snippet still accurate.
     if facts.has_rail {
+        // Injected by a version before the mini rail: add the mini pane next to
+        // each injected full rail pane (nothing else changes).
+        if let Some(new_text) = crate::layout::add_mini(&text) {
+            let consent = match mode {
+                InjectMode::Inject => true,
+                // Prompt mode implies !yes (see above) — literal false, as ever.
+                InjectMode::Prompt => {
+                    confirm(&format!("Add the mini rail to {}?", layout_path.display()), false, is_tty)
+                }
+                InjectMode::Snippet => false,
+            };
+            if consent {
+                do_add_mini(layout_path, &new_text, dry_run);
+            } else {
+                println!(
+                    "zellij: layout has the rail but not the mini rail ({}) — re-run with --inject to add it",
+                    layout_path.display()
+                );
+            }
+            return;
+        }
         println!("zellij: layout already has the rail ({})", layout_path.display());
         return;
     }
@@ -759,6 +780,25 @@ fn print_missing_layout_fallback(layout_path: &Path) {
          below in a `layout {{ … }}` block yourself:\n\n{snippet}",
         layout_path.display()
     );
+}
+
+/// Write the upgraded layout (`layout::add_mini`): backup, then atomic write.
+fn do_add_mini(layout_path: &Path, new_text: &str, dry_run: bool) {
+    if dry_run {
+        println!(
+            "zellij: would add the mini rail to {} (dry-run)\n--- layout (dry-run) ---\n{new_text}",
+            layout_path.display()
+        );
+        return;
+    }
+    match backup_then_write(layout_path, new_text) {
+        Ok(()) => println!(
+            "zellij: added the mini rail to {} (backup: {})",
+            layout_path.display(),
+            path_with_suffix(layout_path, BACKUP_SUFFIX).display()
+        ),
+        Err(e) => crate::exit::fail_report("zellij", format!("write failed — {e}")),
+    }
 }
 
 /// Perform the actual inject: call `layout::inject`, write backup + new text.

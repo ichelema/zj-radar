@@ -390,6 +390,11 @@ default_tab_template {                       // layout-defined tabs fill `childr
         pane size=32 borderless=true {
             plugin location="radar"
         }
+        pane size=4 borderless=true {
+            plugin location="radar" {
+                mini true
+            }
+        }
         children
     }
     pane size=2 borderless=true {
@@ -401,6 +406,11 @@ new_tab_template {                           // runtime tabs need a CONCRETE pan
         pane size=32 borderless=true {
             plugin location="radar"
         }
+        pane size=4 borderless=true {
+            plugin location="radar" {
+                mini true
+            }
+        }
         pane focus=true
     }
     pane size=2 borderless=true {
@@ -408,6 +418,11 @@ new_tab_template {                           // runtime tabs need a CONCRETE pan
     }
 }
 ```
+
+The second pane in each template is the mini rail (4 columns, starts
+collapsed; `sidebar-toggle` switches between the two, see
+[`configuration.md`](configuration.md)). Exactly one of the two takes space at
+a time.
 
 `new_tab_template` is mandatory. When omitted, Zellij derives one from
 `default_tab_template` and drops a `children` nested inside a split

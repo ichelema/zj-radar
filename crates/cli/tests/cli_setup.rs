@@ -466,6 +466,104 @@ fn setup_zellij_uninstall_reverses_injection() {
     assert!(after.contains("default_tab_template"), "uninstall must preserve the rest of the layout");
 }
 
+// ── the mini rail: fresh inject, upgrade of a pre-mini injection, uninstall ──
+
+/// What a version before the mini rail wrote: `layout` without any mini pane (5 lines each).
+fn strip_mini(layout: &str) -> String {
+    let mut lines = layout.split_inclusive('\n');
+    let mut out = String::new();
+    while let Some(line) = lines.next() {
+        if line.trim() == "pane size=4 borderless=true {" {
+            lines.by_ref().take(4).for_each(drop);
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// Run `setup zellij <args>` against `config_dir`; returns stdout.
+fn setup_zellij(config_dir: &TempDir, args: &[&str]) -> String {
+    let out = Command::cargo_bin("zj-radar")
+        .unwrap()
+        .args(["setup", "zellij"])
+        .args(args)
+        .env("ZELLIJ_CONFIG_DIR", config_dir.path())
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn setup_zellij_inject_writes_the_mini_rail_next_to_every_rail() {
+    let config_dir = isolated_zellij_config(FIXTURE_LAYOUT);
+    setup_zellij(&config_dir, &["--inject"]);
+    let injected = fs::read_to_string(config_dir.path().join("layouts/default.kdl")).unwrap();
+    // wrap + new_tab_template + ui template
+    assert_eq!(injected.matches("pane size=32 borderless=true {").count(), 3, "{injected}");
+    assert_eq!(injected.matches("pane size=4 borderless=true {").count(), 3, "{injected}");
+    assert_eq!(injected.matches("mini true").count(), 3, "{injected}");
+
+    let created = TempDir::new().unwrap();
+    setup_zellij(&created, &["--inject"]);
+    let whole = fs::read_to_string(created.path().join("layouts/default.kdl")).unwrap();
+    assert_eq!(whole.matches("mini true").count(), 3, "{whole}");
+}
+
+#[test]
+fn setup_zellij_inject_adds_the_mini_rail_to_a_pre_mini_injection_and_is_idempotent() {
+    let config_dir = isolated_zellij_config(FIXTURE_LAYOUT);
+    let layout_path = config_dir.path().join("layouts/default.kdl");
+    setup_zellij(&config_dir, &["--inject"]);
+    let current = fs::read_to_string(&layout_path).unwrap();
+    let pre_mini = strip_mini(&current);
+    assert_ne!(pre_mini, current, "fixture must actually differ");
+    fs::write(&layout_path, &pre_mini).unwrap();
+
+    // Without --inject the layout is never touched; the user is told how to upgrade.
+    let stdout = setup_zellij(&config_dir, &["--yes"]);
+    assert!(stdout.contains("not the mini rail") && stdout.contains("--inject"), "{stdout}");
+    assert_eq!(fs::read_to_string(&layout_path).unwrap(), pre_mini);
+
+    let stdout = setup_zellij(&config_dir, &["--inject"]);
+    assert!(stdout.contains("added the mini rail"), "{stdout}");
+    assert_eq!(fs::read_to_string(&layout_path).unwrap(), current, "only the mini panes are added");
+    let bak = config_dir.path().join("layouts/default.kdl.zj-radar.bak");
+    assert_eq!(fs::read_to_string(bak).unwrap(), pre_mini, "the backup is the pre-upgrade layout");
+
+    let stdout = setup_zellij(&config_dir, &["--inject"]);
+    assert!(stdout.contains("already has the rail"), "{stdout}");
+    assert_eq!(fs::read_to_string(&layout_path).unwrap(), current, "re-inject is byte-identical");
+}
+
+#[test]
+fn setup_zellij_uninstall_removes_both_panes_and_a_pre_mini_injection() {
+    for pre_mini in [false, true] {
+        let config_dir = isolated_zellij_config(FIXTURE_LAYOUT);
+        let layout_path = config_dir.path().join("layouts/default.kdl");
+        setup_zellij(&config_dir, &["--inject"]);
+        if pre_mini {
+            let injected = fs::read_to_string(&layout_path).unwrap();
+            fs::write(&layout_path, strip_mini(&injected)).unwrap();
+        }
+        setup_zellij(&config_dir, &["--uninstall"]);
+        assert_eq!(fs::read_to_string(&layout_path).unwrap(), FIXTURE_LAYOUT, "pre_mini={pre_mini}");
+    }
+}
+
+#[test]
+fn setup_zellij_uninstall_deletes_a_pre_mini_authored_layout() {
+    let config_dir = TempDir::new().unwrap();
+    let layout_path = config_dir.path().join("layouts/default.kdl");
+    setup_zellij(&config_dir, &["--inject"]);
+    let whole = fs::read_to_string(&layout_path).unwrap();
+    fs::write(&layout_path, strip_mini(&whole)).unwrap();
+    setup_zellij(&config_dir, &["--uninstall"]);
+    assert!(!layout_path.exists(), "the pre-mini full layout is setup-authored and must be deleted");
+}
+
 // ── --uninstall deletes a layout that setup created whole ─────────────────────
 // The no-layout `--inject` path writes `full_layout()` as a new file — no
 // markers, but it references the `radar` alias. Uninstall strips the alias, so
@@ -1093,7 +1191,7 @@ fn setup_zellij_uninstall_deletes_a_v013_authored_layout() {
     run(&["setup", "zellij", "--wasm", wasm_path.to_str().unwrap(), "--inject", "--yes"]);
     let layout_path = config_dir.path().join("layouts/default.kdl");
     let current = fs::read_to_string(&layout_path).unwrap();
-    let legacy = current.replace("    tab focus=true {", "    tab name=\"shell\" focus=true {");
+    let legacy = strip_mini(&current).replace("    tab focus=true {", "    tab name=\"shell\" focus=true {");
     assert_ne!(current, legacy, "fixture must actually differ (tab line drifted?)");
     fs::write(&layout_path, &legacy).unwrap();
 

@@ -7,6 +7,11 @@ pub(crate) const DEFAULT_TAB_TEMPLATE: &str = r#"    default_tab_template {
             pane size=32 borderless=true {
                 plugin location="radar"
             }
+            pane size=4 borderless=true {
+                plugin location="radar" {
+                    mini true
+                }
+            }
             children
         }
         pane size=2 borderless=true {
@@ -20,6 +25,11 @@ pub(crate) const NEW_TAB_TEMPLATE: &str = r#"    new_tab_template {
             pane size=32 borderless=true {
                 plugin location="radar"
             }
+            pane size=4 borderless=true {
+                plugin location="radar" {
+                    mini true
+                }
+            }
             pane focus=true
         }
         pane size=2 borderless=true {
@@ -32,6 +42,11 @@ pub(crate) const RAIL_UI_TEMPLATE: &str = r#"    tab_template name="ui" {
         pane split_direction="vertical" {
             pane size=32 borderless=true {
                 plugin location="radar"
+            }
+            pane size=4 borderless=true {
+                plugin location="radar" {
+                    mini true
+                }
             }
             children
         }
@@ -108,11 +123,13 @@ pub(crate) fn full_layout() -> String {
 /// layout on a dead `radar` alias after the alias strip. v0.1.3 named the
 /// starter tab "shell" (removed in 0.1.4: an explicitly named tab reads as a
 /// manual rename to the plugin's TabNamer and permanently disables smart
-/// naming).
-pub(crate) fn setup_authored_layouts() -> [String; 2] {
+/// naming). Versions before the mini rail wrote no mini pane.
+pub(crate) fn setup_authored_layouts() -> [String; 3] {
     let current = full_layout();
-    let v013 = current.replace("    tab focus=true {", "    tab name=\"shell\" focus=true {");
-    [current, v013]
+    let mini = "            pane size=4 borderless=true {\n                plugin location=\"radar\" {\n                    mini true\n                }\n            }\n";
+    let pre_mini = current.replace(mini, "");
+    let v013 = pre_mini.replace("    tab focus=true {", "    tab name=\"shell\" focus=true {");
+    [current, pre_mini, v013]
 }
 
 /// Facts inferred from a raw layout string by pure substring scanning.
@@ -190,15 +207,21 @@ const BLOCK_BEGIN: &str = "// zj-radar:block begin";
 const BLOCK_END: &str = "// zj-radar:block end";
 
 /// The rail vertical-split that wraps a tab's `children` anchor. Single source
-/// of truth for the wrap shape — the radar pane plus the `children` anchor it
-/// guards. It contains EXACTLY one `children` token and adds no sibling panes,
-/// so the splice replaces only the anchor (never engulfing a user's status bar)
-/// and `uninstall` can collapse the whole region back to that lone `children`.
+/// of truth for the wrap shape — the full rail pane, the mini rail pane right
+/// after it, and the `children` anchor they guard. It contains EXACTLY one
+/// `children` token and adds no panes besides the two rail panes, so the splice
+/// replaces only the anchor (never engulfing a user's status bar) and
+/// `uninstall` can collapse the whole region back to that lone `children`.
 /// Lines are joined and re-indented to the anchor's column at splice time.
 const RAIL_PANE_WRAP: &[&str] = &[
     "pane split_direction=\"vertical\" {", "    pane size=32 borderless=true {", "        plugin location=\"radar\"",
-    "    }", "    children", "}",
+    "    }", "    pane size=4 borderless=true {", "        plugin location=\"radar\" {", "            mini true",
+    "        }", "    }", "    children", "}",
 ];
+
+/// The mini rail pane, as inserted after an already-injected full rail pane.
+const MINI_PANE: [&str; 5] =
+    ["pane size=4 borderless=true {", "    plugin location=\"radar\" {", "        mini true", "    }", "}"];
 
 /// Why an `inject` call declined to transform a layout. Injection is
 /// fail-closed: any uncertainty about a layout's shape returns a `Refusal`
@@ -338,6 +361,39 @@ pub(crate) fn inject(layout: &str, facts: &LayoutFacts) -> Result<String, Refusa
         )));
     }
     Ok(out)
+}
+
+/// Upgrade a layout injected before the mini rail: insert the mini pane right
+/// after every full rail pane inside a zj-radar marker region, leaving every
+/// other byte as it was (so `uninstall` still collapses/deletes the regions).
+/// Rail panes outside our markers belong to the user and are never touched.
+/// `None` when there is nothing to add, which includes a layout that already
+/// has a mini pane (that is what makes re-injection idempotent).
+pub(crate) fn add_mini(layout: &str) -> Option<String> {
+    if layout.contains("mini true") {
+        return None;
+    }
+    let mut out = String::with_capacity(layout.len() + 256);
+    let (mut in_region, mut changed) = (false, false);
+    let (mut prev, mut prev2) = ("", "");
+    for line in layout.split_inclusive('\n') {
+        let t = line.trim();
+        if t.starts_with(WRAP_BEGIN) || t.starts_with(BLOCK_BEGIN) {
+            in_region = true;
+        } else if t.starts_with(WRAP_END) || t.starts_with(BLOCK_END) {
+            in_region = false;
+        }
+        out.push_str(line);
+        if in_region && t == "}" && prev == "plugin location=\"radar\"" && prev2 == "pane size=32 borderless=true {" {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            for mini in &MINI_PANE {
+                out.push_str(&format!("{indent}{mini}\n"));
+            }
+            changed = true;
+        }
+        (prev2, prev) = (prev, t);
+    }
+    changed.then_some(out)
 }
 
 /// Reverse `inject`: a true inverse, not a blunt strip. Two marker kinds are
@@ -876,6 +932,85 @@ layout {
         assert!(uninstall(clean).is_none(), "no markers → must return None");
     }
 
+    /// Remove every mini pane (5 lines each), reproducing what a version before
+    /// the mini rail wrote.
+    fn strip_mini(layout: &str) -> String {
+        let mut lines = layout.split_inclusive('\n');
+        let mut out = String::new();
+        while let Some(line) = lines.next() {
+            if line.trim() == "pane size=4 borderless=true {" {
+                lines.by_ref().take(4).for_each(drop);
+            } else {
+                out.push_str(line);
+            }
+        }
+        out
+    }
+
+    /// Every full rail pane is followed, right after its closing brace, by the mini pane.
+    fn assert_mini_follows_each_rail(layout: &str, want: usize) {
+        let lines: Vec<&str> = layout.lines().map(str::trim).collect();
+        let rails: Vec<usize> = (0..lines.len()).filter(|&i| lines[i] == "pane size=32 borderless=true {").collect();
+        assert_eq!(rails.len(), want, "{layout}");
+        for i in rails {
+            assert_eq!(lines[i + 2], "}", "{layout}");
+            assert_eq!(lines[i + 3..i + 8], MINI_PANE.map(str::trim), "mini must follow the rail pane:\n{layout}");
+        }
+    }
+
+    const USER_LAYOUT: &str = "layout {\n    default_tab_template {\n        pane size=2 borderless=true {\n            plugin location=\"zellij:status-bar\"\n        }\n        children\n    }\n    tab {\n        pane\n    }\n}\n";
+
+    #[test]
+    fn fresh_inject_and_full_layout_carry_the_mini_after_each_rail() {
+        // wrap + new_tab_template + ui template
+        assert_mini_follows_each_rail(&inject(USER_LAYOUT, &analyze(USER_LAYOUT)).unwrap(), 3);
+        // default + new + ui
+        assert_mini_follows_each_rail(&full_layout(), 3);
+        assert_mini_follows_each_rail(&tailored_snippet(&LayoutFacts::default()), 3);
+    }
+
+    /// A layout injected by the version before the mini rail gains the mini
+    /// pane after each injected rail pane, byte-for-byte otherwise; a second
+    /// pass is a no-op and uninstall still restores the user's original.
+    #[test]
+    fn add_mini_upgrades_a_pre_mini_injection_and_is_idempotent() {
+        let fresh = inject(USER_LAYOUT, &analyze(USER_LAYOUT)).unwrap();
+        let pre_mini = strip_mini(&fresh);
+        // The pre-mini wrap, as that version wrote it.
+        assert!(pre_mini.contains(
+            "        // zj-radar:wrap begin\n        pane split_direction=\"vertical\" {\n            \
+             pane size=32 borderless=true {\n                plugin location=\"radar\"\n            }\n            \
+             children\n        }\n        // zj-radar:wrap end\n"
+        ));
+        assert!(!pre_mini.contains("mini true") && analyze(&pre_mini).has_rail);
+
+        let upgraded = add_mini(&pre_mini).expect("a pre-mini injection must be upgraded");
+        assert_eq!(upgraded, fresh, "the upgrade must equal a fresh inject");
+        upgraded.parse::<kdl::KdlDocument>().expect("upgraded output must be valid KDL");
+        assert!(add_mini(&upgraded).is_none(), "re-running must be a no-op");
+        assert!(add_mini(USER_LAYOUT).is_none(), "no markers → nothing to upgrade");
+        assert_eq!(uninstall(&upgraded).unwrap(), USER_LAYOUT);
+        assert_eq!(uninstall(&pre_mini).unwrap(), USER_LAYOUT, "a pre-mini injection still uninstalls");
+    }
+
+    /// A rail pane the user pasted by hand (no markers) is theirs: never touched.
+    #[test]
+    fn add_mini_ignores_a_rail_outside_our_markers() {
+        let manual = strip_mini(&full_layout());
+        assert!(analyze(&manual).has_rail && add_mini(&manual).is_none());
+    }
+
+    /// Whole-file uninstall must still recognise what the pre-mini setup wrote.
+    #[test]
+    fn setup_authored_layouts_include_the_pre_mini_full_layout() {
+        let pre_mini = strip_mini(&full_layout());
+        assert_ne!(pre_mini, full_layout());
+        let all = setup_authored_layouts();
+        assert!(all.contains(&pre_mini));
+        assert!(all.contains(&pre_mini.replace("    tab focus=true {", "    tab name=\"shell\" focus=true {")));
+        assert!(all.contains(&full_layout()));
+    }
+
     /// The example layout is load-bearing documentation (install.md and the
     /// troubleshooting swap entry both point at it): it must parse with the
     /// same v1-fallback parser Zellij's dialect needs, carry all three swap
@@ -889,6 +1024,21 @@ layout {
         assert!(example.contains("new_tab_template"), "two-template rule");
         assert!(example.contains("tab_template name=\"ui\""), "swaps route through ui");
         assert_eq!(example.matches("swap_tiled_layout").count(), 3);
+        // The mini rail rides right after the full rail in every rail-carrying template.
+        let doc = example.parse::<kdl::KdlDocument>().unwrap();
+        let layout = doc.nodes().iter().find(|n| n.name().value() == "layout").unwrap().children().unwrap();
+        for name in ["default_tab_template", "new_tab_template", "tab_template"] {
+            let node = layout
+                .nodes()
+                .iter()
+                .find(|n| n.name().value() == name && (name != "tab_template" || n.get("name").is_some()))
+                .unwrap_or_else(|| panic!("{name} missing"));
+            let split = node.children().unwrap().nodes().first().unwrap().children().unwrap();
+            let pane_sizes: Vec<String> =
+                split.nodes().iter().filter_map(|p| p.get("size")).map(|v| v.to_string()).collect();
+            assert_eq!(pane_sizes, ["32", "4"], "{name}: full rail then mini rail");
+        }
+        assert_mini_follows_each_rail(example, 3);
     }
 
     /// Drift guard: `full_layout()` must stay byte-equal to `run_assets/radar.kdl`
