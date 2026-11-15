@@ -2239,14 +2239,21 @@ fn render_mini(rows: &[TabRow], opts: &RenderOpts) -> RenderedRail {
         // takes the spine's color (the full rail's active cue) instead.
         let label_color = if st == Status::Idle { tc_fg(opts.theme.idle_text) } else { st.role().ansi().to_string() };
         let num_color = if row.active { spine_role(st).ansi().to_string() } else { label_color.clone() };
-        let sep = if row.number < 100 { " " } else { "" };
+        // The number gets every cell but the glyph's: Zellij can hand the
+        // `size=4` pane fewer content columns, and a wider line would wrap the
+        // glyph onto the next row, under the next tab's click target.
+        let num_w = opts.width.saturating_sub(1).max(1);
+        let digits = row.number.to_string();
+        let (num, sep) = if num_w >= 3 && digits.len() <= 2 {
+            (format!("{digits:>2}"), " ")
+        } else {
+            // ponytail: too many digits for the cells keeps the last ones (`100` → `00` at 3 columns), fine below 100 tabs.
+            let tail = &digits[digits.len().saturating_sub(num_w)..];
+            (format!("{tail:>num_w$}"), "")
+        };
         let text = format!(
             "{}{sep}{}\n",
-            Seg {
-                color: &num_color,
-                bold: st != Status::Idle || row.active,
-                text: format!("{:>2}", row.number).into()
-            },
+            Seg { color: &num_color, bold: st != Status::Idle || row.active, text: num.into() },
             Seg { color: &label_color, bold: st != Status::Idle, text: tab_glyph(row, opts).to_string().into() },
         );
         lines.push(Line::new(text, Some(target_for_row(row)), LineBg::None));

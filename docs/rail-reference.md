@@ -1021,6 +1021,28 @@ tab 1 "web"
  └ ◆ ✳ approve?                ✓
 ```
 
+## AN. Mini rail — three content columns
+
+**Render-derived.** Zellij gives the `size=4` mini pane only 3 content
+columns while a terminal sits to its right (the full rail likewise draws in
+31 of its 32). Every line fits the columns it gets: the space before the
+glyph goes first, so the glyph never wraps under the next tab's click target.
+
+```rail-input
+width 3
+height 4
+mini
+tab 1 "web"
+  claude running "editing"
+tab 12 "api"
+  claude pending "approve?"
+```
+```rail-expect
+ »
+ 1⠋
+12◆
+```
+
 ---
 
 ## Open decisions

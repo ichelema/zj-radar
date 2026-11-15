@@ -1482,6 +1482,7 @@ fn sidebar_toggle_swaps_the_full_and_mini_rail_in_every_tab() {
 
     assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(32)), "full rail first: {:?}", s.panes());
     assert!(s.wait_until(wait, mini_named), "the granted mini rail never named its pane: {:?}", s.panes());
+    let pane_one = s.discover_terminal_pane_id(); // tab one's shell prints ZPID=<id>
 
     s.run_action_checked(&["pipe", "--name", "zj_radar.cmd.v1", "--", "sidebar-toggle"]);
     assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(4)), "toggle → mini: {:?}", s.panes());
@@ -1495,6 +1496,21 @@ fn sidebar_toggle_swaps_the_full_and_mini_rail_in_every_tab() {
     assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(32)), "toggle → full: {:?}", s.panes());
     s.run_action_checked(&["pipe", "--name", "zj_radar.cmd.v1", "--", "sidebar-toggle"]);
     assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(4)), "toggle → mini again: {:?}", s.panes());
+
+    // Each tab's number and glyph share one physical row of the 4-column
+    // strip (no wrap), so the glyph cell clicks through to its own tab.
+    let row = |s: &ZellijSession, i: usize| sidebar_region(&s.screen(), 4).lines().nth(i).unwrap_or("").to_string();
+    let rows_ok = |s: &ZellijSession| {
+        let (one, two) = (row(s, 1), row(s, 2));
+        one.trim().starts_with('1') && one.trim().chars().count() >= 2 && two.trim().starts_with('2')
+    };
+    assert!(s.wait_until(wait, rows_ok), "mini grid:\n{}", sidebar_region(&s.screen(), 4));
+    let glyph_col = row(&s, 1).trim_end().chars().count() as u16; // 1-based column of the last cell
+    let tab_one = s.wait_until(wait, |s| {
+        s.click_at(glyph_col, 2);
+        s.dump_screen().contains(&format!("ZPID={pane_one}"))
+    });
+    assert!(tab_one, "a click on tab 1's glyph must open tab 1:\n{}", s.dump_screen());
 
     // `»` sits in the mini rail's top line, column 1 (1-based: col 2, row 1).
     s.click_at(2, 1);

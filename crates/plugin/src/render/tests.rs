@@ -4146,6 +4146,21 @@ fn mini_three_digit_numbers_drop_the_space_and_fit_four_cells() {
     assert_eq!(plain, " »\n100✓\n 7 ✓".replace('✓', &Status::Done.glyph_for(GlyphSet::Plain).to_string()));
 }
 
+/// Zellij hands the `size=4` pane left of a terminal only 3 content columns:
+/// every line must fit them, or the glyph wraps under the next tab's target.
+#[test]
+fn mini_fits_three_content_columns() {
+    let rows = vec![
+        tab(1, "t", display(Status::Done, 0, 0, None)),
+        tab(12, "t", display(Status::Done, 0, 0, None)),
+        tab(100, "t", display(Status::Done, 0, 0, None)),
+    ];
+    let opts = RenderOpts { width: 3, ..mini_opts(10) };
+    let plain = strip_sgr(&render(&rows, &opts));
+    assert_eq!(plain, " »\n 1✓\n12✓\n00✓".replace('✓', &Status::Done.glyph_for(GlyphSet::Plain).to_string()));
+    assert!(plain.lines().all(|l| UnicodeWidthStr::width(l) <= 3), "{plain}");
+}
+
 #[test]
 fn mini_active_number_takes_the_spine_color() {
     let rows = vec![
