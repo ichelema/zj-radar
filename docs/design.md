@@ -264,11 +264,10 @@ closes the tab exactly as before.
 - `GlobalAttentionUpdate`: every session on the server (§10).
 - `CwdChanged`, `RunCommandResult`: tab naming (§8).
 - `Timer`, `Mouse`, `PermissionRequestResult`, `Visible`.
-- `InputReceived`: every action Zellij attributes to the instance's client
-  (§5, *Whose press*). Each one costs every rail instance of that client a
-  wasm `update` call that sets one field and requests no repaint. Measured
-  once with 12 tabs: about 0.4 ms of server CPU per key, growing with the
-  tab count.
+- `InputReceived`: the instance's client acted (*Whose press*, below). Each
+  action costs every rail instance of that client one wasm `update` call that
+  sets one field and requests no repaint. With 12 tabs that is about 0.4 ms
+  of server CPU per key, and the cost grows with the tab count.
 - `ModeUpdate`: `ModeInfo.session_name` (the source §10 depends on),
   `ModeInfo.mode` for the `show_mode` footer label, and the theme palette.
   Zellij re-sends it to the newly active tab on every tab switch, so a
@@ -280,8 +279,9 @@ closes the tab exactly as before.
 **Event routing.** Zellij delivers `TabUpdate`, `PaneUpdate`, and `ModeUpdate`
 only to the plugins in each client's *active* tab. `PaneAttentionChanged`,
 `GlobalAttentionUpdate`, `CwdChanged`, and pipe messages reach every
-subscribed instance. `InputReceived` reaches every instance of the client it
-names, hidden tabs included. A hidden rail therefore keeps each pane's attention
+subscribed instance. `InputReceived` for a key reaches every instance of the
+client it names, hidden tabs included; for a mouse action, only the plugins in
+that client's active tab. A hidden rail therefore keeps each pane's attention
 current, but its tabs, topology, and child records wait for the manifest its
 reveal brings. That includes a child-only pane (Opencode): its row takes its
 status from the records (§4.1, *Child-only panes*), so the row waits too,
@@ -330,12 +330,15 @@ would race the visible rail's `SwitchTab` with a wrong one
 broadcast reaches every client's instances and `PipeSource::Keybind` names no
 client, so with no other signal one press would move every attached client.
 The signal is `InputReceived`. Zellij sends it for every action it
-attributes to a client (a key, a mouse action, a plugin command, or a CLI
-action, which counts as the client that last pressed a key), to that client's
-instances only, just before it routes the action, down the same queue. A
-keybind's verb runs only on an instance whose client sent input within 100
-ms (`KEYBIND_INPUT_WINDOW_MS`), and the press consumes that mark. A mouse
-event already reaches only the clicking client's instance. Limits:
+attributes to a client: a key, a mouse action, a plugin command routed as an
+action (`apply_action!`), or a CLI action. A CLI action counts as the client
+that last pressed a key. The event goes to that client's instances only. For
+a keybind it arrives just before the pipe, down the same queue. A keybind's
+verb runs only on an instance whose client acted within 100 ms
+(`KEYBIND_INPUT_WINDOW_MS`), and the press consumes that mark. The rail's own
+commands (`switch_tab_to`, `switch_session`, `rename_tab_with_id`) go
+straight to the screen, so they never arm it. A mouse event already reaches
+only the clicking client's instance. Limits:
 
 - Any action attributed to another client inside the window lets that
   client's rails act too: its keystroke, its click, or a script's
@@ -344,10 +347,12 @@ event already reaches only the clicking client's instance. Limits:
   `InterceptInput` permission and every action delivered to every instance.
 - `zellij pipe` from the CLI keeps the broadcast. It is not a key press, and
   its own `InputReceived` would only name the client that last pressed a key.
-- `Visible` is per pane, not per client: a tab another client is viewing
+- `Visible` is per pane, not per client. A tab another client is viewing
   stays visible to this client's instance there, whose `tabs` froze when this
-  client left. That instance answers too, and its `attention-*` vote races
-  the current tab's one, as in #89.
+  client left. That instance answers the presser's verbs too. Its
+  `attention-*` vote races the current tab's one, the race above. A
+  `session-*` press cycles on both instances, and each commits its own
+  `SwitchSession` for the presser (ICH-476).
 
 **Layout is the integration seam.** The sidebar is a borderless left column
 inside a vertical split, outside `children`, so `swap_tiled_layout` cycling

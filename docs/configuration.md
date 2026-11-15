@@ -144,10 +144,9 @@ These binds broadcast too, for the reason above: in a session without a
 rail they do nothing.
 
 With two or more clients attached to one session, a key press moves only the
-client that pressed it. Two exceptions: a `zellij pipe` from the command line
-moves every client, and a press can also move another client that acted
-within the last tenth of a second: it typed, clicked, or a script ran
-`zellij action` while it was the last client to press a key
+client that pressed it. A `zellij pipe` from the command line still moves
+every client. A press can also move another client that acted within the
+last tenth of a second, for example by typing or clicking
 ([why](design.md#5-plugin--zellij-wiring)).
 
 Unknown verbs are ignored. Both pipes are inert until the sidebar has been

@@ -732,7 +732,8 @@ impl PluginRuntime {
     /// and it would vote for the attention tab after *its* tab — Zellij
     /// applies each `SwitchTab` in arrival order, the last one wins (#89).
     /// The session verbs are gated the same way so one press moves one
-    /// cycle selection and commits one `SwitchSession`, not one per tab. A
+    /// cycle selection and commits one `SwitchSession`, not one per tab
+    /// (except on a tab another client views, below). A
     /// rail that was never shown counts as visible but has no tabs, so the
     /// attention verbs already resolve to nothing there. Zellij runs one
     /// instance per pane and client, and the broadcast reaches every
@@ -776,8 +777,9 @@ impl PluginRuntime {
     }
 
     /// `Event::InputReceived`: Zellij attributed an action to this
-    /// instance's client: a key, a mouse action, a plugin command, or a CLI
-    /// action while this client was the last to press a key. It goes to that
+    /// instance's client: a key, a mouse action, a plugin command routed as
+    /// an action, or a CLI action while this client was the last to press a
+    /// key. It goes to that
     /// client's instances only, before Zellij routes the action, so a
     /// keybind's `InputReceived` reaches each instance ahead of its pipe.
     pub(crate) fn input_received(&mut self, now_ms: u64) {
@@ -790,11 +792,7 @@ impl PluginRuntime {
     /// [`KEYBIND_INPUT_WINDOW_MS`] runs it; the others leave their client
     /// where it is. The mark is consumed either way; a mark newer than
     /// `now_ms` (the clock stepped back) does not count.
-    /// ponytail: any action attributed to another client inside the window
-    /// (its keystroke, its click, a script's `zellij action` while it was the
-    /// last to press a key) still lets its rails act; an exact match needs
-    /// the presser's id on the pipe (Zellij) or `UserAction` (the
-    /// `InterceptInput` permission).
+    /// ponytail: another client that acted inside the window acts too; exact match is ICH-477 (design.md §5).
     pub(crate) fn keybind_control_pipe(&mut self, payload: &str, now_ms: u64) -> Outcome {
         let pressed_here = self
             .input_at_ms

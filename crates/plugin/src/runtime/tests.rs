@@ -509,8 +509,8 @@ fn keybind_verbs_need_input_inside_the_window() {
     // A mark from the future (the clock stepped back since) is no fresh press.
     rt.input_received(3_600_000);
     assert_eq!(rt.keybind_control_pipe("attention-next", 1_000), Outcome::default());
-    // A CLI pipe names no client either, and no rail sees the CLI's input:
-    // it keeps acting everywhere.
+    // A CLI pipe is no key press: it skips the gate and keeps acting
+    // everywhere.
     assert_eq!(rt.control_pipe("attention-next").effects, switch);
 }
 
