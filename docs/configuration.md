@@ -143,6 +143,13 @@ keybinds {
 These binds broadcast too, for the reason above: in a session without a
 rail they do nothing.
 
+With two or more clients attached to one session, a verb moves every client,
+not just the one that pressed the key. Zellij runs a rail instance per client
+and delivers a keybind's message (or a `zellij pipe`) to all of them without
+saying which client sent it, so each client's visible rail switches its own
+client. A mouse click reaches only the clicking client's rail, so it moves
+only that client.
+
 Unknown verbs are ignored. Both pipes are inert until the sidebar has been
 granted permissions. The `✓` mouse gesture is described in
 [`using.md`](using.md#mouse).

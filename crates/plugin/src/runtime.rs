@@ -721,10 +721,11 @@ impl PluginRuntime {
     /// The session verbs are gated the same way so one press moves one
     /// cycle selection and commits one `SwitchSession`, not one per tab. A
     /// rail that was never shown counts as visible but has no tabs, so the
-    /// attention verbs already resolve to nothing there. Two clients on
-    /// different tabs each have a visible rail, and `PipeSource::Keybind`
-    /// names no client, so a press can still move the other client: no
-    /// plugin-side signal tells the rails apart.
+    /// attention verbs already resolve to nothing there. Zellij runs one
+    /// instance per pane and client, so every attached client has its own
+    /// visible rail, and `PipeSource::Keybind` names no client: a press
+    /// moves every client (ICH-452). No plugin-side signal tells the
+    /// presser's instance apart.
     pub(crate) fn control(&mut self, verb: Verb) -> Outcome {
         if !self.permission.granted() || self.hidden {
             return Outcome::none();
