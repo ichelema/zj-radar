@@ -178,6 +178,9 @@ command panes, and the foreground process. Its rules, all on the Zellij side:
   prompts (OSC 133) or from a command pane. Otherwise it sees only the
   foreground process end: a command that ran at least `done_threshold_secs`
   reports Done whatever its exit code, and a shorter one reports nothing.
+  bash and zsh write no marks by default: `zj-radar setup shell` adds them
+  ([install](install.md#mark-failed-shell-commands-setup-shell)). Nushell
+  writes them by default.
 - A pane whose program reports OSC 7501 is not command-tracked.
 - Without the `ReadPaneContents` permission Zellij strips the command text;
   the plugin requests it.

@@ -300,6 +300,36 @@ nonzero.
 
 Bare `zj-radar setup --check` is the same check.
 
+## Mark failed shell commands (`setup shell`)
+
+Zellij learns a shell command's exit code only from OSC 133 prompt marks.
+bash and zsh write none by default, so a failed command there reads done, or
+gets no row when it is shorter than `done_threshold_secs`
+([details](activity-model.md#4-where-the-status-comes-from)). Nushell writes
+the marks by default and needs nothing. For another shell, check whether it
+writes OSC 133.
+
+```sh
+zj-radar setup shell            # the shell in $SHELL
+zj-radar setup shell bash zsh   # name them
+```
+
+This adds a block between `# >>> zj-radar shell marks >>>` markers to
+`~/.bashrc` or `${ZDOTDIR:-~}/.zshrc`. Inside Zellij the block writes
+`133;C` with the command line before each command, then `133;D;<exit>` and
+`133;A` at the next prompt. Outside Zellij it does nothing. It keeps your
+`PROMPT_COMMAND` and zsh hooks. bash needs 4.4 or newer (`PS0`); an older
+bash skips the block. Open a new shell in a Zellij pane to load it.
+
+- Running it again updates the block in place; it never adds a second one.
+- `--check` reports each rc file, `--dry-run` prints the block, and
+  `--uninstall` removes it and leaves the rest of the file as it was.
+- An rc file that already writes OSC 133 marks (another shell integration)
+  is left alone.
+- If a dotfile manager owns the rc file, put the block in the manager's
+  source instead (`--dry-run` prints it): the next apply undoes the edit.
+- Bare `zj-radar setup` never touches rc files.
+
 ## Upgrade (`zj-radar update`)
 
 ```sh
@@ -414,7 +444,8 @@ config-dir entries with them.
 | `~/.config/zellij/config.kdl`: managed `radar` alias between `// zj-radar:` markers | `setup zellij` | **reversed**: strips only the fenced block |
 | `~/.config/zellij/layouts/<name>.kdl`: rail spliced between markers | `setup zellij --inject` into an existing layout | **reversed**: exact inverse of the splice |
 | `~/.config/zellij/layouts/<name>.kdl`: whole file | `setup zellij --inject` when no layout existed | left in place; delete the file |
-| `<edited file>.zj-radar.bak` | every config/layout edit, and `run`'s grant write (`permissions.kdl.zj-radar.bak`) | left in place; they are your restore points |
+| `~/.bashrc`, `${ZDOTDIR:-~}/.zshrc`: OSC 133 marks block between `# zj-radar shell marks` markers | `setup shell` | **reversed**: strips only the block |
+| `<edited file>.zj-radar.bak` | every config/layout/rc edit, and `run`'s grant write (`permissions.kdl.zj-radar.bak`) | left in place; they are your restore points |
 | `~/.config/zellij/plugins/zj_radar.wasm` | `setup zellij --wasm/--download` | left in place; `rm` it |
 | `permissions.kdl` grant entry (macOS `~/Library/Caches/org.Zellij-Contributors.Zellij/`, Linux `~/.cache/zellij/`) | `setup zellij` with your consent, `zj-radar run`, or Zellij when you answer `y` | left in place (Zellij also writes this file); delete the `zj_radar.wasm` block |
 | `run`'s config dir (macOS `~/Library/Application Support/zj-radar/`, Linux `~/.local/share/zj-radar/`) | `zj-radar run` | not touched by `setup`; `rm -r` it, it holds only re-materializable assets and session markers |
@@ -425,6 +456,7 @@ Complete removal:
 
 ```sh
 zj-radar setup zellij --uninstall -y
+zj-radar setup shell bash zsh --uninstall -y
 ```
 
 then delete the wasm, the `run` data dir, the grant block, and the binary.

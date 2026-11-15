@@ -679,9 +679,12 @@ renders `--check`, and the install orchestrator gates on it. The pure mutator
 (`edit_zellij` → `Outcome`) shares only the low-level detectors in
 `setup/detect.rs`.
 
-`zellij` is the only target. Agents need no setup, and naming a former agent
-target (`claude`, `codex`, `opencode`, `pi`, `omp`) fails with a hint on how
-to remove an old adapter.
+`zellij` is the default target. Agents need no setup, and naming a former
+agent target (`claude`, `codex`, `opencode`, `pi`, `omp`) fails with a hint on
+how to remove an old adapter. The opt-in `shell [bash|zsh]` target
+(`setup/shell.rs`) adds a marked block to the shell's rc file that writes OSC
+133 prompt marks, so Zellij learns each command's exit code; the plugin needs
+no code for it.
 
 ## 12. Build and packaging
 
