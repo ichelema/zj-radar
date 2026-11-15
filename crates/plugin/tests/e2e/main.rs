@@ -1322,7 +1322,7 @@ keybinds {
     b.emit_program_status("state=blocked:app=claude-code:kind=question:msg=cGljayBvbmU=");
     // Keeps A's rails on Fast ticks, so a selection commits within ~1s.
     a.emit_program_status(&osc("working", "keep-fast"));
-    // Declared after `b`, so it drops (detaches) first; `a` owns the root.
+    // Declared after `b`, so it drops first (killing session A); `a` owns the root.
     let other = a.attach_client();
 
     let needle = format!("{} 1◆", b.name);

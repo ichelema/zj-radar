@@ -303,7 +303,8 @@ impl ZellijSession {
 
     /// A second client attached to `self`'s session, on its own PTY. Zellij
     /// gives it its own instance of every plugin. Like a sibling it borrows
-    /// `self`'s isolated root, so drop it before `self`.
+    /// `self`'s isolated root, so drop it before `self`. It shares `self`'s
+    /// name, so its Drop kills the whole session, not just this client.
     pub fn attach_client(&self) -> ZellijSession {
         let (rows, cols) = *self.size.lock().unwrap();
         Self::start_internal(&self.name, "", self.isolated.shared(), rows, cols, Launch::Attach)

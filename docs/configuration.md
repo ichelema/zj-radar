@@ -145,8 +145,10 @@ rail they do nothing.
 
 With two or more clients attached to one session, a key press moves only the
 client that pressed it. Two exceptions: a `zellij pipe` from the command line
-moves every client, and so can a press that lands within a tenth of a second
-of another client's keystroke ([why](design.md#5-plugin--zellij-wiring)).
+moves every client, and a press can also move another client that acted
+within the last tenth of a second: it typed, clicked, or a script ran
+`zellij action` while it was the last client to press a key
+([why](design.md#5-plugin--zellij-wiring)).
 
 Unknown verbs are ignored. Both pipes are inert until the sidebar has been
 granted permissions. The `✓` mouse gesture is described in

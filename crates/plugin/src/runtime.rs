@@ -775,10 +775,11 @@ impl PluginRuntime {
         }
     }
 
-    /// `Event::InputReceived`: this instance's client just sent input. Zellij
-    /// sends it to that client's instances only, before it routes the
-    /// action, so a keybind's `InputReceived` reaches each instance ahead of
-    /// the keybind's pipe.
+    /// `Event::InputReceived`: Zellij attributed an action to this
+    /// instance's client: a key, a mouse action, a plugin command, or a CLI
+    /// action while this client was the last to press a key. It goes to that
+    /// client's instances only, before Zellij routes the action, so a
+    /// keybind's `InputReceived` reaches each instance ahead of its pipe.
     pub(crate) fn input_received(&mut self, now_ms: u64) {
         self.input_at_ms = Some(now_ms);
     }
@@ -787,13 +788,18 @@ impl PluginRuntime {
     /// delivers it to every client's instances and names no client, so only
     /// an instance whose own client sent input within
     /// [`KEYBIND_INPUT_WINDOW_MS`] runs it; the others leave their client
-    /// where it is. The mark is consumed either way.
-    /// ponytail: another client's keystroke inside the window still lets
-    /// its rails act; an exact match needs the presser's id on the pipe
-    /// (Zellij) or `UserAction` (the `InterceptInput` permission).
+    /// where it is. The mark is consumed either way; a mark newer than
+    /// `now_ms` (the clock stepped back) does not count.
+    /// ponytail: any action attributed to another client inside the window
+    /// (its keystroke, its click, a script's `zellij action` while it was the
+    /// last to press a key) still lets its rails act; an exact match needs
+    /// the presser's id on the pipe (Zellij) or `UserAction` (the
+    /// `InterceptInput` permission).
     pub(crate) fn keybind_control_pipe(&mut self, payload: &str, now_ms: u64) -> Outcome {
-        let pressed_here =
-            self.input_at_ms.take().is_some_and(|at| now_ms.saturating_sub(at) <= KEYBIND_INPUT_WINDOW_MS);
+        let pressed_here = self
+            .input_at_ms
+            .take()
+            .is_some_and(|at| now_ms.checked_sub(at).is_some_and(|age| age <= KEYBIND_INPUT_WINDOW_MS));
         if !pressed_here {
             return Outcome::none();
         }

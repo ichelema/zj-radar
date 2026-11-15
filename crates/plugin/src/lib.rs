@@ -339,9 +339,10 @@ impl ZellijPlugin for State {
             // state and ticks carry on —
             // `PluginRuntime::hidden` has the contract.
             EventType::Visible,
-            // This instance's client sent input: tells its keybind presses
+            // An action of this instance's client: tells its keybind presses
             // from another client's (`PluginRuntime::keybind_control_pipe`).
-            // One flag write per keystroke, no repaint.
+            // One field write per action and instance, no repaint; the cost
+            // is in docs/design.md §5, *Subscriptions*.
             EventType::InputReceived,
         ]);
         let ids = get_plugin_ids();

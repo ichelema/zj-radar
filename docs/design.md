@@ -264,6 +264,11 @@ closes the tab exactly as before.
 - `GlobalAttentionUpdate`: every session on the server (§10).
 - `CwdChanged`, `RunCommandResult`: tab naming (§8).
 - `Timer`, `Mouse`, `PermissionRequestResult`, `Visible`.
+- `InputReceived`: every action Zellij attributes to the instance's client
+  (§5, *Whose press*). Each one costs every rail instance of that client a
+  wasm `update` call that sets one field and requests no repaint. Measured
+  once with 12 tabs: about 0.4 ms of server CPU per key, growing with the
+  tab count.
 - `ModeUpdate`: `ModeInfo.session_name` (the source §10 depends on),
   `ModeInfo.mode` for the `show_mode` footer label, and the theme palette.
   Zellij re-sends it to the newly active tab on every tab switch, so a
@@ -275,7 +280,8 @@ closes the tab exactly as before.
 **Event routing.** Zellij delivers `TabUpdate`, `PaneUpdate`, and `ModeUpdate`
 only to the plugins in each client's *active* tab. `PaneAttentionChanged`,
 `GlobalAttentionUpdate`, `CwdChanged`, and pipe messages reach every
-subscribed instance. A hidden rail therefore keeps each pane's attention
+subscribed instance. `InputReceived` reaches every instance of the client it
+names, hidden tabs included. A hidden rail therefore keeps each pane's attention
 current, but its tabs, topology, and child records wait for the manifest its
 reveal brings. That includes a child-only pane (Opencode): its row takes its
 status from the records (§4.1, *Child-only panes*), so the row waits too,
@@ -323,17 +329,21 @@ would race the visible rail's `SwitchTab` with a wrong one
 `switch_tab_to` / `switch_session` act on the instance's own client. The
 broadcast reaches every client's instances and `PipeSource::Keybind` names no
 client, so with no other signal one press would move every attached client.
-The signal is `InputReceived`: Zellij sends it to the pressing client's
-instances only, just before it routes the keybind, down the same queue. A
+The signal is `InputReceived`. Zellij sends it for every action it
+attributes to a client (a key, a mouse action, a plugin command, or a CLI
+action, which counts as the client that last pressed a key), to that client's
+instances only, just before it routes the action, down the same queue. A
 keybind's verb runs only on an instance whose client sent input within 100
 ms (`KEYBIND_INPUT_WINDOW_MS`), and the press consumes that mark. A mouse
 event already reaches only the clicking client's instance. Limits:
 
-- A client that typed inside the window also acts. An exact answer needs the
-  presser's id on the pipe (Zellij) or `UserAction`, which costs the
+- Any action attributed to another client inside the window lets that
+  client's rails act too: its keystroke, its click, or a script's
+  `zellij action` while it was the last to press a key. An exact answer needs
+  the presser's id on the pipe (Zellij) or `UserAction`, which costs the
   `InterceptInput` permission and every action delivered to every instance.
-- `zellij pipe` from the CLI keeps the broadcast: the CLI client has no rail
-  to receive its `InputReceived`.
+- `zellij pipe` from the CLI keeps the broadcast. It is not a key press, and
+  its own `InputReceived` would only name the client that last pressed a key.
 - `Visible` is per pane, not per client: a tab another client is viewing
   stays visible to this client's instance there, whose `tabs` froze when this
   client left. That instance answers too, and its `attention-*` vote races
