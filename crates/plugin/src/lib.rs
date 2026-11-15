@@ -339,6 +339,10 @@ impl ZellijPlugin for State {
             // state and ticks carry on —
             // `PluginRuntime::hidden` has the contract.
             EventType::Visible,
+            // This instance's client sent input: tells its keybind presses
+            // from another client's (`PluginRuntime::keybind_control_pipe`).
+            // One flag write per keystroke, no repaint.
+            EventType::InputReceived,
         ]);
         let ids = get_plugin_ids();
         self.plugin_id = Some(ids.plugin_id);
@@ -472,6 +476,10 @@ impl ZellijPlugin for State {
                 let outcome = self.runtime.visibility_changed(visible);
                 self.handle_outcome(outcome)
             }
+            Event::InputReceived => {
+                self.runtime.input_received(crate::clock::now_ms());
+                false
+            }
             Event::CwdChanged(pane_id, path, _clients) => {
                 if let PaneId::Terminal(id) = pane_id {
                     let outcome = self.runtime.cwd_changed(id, path.to_string_lossy().to_string());
@@ -500,6 +508,9 @@ impl ZellijPlugin for State {
         let Some(raw) = &message.payload else { return false };
         let outcome = match message.name.as_str() {
             CONFIG_PIPE => self.runtime.config_pipe(raw),
+            CMD_PIPE if message.source == PipeSource::Keybind => {
+                self.runtime.keybind_control_pipe(raw, crate::clock::now_ms())
+            }
             CMD_PIPE => self.runtime.control_pipe(raw),
             _ => return false,
         };

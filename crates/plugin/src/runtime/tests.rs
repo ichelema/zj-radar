@@ -464,6 +464,53 @@ fn control_pipe_unknown_verb_is_no_op() {
     assert_eq!(runtime.control_pipe(""), Outcome::default());
 }
 
+/// Two clients on one session: Zellij runs one rail instance per client and
+/// hands a keybind's `cmd.v1` pipe to both, but `InputReceived` only to the
+/// presser's. Only that instance may act, so the other client stays put
+/// (ICH-452).
+#[test]
+fn keybind_verbs_run_only_on_the_pressing_clients_rail() {
+    let rail = || {
+        let mut rt = runtime_with_granted_permission();
+        rt.global_attention_changed(vec![fresh(r#"{"session_name":"alpha","running":0,"attention":1}"#)]);
+        rt.tabs_changed(vec![tab(0, "a", true), tab(1, "b", false)]);
+        rt.radar.set_tab_panes_for_position(1, vec![pane(11)]);
+        set_status(&mut rt.radar, 11, Status::Pending, "working", 1);
+        rt
+    };
+    for verb in ["session-next", "attention-next"] {
+        let (mut presser, mut other) = (rail(), rail());
+        presser.input_received(1_000);
+        let pressed = presser.keybind_control_pipe(verb, 1_005);
+        assert_ne!(pressed, Outcome::default(), "{verb}: the presser's rail acts");
+        assert_eq!(
+            other.keybind_control_pipe(verb, 1_005),
+            Outcome::default(),
+            "{verb}: the other client's rail stays put"
+        );
+        // The press consumed the mark: a second pipe with no new input is
+        // someone else's press.
+        assert_eq!(presser.keybind_control_pipe(verb, 1_010), Outcome::default(), "{verb}: one input arms one press");
+    }
+}
+
+#[test]
+fn keybind_verbs_need_input_inside_the_window() {
+    let mut rt = granted_runtime();
+    rt.tabs_changed(vec![tab(0, "a", true), tab(1, "b", false)]);
+    rt.radar.set_tab_panes_for_position(1, vec![pane(11)]);
+    set_status(&mut rt.radar, 11, Status::Pending, "working", 1);
+    let switch = vec![Effect::SwitchTab { position: 1 }];
+
+    rt.input_received(1_000);
+    assert_eq!(rt.keybind_control_pipe("attention-next", 1_000 + KEYBIND_INPUT_WINDOW_MS).effects, switch);
+    rt.input_received(1_000);
+    assert_eq!(rt.keybind_control_pipe("attention-next", 1_001 + KEYBIND_INPUT_WINDOW_MS), Outcome::default());
+    // A CLI pipe names no client either, and no rail sees the CLI's input:
+    // it keeps acting everywhere.
+    assert_eq!(rt.control_pipe("attention-next").effects, switch);
+}
+
 // ── Cross-session badge + cycling ───────────────────────────────────────
 
 /// A granted runtime whose own session name is already known (as it would be

@@ -318,12 +318,26 @@ hidden rail. A keybind's `MessagePlugin` reaches every tab's rail, and a
 hidden rail's frozen tabs still mark its own tab active, so letting it act
 would race the visible rail's `SwitchTab` with a wrong one
 ([#89](https://github.com/marktoda/zj-radar/issues/89)).
-The gate cannot single out a client. Zellij keeps one plugin instance per
-pane and client, the broadcast reaches every client's instances, and
-`PipeSource::Keybind` names no client. Each client's visible rail therefore
-acts, and `switch_tab_to` / `switch_session` act on the instance's own
-client, so one press moves every attached client. A mouse event reaches only
-the clicking client's instance.
+
+**Whose press.** Zellij keeps one plugin instance per pane and client, and
+`switch_tab_to` / `switch_session` act on the instance's own client. The
+broadcast reaches every client's instances and `PipeSource::Keybind` names no
+client, so with no other signal one press would move every attached client.
+The signal is `InputReceived`: Zellij sends it to the pressing client's
+instances only, just before it routes the keybind, down the same queue. A
+keybind's verb runs only on an instance whose client sent input within 100
+ms (`KEYBIND_INPUT_WINDOW_MS`), and the press consumes that mark. A mouse
+event already reaches only the clicking client's instance. Limits:
+
+- A client that typed inside the window also acts. An exact answer needs the
+  presser's id on the pipe (Zellij) or `UserAction`, which costs the
+  `InterceptInput` permission and every action delivered to every instance.
+- `zellij pipe` from the CLI keeps the broadcast: the CLI client has no rail
+  to receive its `InputReceived`.
+- `Visible` is per pane, not per client: a tab another client is viewing
+  stays visible to this client's instance there, whose `tabs` froze when this
+  client left. That instance answers too, and its `attention-*` vote races
+  the current tab's one, as in #89.
 
 **Layout is the integration seam.** The sidebar is a borderless left column
 inside a vertical split, outside `children`, so `swap_tiled_layout` cycling

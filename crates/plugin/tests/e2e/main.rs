@@ -1286,3 +1286,63 @@ fn session_next_switches_to_the_session_with_attention() {
     );
     eprintln!("[e2e] PASS: session-next committed and A's client switched onto B");
 }
+
+/// Two clients on one session (ICH-452). Zellij gives each client its own
+/// rail instance and hands a keybind's `MessagePlugin` to all of them, naming
+/// no client; only the presser's instances get `InputReceived`. A keybind
+/// `session-next` from one client must move that client alone. Both rails
+/// first show B in the badge, so the other client's rail could commit the
+/// same switch if it took the press.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn keybind_session_next_moves_only_the_pressing_client() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+
+    let temp_home = pre_grant_permissions(&wasm);
+    temp_home.append_config(
+        r#"
+keybinds {
+    shared_except "locked" {
+        bind "Alt y" {
+            MessagePlugin { name "zj_radar.cmd.v1"; payload "session-next"; }
+        }
+    }
+}
+"#,
+    );
+    let pid = std::process::id();
+    let layout = sidebar_layout(&wasm);
+    let a = ZellijSession::start(&format!("zjr_2cl_a_{pid}"), &layout, &wasm, temp_home);
+    let b = a.start_sibling(&format!("zjr_2cl_b_{pid}"), &layout);
+    let pane_b = b.discover_terminal_pane_id();
+    b.emit_program_status("state=blocked:app=claude-code:kind=question:msg=cGljayBvbmU=");
+    // Keeps A's rails on Fast ticks, so a selection commits within ~1s.
+    a.emit_program_status(&osc("working", "keep-fast"));
+    // Declared after `b`, so it drops (detaches) first; `a` owns the root.
+    let other = a.attach_client();
+
+    let needle = format!("{} 1◆", b.name);
+    for (who, client) in [("pressing", &a), ("other", &other)] {
+        let saw = client.wait_until(Duration::from_secs(10), |s| sidebar_region(&s.screen(), 32).contains(&needle));
+        assert!(saw, "the {who} client's rail never showed {needle:?}:\n{}", sidebar_region(&client.screen(), 32));
+    }
+
+    a.press("\x1by"); // Alt+y, bound to session-next above
+    let marker = format!("ZPID={pane_b}");
+    assert!(
+        a.wait_until(Duration::from_secs(8), |s| s.pty_text().contains(&marker)),
+        "the pressing client never switched onto B (marker {marker:?})"
+    );
+    // A rail that took the press would have committed on the same ~1s tick;
+    // give it a few more.
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        !other.pty_text().contains(&marker),
+        "the other client followed the press onto B: a keybind verb ran on its rail too"
+    );
+    eprintln!("[e2e] PASS: a keybind session-next moved only the pressing client");
+}
