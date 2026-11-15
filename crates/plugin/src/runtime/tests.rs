@@ -549,6 +549,23 @@ fn verbs_run_only_on_the_tab_the_client_has_active() {
     assert_eq!(frozen.control(Verb::AttentionNext).effects, vec![Effect::SwitchTab { position: 1 }]);
 }
 
+/// The blocking read is a narrow exception to the push-driven rule only
+/// because it runs after every cheaper gate (AGENTS.md).
+#[test]
+fn the_client_tab_read_runs_only_past_the_cheaper_gates() {
+    let never: fn() -> Option<usize> = || panic!("client_tab read before a cheaper gate passed");
+    let mut ungranted = PluginRuntime { config: config(), client_tab: Some(never), ..Default::default() };
+    assert_eq!(ungranted.control(Verb::AttentionNext), Outcome::default(), "no permission");
+    let mut rt = granted_runtime();
+    rt.client_tab = Some(never);
+    rt.input_received(1_000);
+    let late = rt.keybind_control_pipe("attention-next", 1_001 + KEYBIND_INPUT_WINDOW_MS);
+    assert_eq!(late, Outcome::default(), "outside the keybind window");
+    assert_eq!(rt.control_pipe("attention-top"), Outcome::default(), "unknown verb");
+    rt.visibility_changed(false);
+    assert_eq!(rt.control_pipe("attention-next"), Outcome::default(), "hidden rail");
+}
+
 // ── Cross-session badge + cycling ───────────────────────────────────────
 
 /// A granted runtime whose own session name is already known (as it would be
