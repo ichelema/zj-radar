@@ -61,6 +61,17 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// How `ZellijSession::start_internal` brings up its PTY client.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Launch {
+    /// Create the session with the client attached.
+    New,
+    /// Create it detached, then attach (`start_background`).
+    Background,
+    /// Attach to a session that already runs (`attach_client`).
+    Attach,
+}
+
 pub struct ZellijSession {
     pub name: String,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -168,6 +179,15 @@ impl IsolatedEnvironment {
         self.home().join(".config")
     }
 
+    /// Append `kdl` to the isolated `config.kdl` (e.g. a `keybinds` block).
+    /// Call before `ZellijSession::start`: Zellij reads it at session start.
+    pub fn append_config(&self, kdl: &str) {
+        use std::io::Write as _;
+        let path = self.config_home().join("zellij").join("config.kdl");
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).expect("isolated config.kdl exists");
+        file.write_all(kdl.as_bytes()).expect("failed to append to isolated config.kdl");
+    }
+
     fn data_home(&self) -> std::path::PathBuf {
         self.home().join(".local/share")
     }
@@ -262,7 +282,7 @@ impl ZellijSession {
         rows: u16,
         cols: u16,
     ) -> Self {
-        Self::start_internal(name, layout_kdl, isolated, rows, cols, false)
+        Self::start_internal(name, layout_kdl, isolated, rows, cols, Launch::New)
     }
 
     /// Second session on the SAME server socket dir + cache as `self`, so the
@@ -278,38 +298,52 @@ impl ZellijSession {
     /// must outlive it (drop `self` last).
     pub fn start_sibling(&self, name: &str, layout_kdl: &str) -> ZellijSession {
         let (rows, cols) = *self.size.lock().unwrap();
-        Self::start_internal(name, layout_kdl, self.isolated.shared(), rows, cols, false)
+        Self::start_internal(name, layout_kdl, self.isolated.shared(), rows, cols, Launch::New)
+    }
+
+    /// A second client attached to `self`'s session, on its own PTY. Zellij
+    /// gives it its own instance of every plugin. Like a sibling it borrows
+    /// `self`'s isolated root, so drop it before `self`. It shares `self`'s
+    /// name, so its Drop kills the whole session, not just this client.
+    pub fn attach_client(&self) -> ZellijSession {
+        let (rows, cols) = *self.size.lock().unwrap();
+        Self::start_internal(&self.name, "", self.isolated.shared(), rows, cols, Launch::Attach)
     }
 
     /// `start`, but the session is created detached
     /// (`zellij attach --create-background`) and the PTY client attaches only
     /// after its plugins have loaded with no client connected.
     pub fn start_background(name: &str, layout_kdl: &str, isolated: IsolatedEnvironment) -> Self {
-        Self::start_internal(name, layout_kdl, isolated, 40, 100, true)
+        Self::start_internal(name, layout_kdl, isolated, 40, 100, Launch::Background)
     }
 
     /// Shared implementation behind `start_with_size` (owned environment),
-    /// `start_sibling` (borrowed environment) and `start_background`.
+    /// `start_sibling` (borrowed environment), `start_background` and
+    /// `attach_client`.
     fn start_internal(
         name: &str,
         layout_kdl: &str,
         isolated: IsolatedEnvironment,
         rows: u16,
         cols: u16,
-        background: bool,
+        launch: Launch,
     ) -> Self {
         assert_zellij_version();
 
         // Kill any previous session with this name to avoid conflicts.
-        let _ = isolated.command("zellij").args(["delete-session", name, "--force"]).output();
-        let _ = isolated.command("zellij").args(["kill-session", name]).output();
-        std::thread::sleep(Duration::from_millis(300));
+        if launch != Launch::Attach {
+            let _ = isolated.command("zellij").args(["delete-session", name, "--force"]).output();
+            let _ = isolated.command("zellij").args(["kill-session", name]).output();
+            std::thread::sleep(Duration::from_millis(300));
+        }
 
         // Write the layout to a temp file.
         let dir = std::env::temp_dir().join(format!("zjradar-e2e-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
         let layout_path = dir.join("layout.kdl");
-        std::fs::write(&layout_path, layout_kdl).unwrap();
+        if launch != Launch::Attach {
+            std::fs::write(&layout_path, layout_kdl).unwrap();
+        }
 
         // Open a PTY pair. Zellij needs a real TTY to start.
         let pty = NativePtySystem::default().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).unwrap();
@@ -320,7 +354,9 @@ impl ZellijSession {
         let mut cmd = CommandBuilder::new("zellij");
         let config = isolated.config_home().join("zellij").join("config.kdl");
         cmd.args(["--config", config.to_str().unwrap()]);
-        if background {
+        if launch == Launch::Attach {
+            cmd.args(["attach", name]);
+        } else if launch == Launch::Background {
             let created = isolated
                 .command("zellij")
                 .args(["--config", config.to_str().unwrap()])

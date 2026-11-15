@@ -95,9 +95,9 @@ keybinds {
 ```
 
 - `MessagePlugin` with no plugin named broadcasts the message to every
-  running plugin. Each radar instance (one per tab) picks it out by its pipe
-  name, so the whole session updates at once; other plugins ignore it, and in
-  a session without a rail the key does nothing.
+  running plugin. Each radar instance (one per tab and client) picks it out
+  by its pipe name, so the whole session updates at once; other plugins
+  ignore it, and in a session without a rail the key does nothing.
 - Don't name the plugin (`MessagePlugin "radar" { … }`) unless every session
   loads the rail. Keybinds in `config.kdl` apply to every session, and a
   targeted `MessagePlugin` launches the plugin when no instance is running, so
@@ -142,6 +142,12 @@ keybinds {
 
 These binds broadcast too, for the reason above: in a session without a
 rail they do nothing.
+
+With two or more clients attached to one session, a key press moves only the
+client that pressed it. A `zellij pipe` from the command line still moves
+every client. A press can also move another client that acted within the
+last tenth of a second, for example by typing or clicking
+([why](design.md#5-plugin--zellij-wiring)).
 
 Unknown verbs are ignored. Both pipes are inert until the sidebar has been
 granted permissions. The `✓` mouse gesture is described in

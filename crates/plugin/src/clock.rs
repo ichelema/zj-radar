@@ -1,11 +1,13 @@
 //! Wall-clock source for the plugin runtime.
 //!
-//! A single free function rather than a trait/object: `RadarState` and the
+//! Free functions rather than a trait/object: `RadarState` and the
 //! stores beneath it take `now_epoch_s: u64` as a plain argument, so their
 //! tests pass literal epochs with no clock to mock. Of the runtime's entry
-//! points, `PluginRuntime::timer` follows the stores' pass-the-epoch
-//! discipline (its virtual-time harness, `runtime/tests.rs`'s `FireSim`,
-//! passes its own advancing epoch); the other entry points capture the
+//! points, `PluginRuntime::timer` and the keybind gate
+//! (`input_received`, `keybind_control_pipe`) follow the stores' pass-the-epoch
+//! discipline (the timer's virtual-time harness, `runtime/tests.rs`'s
+//! `FireSim`, passes its own advancing epoch; the gate's tests pass literal
+//! milliseconds); the other entry points capture the
 //! clock internally — deliberate: none of them needs virtual time, and
 //! threading an epoch parameter through every event handler would buy
 //! nothing. Only `PluginRuntime` (`runtime.rs`) and the wasm glue
@@ -17,4 +19,11 @@
 /// instead.
 pub(crate) fn now_epoch_s() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Wall-clock milliseconds since the Unix epoch, for the keybind-press
+/// window (`PluginRuntime::keybind_control_pipe`). Read by the wasm glue only.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }

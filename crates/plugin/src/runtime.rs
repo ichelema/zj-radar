@@ -20,7 +20,9 @@
 //! - [`config_pipe`](PluginRuntime::config_pipe) /
 //!   [`control`](PluginRuntime::control) /
 //!   [`control_pipe`](PluginRuntime::control_pipe) — runtime config + remote
-//!   commands.
+//!   commands; [`keybind_control_pipe`](PluginRuntime::keybind_control_pipe)
+//!   with [`input_received`](PluginRuntime::input_received) runs a keybind's
+//!   command on the pressing client's instances only.
 //! - [`mode_changed`](PluginRuntime::mode_changed) —
 //!   `Event::ModeUpdate`'s input mode (the `show_mode` footer label) and its
 //!   `session_name`, the push-style source that
@@ -89,6 +91,13 @@ const SUBTICK_SLACK_S: f64 = 0.05;
 /// for fast. Used only to decide which of two in-flight fires is the stale
 /// one — see [`PluginRuntime::timer`].
 const STALE_FIRE_ELAPSED_S: f64 = 5.0;
+
+/// How fresh this client's `InputReceived` must be for a keybind's `cmd.v1`
+/// press to count as its own ([`PluginRuntime::keybind_control_pipe`]). The
+/// presser's mark is normally a few ms old: Zellij sends it just before the
+/// pipe, down the same queue. Wider tolerates a loaded server; narrower
+/// moves a client that is typing at the moment someone else presses less often.
+const KEYBIND_INPUT_WINDOW_MS: u64 = 100;
 
 /// Our permission request: every instance requests at `load`, and Zellij
 /// answers `Granted` from its cache when `zj-radar setup` pre-wrote the grant
@@ -375,6 +384,10 @@ pub(crate) struct PluginRuntime {
     /// wrongly-hidden rail would be a stale screen, so the bias is toward
     /// visible.
     hidden: bool,
+    /// When this instance's client last sent input (`Event::InputReceived`,
+    /// wall-clock ms), until a keybind's `cmd.v1` press consumes it. See
+    /// [`keybind_control_pipe`](Self::keybind_control_pipe).
+    input_at_ms: Option<u64>,
     /// The tab position the latest manifest located this plugin's own pane
     /// in (`None` until one has). Refreshed by `own_plugin_tab_changed` on
     /// every `PaneUpdate`, so — unlike `RadarState`'s naming ownership, which
@@ -719,12 +732,16 @@ impl PluginRuntime {
     /// and it would vote for the attention tab after *its* tab — Zellij
     /// applies each `SwitchTab` in arrival order, the last one wins (#89).
     /// The session verbs are gated the same way so one press moves one
-    /// cycle selection and commits one `SwitchSession`, not one per tab. A
+    /// cycle selection and commits one `SwitchSession`, not one per tab
+    /// (except on a tab another client views, below). A
     /// rail that was never shown counts as visible but has no tabs, so the
-    /// attention verbs already resolve to nothing there. Two clients on
-    /// different tabs each have a visible rail, and `PipeSource::Keybind`
-    /// names no client, so a press can still move the other client: no
-    /// plugin-side signal tells the rails apart.
+    /// attention verbs already resolve to nothing there. Zellij runs one
+    /// instance per pane and client, and the broadcast reaches every
+    /// client's instances; a keybind press is narrowed to the presser's
+    /// instances by [`keybind_control_pipe`](Self::keybind_control_pipe).
+    /// `Visible` is per pane, not per client: a tab another client is
+    /// viewing stays visible here too, frozen view and all, so such a rail
+    /// still answers.
     pub(crate) fn control(&mut self, verb: Verb) -> Outcome {
         if !self.permission.granted() || self.hidden {
             return Outcome::none();
@@ -757,6 +774,34 @@ impl PluginRuntime {
             Some(verb) => self.control(verb),
             None => Outcome::none(),
         }
+    }
+
+    /// `Event::InputReceived`: Zellij attributed an action to this
+    /// instance's client: a key, a mouse action, a plugin command routed as
+    /// an action, or a CLI action while this client was the last to press a
+    /// key. It goes to that
+    /// client's instances only, before Zellij routes the action, so a
+    /// keybind's `InputReceived` reaches each instance ahead of its pipe.
+    pub(crate) fn input_received(&mut self, now_ms: u64) {
+        self.input_at_ms = Some(now_ms);
+    }
+
+    /// A `cmd.v1` payload from a keybind (`PipeSource::Keybind`). Zellij
+    /// delivers it to every client's instances and names no client, so only
+    /// an instance whose own client sent input within
+    /// [`KEYBIND_INPUT_WINDOW_MS`] runs it; the others leave their client
+    /// where it is. The mark is consumed either way; a mark newer than
+    /// `now_ms` (the clock stepped back) does not count.
+    /// ponytail: another client that acted inside the window acts too; exact match is ICH-477 (design.md §5).
+    pub(crate) fn keybind_control_pipe(&mut self, payload: &str, now_ms: u64) -> Outcome {
+        let pressed_here = self
+            .input_at_ms
+            .take()
+            .is_some_and(|at| now_ms.checked_sub(at).is_some_and(|age| age <= KEYBIND_INPUT_WINDOW_MS));
+        if !pressed_here {
+            return Outcome::none();
+        }
+        self.control_pipe(payload)
     }
 
     /// Test-only: a `ModeUpdate` reduced to its session name — what most
