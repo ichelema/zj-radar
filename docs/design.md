@@ -362,16 +362,19 @@ only the clicking client's instance. Limits:
   `InterceptInput` permission and every action delivered to every instance.
 - `zellij pipe` from the CLI keeps the broadcast. It is not a key press, and
   its own `InputReceived` would only name the client that last pressed a key.
-  Each client's rail on that client's active tab runs it.
-- Another client viewing the tab a verb sends the presser to keeps the
-  presser's rail there visible and frozen. `GoToTab` and the tab read share
+  Each client's rail on that client's active tab runs it, under the next
+  limit too.
+- Another client viewing the tab a verb sends a client to keeps that
+  client's rail there visible and frozen. `GoToTab` and the tab read share
   the screen's queue, and the instances run on a pool of plugin threads in no
   set order. If that rail handles the pipe after the first rail's `SwitchTab`
   reached the screen, it reads its own tab as the client's, passes the gate,
-  and votes a second step from its frozen view: the presser lands one
-  attention tab further. Nothing the rail receives tells it apart. The fix
-  needs Zellij to deliver a keybind's pipe with press-time data, or only to
-  the presser's active-tab instances (ICH-479).
+  and votes a second step from its frozen view: the client lands one
+  attention tab further. Nothing the rail receives tells it apart. It holds
+  for a `zellij pipe` too. The fix needs Zellij to put press-time data (the
+  acting client and its active tab) on the pipe; delivering a keybind's pipe
+  only to the presser's active-tab instances would leave the CLI case open
+  (ICH-479).
 
 **Layout is the integration seam.** The sidebar is a borderless left column
 inside a vertical split, outside `children`, so `swap_tiled_layout` cycling
