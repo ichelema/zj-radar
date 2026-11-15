@@ -336,7 +336,7 @@ rail of that tab. A rail that never resolved its own tab (a later client's
 instance on a tab it never activated) does not run it either. The read is
 blocking, but it runs once per verb that reaches a visible rail: its rate is
 the user's presses, never pane output (`docs/smart-tabs-postmortem.md`). A
-failed read leaves the verb running, as before the gate (ICH-476). The read
+failed read (Zellij gives up after 100 ms) leaves the verb running, as before the gate (ICH-476). The read
 happens when the rail handles the pipe, not at the press, which leaves one
 case open (*Whose press*, last limit).
 

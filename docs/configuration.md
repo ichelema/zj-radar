@@ -149,7 +149,7 @@ every client. A press can also move another client that acted within the
 last tenth of a second, for example by typing or clicking
 ([why](design.md#5-plugin--zellij-wiring)). When another client is looking at
 the tab `attention-next` or `attention-prev` sends you to, you can land one
-attention tab further (ICH-479).
+attention tab further.
 
 Unknown verbs are ignored. Both pipes are inert until the sidebar has been
 granted permissions. The `✓` mouse gesture is described in
