@@ -1,5 +1,6 @@
 //! Integration tests for `zj-radar setup` — the zellij install/uninstall/doctor
-//! flows and the refusal of the agent targets older releases wired.
+//! flows, the refusal of the agent targets older releases wired, and the
+//! `setup shell` rc block (with real bash and zsh when installed).
 
 use assert_cmd::Command;
 use std::fs;
@@ -1357,4 +1358,136 @@ fn setup_zellij_yes_preseeds_the_grant_beside_a_symlinked_config() {
     let perms = fs::read_to_string(permissions_path(home.path())).expect("-y must write permissions.kdl");
     assert!(perms.contains(&dest.display().to_string()), "grant keyed by the stable path:\n{perms}");
     assert!(fs::symlink_metadata(&dest).unwrap().file_type().is_symlink(), "managed wasm untouched");
+}
+
+// ── `setup shell`: OSC 133 prompt marks in the user's rc file ────────────────
+// Every test runs under a temp HOME/ZDOTDIR: never the caller's rc files.
+
+/// `zj-radar setup <args>` with HOME and ZDOTDIR pointed at `home`.
+fn setup_shell(home: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::cargo_bin("zj-radar")
+        .unwrap()
+        .arg("setup")
+        .args(args)
+        .env("HOME", home)
+        .env("ZDOTDIR", home.join("zdot"))
+        .env_remove("SHELL")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn setup_shell_twice_leaves_one_block_and_uninstall_restores_the_bytes() {
+    let home = TempDir::new().unwrap();
+    let bashrc = home.path().join(".bashrc");
+    let zshrc = home.path().join("zdot/.zshrc");
+    let original = "alias ll='ls -l'\nexport EDITOR=vim"; // no final newline
+    fs::write(&bashrc, original).unwrap();
+
+    let check = |want_ok: bool| {
+        let out = setup_shell(home.path(), &["shell", "bash", "zsh", "--check"]);
+        assert_eq!(out.status.success(), want_ok, "{}", String::from_utf8_lossy(&out.stdout));
+    };
+    check(false);
+    for _ in 0..2 {
+        assert!(setup_shell(home.path(), &["shell", "bash", "zsh", "-y"]).status.success());
+    }
+    for rc in [&bashrc, &zshrc] {
+        let text = fs::read_to_string(rc).unwrap();
+        assert_eq!(text.matches("# >>> zj-radar shell marks >>>").count(), 1, "{rc:?}:\n{text}");
+    }
+    assert!(fs::read_to_string(&bashrc).unwrap().starts_with(&format!("{original}\n# >>> zj-radar")));
+    check(true);
+
+    assert!(setup_shell(home.path(), &["shell", "bash", "zsh", "--uninstall", "-y"]).status.success());
+    assert_eq!(fs::read(&bashrc).unwrap(), original.as_bytes(), "the rest of .bashrc is byte-identical");
+    assert_eq!(fs::read_to_string(&zshrc).unwrap(), "", "a .zshrc setup created ends empty");
+    check(false);
+}
+
+#[test]
+fn setup_shell_dry_run_and_no_tty_write_nothing() {
+    let home = TempDir::new().unwrap();
+    let bashrc = home.path().join(".bashrc");
+    fs::write(&bashrc, "x\n").unwrap();
+    let out = setup_shell(home.path(), &["shell", "bash", "--dry-run"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("]133;C;cmdline="), "dry-run shows the block");
+    // No -y and stdin is not a tty: the safe "no".
+    let out = setup_shell(home.path(), &["shell", "bash"]);
+    assert!(out.status.success() && String::from_utf8_lossy(&out.stdout).contains("skipped"));
+    assert_eq!(fs::read_to_string(&bashrc).unwrap(), "x\n");
+}
+
+#[test]
+fn setup_shell_leaves_an_rc_that_writes_its_own_marks_alone() {
+    let home = TempDir::new().unwrap();
+    let bashrc = home.path().join(".bashrc");
+    let own = "PS1='\\[\\e]133;A\\a\\]$ '\n";
+    fs::write(&bashrc, own).unwrap();
+    let out = setup_shell(home.path(), &["shell", "bash", "-y"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("already writes OSC 133 marks (line 1)"));
+    assert_eq!(fs::read_to_string(&bashrc).unwrap(), own);
+    assert!(setup_shell(home.path(), &["shell", "bash", "--check"]).status.success());
+}
+
+#[test]
+fn setup_shell_refuses_an_unknown_shell_and_a_bare_shell_without_shell_var() {
+    let home = TempDir::new().unwrap();
+    for args in [&["shell", "fish"][..], &["zellij", "shell"], &["shell"]] {
+        let out = setup_shell(home.path(), args);
+        assert!(!out.status.success(), "{args:?} must fail");
+    }
+    assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0, "a refusal writes nothing");
+}
+
+/// The whole terminal output of an interactive `shell` that reads `script`
+/// from a pipe (it still runs its prompt hooks), with only the rc file
+/// `setup shell` wrote: empty environment, temp HOME, no history file of
+/// the caller's (ICH-471).
+fn run_marked_shell(shell: &str, inside_zellij: bool, script: &str) -> Option<String> {
+    use std::io::Write as _;
+    let home = TempDir::new().unwrap();
+    std::process::Command::new(shell).args(["-c", "exit 0"]).output().ok()?;
+    assert!(setup_shell(home.path(), &["shell", shell, "-y"]).status.success());
+    let log = home.path().join("out");
+    let out = fs::File::create(&log).unwrap();
+    let mut cmd = std::process::Command::new(shell);
+    cmd.arg("-i")
+        .env_clear()
+        .env("HOME", home.path())
+        .env("ZDOTDIR", home.path().join("zdot"))
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("TERM", "dumb")
+        .stdin(std::process::Stdio::piped())
+        .stdout(out.try_clone().unwrap())
+        .stderr(out);
+    if inside_zellij {
+        cmd.env("ZELLIJ_PANE_ID", "7");
+    }
+    let mut child = cmd.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success());
+    Some(fs::read_to_string(&log).unwrap())
+}
+
+#[test]
+fn bash_and_zsh_blocks_mark_each_command_with_its_exit_code() {
+    // A failure, an empty line (no command, so no mark), a success, then exit.
+    let script = "false\n\ntrue\nexit\n";
+    // bash quotes the line with `printf %q`, zsh with `${(qqqq)…}`: Zellij decodes both.
+    for (shell, quote) in [("bash", "{}"), ("zsh", "$'{}'")] {
+        let Some(out) = run_marked_shell(shell, true, script) else {
+            eprintln!("{shell} not installed — skipping");
+            continue;
+        };
+        let marks: Vec<&str> = out.split("\x1b]133;").skip(1).map(|m| m.split('\x07').next().unwrap()).collect();
+        let c = |cmd: &str| format!("C;cmdline={}", quote.replace("{}", cmd));
+        let want = ["A", &c("false"), "D;1", "A", "A", &c("true"), "D;0", "A"];
+        assert!(marks.starts_with(&want), "{shell}: {marks:?}\n{out:?}");
+        assert_eq!(marks.iter().filter(|m| m.starts_with('D')).count(), 2, "{shell}: {marks:?}");
+
+        let outside = run_marked_shell(shell, false, script).unwrap();
+        assert!(!outside.contains("]133;"), "{shell} outside Zellij writes no marks: {outside:?}");
+    }
 }

@@ -2,6 +2,8 @@
 //! sidebar: install the wasm at a stable path, manage the `radar` alias in
 //! `config.kdl`, inject the rail into a layout, and pre-authorize the plugin's
 //! permissions. Agents need no setup: they emit OSC 7501 themselves.
+//! `zj-radar setup shell [bash|zsh]` ([`shell`]) is the opt-in other target:
+//! OSC 133 prompt marks in the shell's rc file.
 
 mod analyze;
 mod check;
@@ -9,6 +11,7 @@ pub(crate) mod detect;
 mod download;
 mod edit;
 pub(crate) mod preseed;
+mod shell;
 mod zellij;
 pub(crate) use analyze::*;
 pub(crate) use check::*;
@@ -96,7 +99,7 @@ pub(crate) fn which(bin: &str) -> bool {
 /// Agents that older releases wired; naming one gets the removal hint.
 const REMOVED_AGENT_TARGETS: [&str; 5] = ["claude", "codex", "opencode", "pi", "omp"];
 
-/// Why `setup <target>` refuses: `zellij` is the only target left.
+/// Why `setup <target>` refuses: `zellij` and `shell` are the only targets left.
 fn unsupported_target_message(target: &str) -> String {
     let mut msg = format!(
         "setup does not support '{target}': zj-radar no longer wires agents \
@@ -112,9 +115,23 @@ fn unsupported_target_message(target: &str) -> String {
     msg
 }
 
-/// Entry point for `zj-radar setup`. The only target is `zellij`, which is
-/// also what no target means.
+/// Entry point for `zj-radar setup`. The targets are `zellij`, which is also
+/// what no target means, and the opt-in `shell [bash|zsh]`.
 pub fn run(options: SetupOptions<'_>) {
+    let mode = mode_from_flags(options.check, options.uninstall);
+    // Tty-ness resolved ONCE at the invocation boundary (the `inject_mode`
+    // pattern); the consent steps take it as a parameter rather than probing
+    // stdin again mid-chain.
+    let is_tty = {
+        use std::io::IsTerminal;
+        std::io::stdin().is_terminal()
+    };
+    if options.targets.iter().any(|t| t == "shell") {
+        let consent = Consent { yes: options.yes, is_tty };
+        shell::run_shell(options.targets, mode, options.dry_run, consent);
+        return;
+    }
+
     let mut unsupported = false;
     for target in options.targets.iter().filter(|t| t.as_str() != "zellij") {
         crate::exit::fail_report("zj-radar", unsupported_target_message(target));
@@ -123,8 +140,6 @@ pub fn run(options: SetupOptions<'_>) {
     if unsupported {
         return;
     }
-
-    let mode = mode_from_flags(options.check, options.uninstall);
 
     if mode == Mode::Check {
         // The doctor inspects the zellij install; checking needs no wasm source.
@@ -147,13 +162,6 @@ pub fn run(options: SetupOptions<'_>) {
                 return;
             }
         }
-    };
-    // Tty-ness resolved ONCE at the invocation boundary (the `inject_mode`
-    // pattern); the consent steps take it as a parameter rather than probing
-    // stdin again mid-chain.
-    let is_tty = {
-        use std::io::IsTerminal;
-        std::io::stdin().is_terminal()
     };
     setup_zellij(
         uninstall,
