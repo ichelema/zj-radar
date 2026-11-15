@@ -778,9 +778,11 @@ impl PluginRuntime {
     }
 
     /// Whether this instance's client has this rail's tab active (see `control`).
+    /// The rail's tab is where the latest manifest put it, not the naming
+    /// owner, which never moves: a rail moved to another tab follows it.
     fn on_clients_tab(&self) -> bool {
         match self.client_tab.and_then(|read| read()) {
-            Some(active) => self.radar.own_tab_id() == Some(TabId::new(active)),
+            Some(active) => self.own_tab_position.and_then(|p| self.radar.tab_id_at(p)) == Some(TabId::new(active)),
             None => true,
         }
     }

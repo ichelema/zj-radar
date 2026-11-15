@@ -549,6 +549,22 @@ fn verbs_run_only_on_the_tab_the_client_has_active() {
     assert_eq!(frozen.control(Verb::AttentionNext).effects, vec![Effect::SwitchTab { position: 1 }]);
 }
 
+/// A rail moved to another tab (`launch-or-focus-plugin --move-to-focused-tab`)
+/// keeps its plugin id and naming owner; the gate must follow the tab it is on.
+#[test]
+fn a_moved_rail_answers_on_its_new_tab() {
+    let mut rt = runtime_with_granted_permission();
+    rt.global_attention_changed(vec![fresh(r#"{"session_name":"alpha","running":0,"attention":1}"#)]);
+    rt.tabs_changed(vec![tab(0, "a", true), tab(1, "b", false)]);
+    rt.own_plugin_tab_changed(Some(0));
+    // Moved to tab 1 (id 2), which the client now has active.
+    rt.tabs_changed(vec![tab(0, "a", false), tab(1, "b", true)]);
+    rt.own_plugin_tab_changed(Some(1));
+    let on_tab_1: fn() -> Option<usize> = || Some(2);
+    rt.client_tab = Some(on_tab_1);
+    assert_ne!(rt.control_pipe("session-next"), Outcome::default());
+}
+
 /// The blocking read is a narrow exception to the push-driven rule only
 /// because it runs after every cheaper gate (AGENTS.md).
 #[test]
