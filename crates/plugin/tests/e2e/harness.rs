@@ -574,11 +574,12 @@ impl ZellijSession {
     }
 
     /// Every pane of the session with its geometry and tab
-    /// (`zellij action list-panes -g -t -j`): one JSON object per pane, with
-    /// `pane_x`, `is_plugin`, `title`, `is_collapsed` and `tab_position`.
-    /// Empty when the action fails, so a poll simply retries.
+    /// (`zellij action list-panes -a -j`; narrower flag sets can drop the
+    /// passive plugin panes): one JSON object per pane, with `pane_x`,
+    /// `is_plugin`, `title`, `is_collapsed` and `tab_position`. Empty when the
+    /// action fails, so a poll simply retries.
     pub fn panes(&self) -> Vec<serde_json::Value> {
-        let out = self.action(&["list-panes", "-g", "-t", "-j"]);
+        let out = self.action(&["list-panes", "-a", "-j"]);
         serde_json::from_slice(&out.stdout).unwrap_or_default()
     }
 
