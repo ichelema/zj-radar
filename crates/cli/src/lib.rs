@@ -3,7 +3,8 @@
 //! Three subcommands, one per module:
 //! - `setup [zellij]` ([`setup`]) — idempotent wiring: install the wasm plugin,
 //!   manage the `radar` alias in `config.kdl`, and inject the rail into a
-//!   Zellij layout ([`layout`]).
+//!   Zellij layout ([`layout`]). `setup shell [bash|zsh]` adds OSC 133 prompt
+//!   marks to the shell's rc file instead.
 //! - `run` ([`run`]) — turnkey launch of a Zellij session that owns its own
 //!   config with the rail preinstalled.
 //! - `update` ([`update`]) — move the CLI and the sidebar wasm to a newer
@@ -71,9 +72,11 @@ enum Command {
         #[arg(long)]
         print_cmd: bool,
     },
-    /// Idempotently set up Zellij to use the zj-radar sidebar.
+    /// Idempotently set up Zellij to use the zj-radar sidebar, or (`setup shell`)
+    /// add OSC 133 prompt marks to bash or zsh so failed commands show their exit code.
     Setup {
-        /// Target to set up (default and only supported: zellij).
+        /// Target to set up: zellij (the default), or shell followed by bash and/or zsh
+        /// (default: the shell in $SHELL).
         targets: Vec<String>,
         /// Wasm artifact to install when setting up Zellij.
         #[arg(long, value_name = "PATH")]

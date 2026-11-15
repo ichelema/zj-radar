@@ -77,7 +77,9 @@ exit code (`exit 1`) when it fails. The spinner needs Zellij's
 `track_commands`, off by default. The `✗` needs a shell that marks its
 prompts (OSC 133): without it a long failed command reads done and a short
 one gets no row
-([details](activity-model.md#4-where-the-status-comes-from)). The command text needs the
+([details](activity-model.md#4-where-the-status-comes-from)). For bash and
+zsh, `zj-radar setup shell` adds the marks
+([setup shell](install.md#mark-failed-shell-commands-setup-shell)). The command text needs the
 `ReadPaneContents` permission ([permissions](install.md#permissions));
 without it the row shows only the state.
 

@@ -9,21 +9,21 @@ pub(crate) enum CheckLevel {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CheckItem {
-    level: CheckLevel,
+    pub(crate) level: CheckLevel,
     name: &'static str,
-    detail: String,
+    pub(crate) detail: String,
 }
 
 impl CheckItem {
-    fn ok(name: &'static str, detail: impl Into<String>) -> Self {
+    pub(crate) fn ok(name: &'static str, detail: impl Into<String>) -> Self {
         Self { level: CheckLevel::Ok, name, detail: detail.into() }
     }
 
-    fn warn(name: &'static str, detail: impl Into<String>) -> Self {
+    pub(crate) fn warn(name: &'static str, detail: impl Into<String>) -> Self {
         Self { level: CheckLevel::Warn, name, detail: detail.into() }
     }
 
-    fn missing(name: &'static str, detail: impl Into<String>) -> Self {
+    pub(crate) fn missing(name: &'static str, detail: impl Into<String>) -> Self {
         Self { level: CheckLevel::Missing, name, detail: detail.into() }
     }
 }
@@ -168,7 +168,7 @@ pub(crate) fn check_zellij(layout_name: Option<&str>) -> bool {
 }
 
 /// Print the items; report whether any is `Missing`.
-fn print_check_items(items: &[CheckItem]) -> bool {
+pub(crate) fn print_check_items(items: &[CheckItem]) -> bool {
     for item in items {
         let status = match item.level {
             CheckLevel::Ok => "ok",

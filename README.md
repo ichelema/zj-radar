@@ -79,7 +79,8 @@ manual setup, and the full removal list are in
 - Your Zellij stays yours: no new terminal, no tmux wrapper, no orchestrator.
 - Shell commands show up too, from Zellij's own command tracking: a failed
   one shows its exit code when your shell marks its prompts (OSC 133);
-  without the marks Zellij cannot tell a failure from a success. With
+  without the marks Zellij cannot tell a failure from a success.
+  `zj-radar setup shell` adds the marks to bash and zsh. With
   `attention { track_commands true; }` in Zellij's `config.kdl` (off by
   default) a running command spins with an elapsed tag.
 - Background work an agent reports separately (a subagent, a backgrounded

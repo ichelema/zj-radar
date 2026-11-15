@@ -11,13 +11,17 @@ use std::path::{Path, PathBuf};
 /// Write `contents` to `path` atomically: ensure the parent directory exists,
 /// write a sibling temp file, then rename it over `path`. The rename is atomic
 /// on the same filesystem, so an interrupted or failed write never leaves a
-/// partially-written file in place — the next attempt simply rewrites.
+/// partially-written file in place — the next attempt simply rewrites. A file
+/// being replaced keeps its permissions: a private (`600`) rc file stays private.
 pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = tmp_sibling(path);
     write_new(&tmp, contents)?;
+    if let Ok(meta) = std::fs::metadata(path) {
+        std::fs::set_permissions(&tmp, meta.permissions())?;
+    }
     std::fs::rename(&tmp, path)
 }
 
@@ -73,6 +77,21 @@ mod tests {
         atomic_write(&target, b"first").unwrap();
         atomic_write(&target, b"second").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"second");
+    }
+
+    #[test]
+    fn overwriting_keeps_the_files_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempdir().unwrap();
+        let target = d.path().join("rc");
+        for mode in [0o600, 0o444] {
+            std::fs::write(&target, b"first").unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode)).unwrap();
+            atomic_write(&target, b"second").unwrap();
+            assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, mode);
+            assert_eq!(std::fs::read(&target).unwrap(), b"second");
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
     }
 
     #[test]
