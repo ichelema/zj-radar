@@ -21,10 +21,12 @@ the plugin.
 
 - **Push-driven, never poll-driven.** Zellij pushes each pane's attention
   (`PaneUpdate`, `PaneAttentionChanged`, `GlobalAttentionUpdate`); the plugin
-  makes no blocking host queries on any per-event or per-tick path. Two
-  exceptions, both for tab naming: a single `get_pane_cwd` per new pane
-  (`Effect::ResolveCwd`), and one async `git remote get-url origin` per new
-  cwd (`Effect::ResolveRepo`).
+  makes no blocking host queries on any per-event or per-tick path. Three
+  exceptions: for tab naming, a single `get_pane_cwd` per new pane
+  (`Effect::ResolveCwd`) and one async `git remote get-url origin` per new
+  cwd (`Effect::ResolveRepo`); for `cmd.v1` verbs, one
+  `get_focused_pane_info` per verb that reaches a visible rail
+  (`PluginRuntime::client_tab`).
   Polling melted the predecessor ([postmortem](docs/smart-tabs-postmortem.md));
   a PR that reintroduces it will not be accepted.
 - **Rail lockstep.** The emitted ANSI and the click-target map stay in 1:1

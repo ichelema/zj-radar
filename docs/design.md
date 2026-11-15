@@ -18,13 +18,15 @@ to a tab on click.
 The hard constraint: **push-driven, never poll-driven.** No polling, and no
 blocking host queries on any per-event or per-tick path. Signals come from
 pushed events (`TabUpdate`, `PaneUpdate`, `PaneAttentionChanged`,
-`GlobalAttentionUpdate`, `CwdChanged`, `ModeUpdate`). There are two
-exceptions, both for tab naming:
+`GlobalAttentionUpdate`, `CwdChanged`, `ModeUpdate`). There are three
+exceptions, two for tab naming and one for command verbs:
 
 - `Effect::ResolveCwd`: one blocking `get_pane_cwd` per freshly opened pane,
   never repeated.
 - `Effect::ResolveRepo`: one async `git remote get-url origin` per cwd, never
   repeated.
+- `PluginRuntime::client_tab`: one blocking `get_focused_pane_info` per
+  `cmd.v1` verb that reaches a visible rail (§5, *Command verbs*).
 
 The predecessor polled every pane on every output event and melted a
 many-agent session; the postmortem has the numbers.
@@ -325,6 +327,19 @@ hidden rail's frozen tabs still mark its own tab active, so letting it act
 would race the visible rail's `SwitchTab` with a wrong one
 ([#89](https://github.com/marktoda/zj-radar/issues/89)).
 
+`Visible` is per pane, not per client. A tab another client is viewing stays
+visible to this client's instance there, and its `tabs` froze when this client
+left: no event tells that instance its client moved on. So a verb that passes
+the cheaper gates asks Zellij which tab the instance's client has active
+(`get_focused_pane_info`, `PluginRuntime::client_tab`) and runs only on the
+rail of that tab. A rail that never resolved its own tab (a later client's
+instance on a tab it never activated) does not run it either. The read is
+blocking, but it runs once per verb that reaches a visible rail: its rate is
+the user's presses, never pane output (`docs/smart-tabs-postmortem.md`). A
+failed read (Zellij gives up after 100 ms) leaves the verb running, as before the gate (ICH-476). The read
+happens when the rail handles the pipe, not at the press, which leaves one
+case open (*Whose press*, last limit).
+
 **Whose press.** Zellij keeps one plugin instance per pane and client, and
 `switch_tab_to` / `switch_session` act on the instance's own client. The
 broadcast reaches every client's instances and `PipeSource::Keybind` names no
@@ -347,12 +362,19 @@ only the clicking client's instance. Limits:
   `InterceptInput` permission and every action delivered to every instance.
 - `zellij pipe` from the CLI keeps the broadcast. It is not a key press, and
   its own `InputReceived` would only name the client that last pressed a key.
-- `Visible` is per pane, not per client. A tab another client is viewing
-  stays visible to this client's instance there, whose `tabs` froze when this
-  client left. That instance answers the presser's verbs too. Its
-  `attention-*` vote races the current tab's one, the race above. A
-  `session-*` press cycles on both instances, and each commits its own
-  `SwitchSession` for the presser (ICH-476).
+  Each client's rail on that client's active tab runs it, under the next
+  limit too.
+- Another client viewing the tab a verb sends a client to keeps that
+  client's rail there visible and frozen. `GoToTab` and the tab read share
+  the screen's queue, and the instances run on a pool of plugin threads in no
+  set order. If that rail handles the pipe after the first rail's `SwitchTab`
+  reached the screen, it reads its own tab as the client's, passes the gate,
+  and votes a second step from its frozen view: the client lands one
+  attention tab further. Nothing the rail receives tells it apart. It holds
+  for a `zellij pipe` too. The fix needs Zellij to put press-time data (the
+  acting client and its active tab) on the pipe; delivering a keybind's pipe
+  only to the presser's active-tab instances would leave the CLI case open
+  (ICH-479).
 
 **Layout is the integration seam.** The sidebar is a borderless left column
 inside a vertical split, outside `children`, so `swap_tiled_layout` cycling

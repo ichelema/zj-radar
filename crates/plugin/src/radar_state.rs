@@ -407,6 +407,11 @@ impl RadarState {
         self.naming_tab_id = self.tabs.iter().find(|tab| tab.position == position).map(|tab| tab.id);
     }
 
+    /// The id of the tab at `position` in the latest `TabUpdate`.
+    pub(crate) fn tab_id_at(&self, position: usize) -> Option<TabId> {
+        self.tabs.iter().find(|tab| tab.position == position).map(|tab| tab.id)
+    }
+
     pub(crate) fn has_naming_tab(&self) -> bool {
         self.naming_tab_id.is_some()
     }

@@ -104,9 +104,10 @@ way Zellij's own status bar does, so it appears in every tab and survives
 layout swaps.
 
 The plugin is push-driven. It never polls panes and makes no blocking host
-calls on any per-event path. The two exceptions are both for tab naming: one
-cwd lookup when a pane is created, and one background
-`git remote get-url origin` per directory. Polling is what melted the predecessor plugin: see
+calls on any per-event path. There are three exceptions: for tab naming, one
+cwd lookup when a pane is created and one background
+`git remote get-url origin` per directory; for a command verb, one lookup of
+the client's active tab per press. Polling is what melted the predecessor plugin: see
 [`docs/smart-tabs-postmortem.md`](https://github.com/marktoda/zj-radar/blob/main/docs/smart-tabs-postmortem.md).
 
 ## Configuration

@@ -257,6 +257,13 @@ impl State {
     }
 }
 
+/// The tab id this instance's client has active (`PluginRuntime::client_tab`).
+/// Blocking, but asked once per `cmd.v1` verb that reaches a visible rail.
+#[cfg(target_arch = "wasm32")]
+fn client_tab() -> Option<usize> {
+    get_focused_pane_info().ok().map(|(tab_id, _)| tab_id)
+}
+
 /// Zellij's attention status in the rail's vocabulary. Muted panes read Idle.
 #[cfg(target_arch = "wasm32")]
 fn native_status(s: AttentionStatus) -> status::Status {
@@ -347,6 +354,7 @@ impl ZellijPlugin for State {
         ]);
         let ids = get_plugin_ids();
         self.plugin_id = Some(ids.plugin_id);
+        self.runtime.client_tab = Some(client_tab);
         let outcome = self.runtime.load(config::Config::from_map(&config));
         self.handle_outcome(outcome);
     }

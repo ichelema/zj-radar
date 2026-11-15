@@ -40,9 +40,11 @@ are host-testable (`zellij-tile` is wasm-only).
 - **Format with `just fmt`** (`cargo fmt --all`, config in `rustfmt.toml`);
   `just ci` and CI fail on unformatted code.
 - **Push-driven, never poll-driven.** No polling, no blocking host queries on
-  any per-event or per-tick path. Two exceptions, both for tab naming: the
-  once-per-pane `Effect::ResolveCwd` bootstrap, and the once-per-cwd async
-  `git remote get-url origin` read (`Effect::ResolveRepo`). See
+  any per-event or per-tick path. Three exceptions: for tab naming, the
+  once-per-pane `Effect::ResolveCwd` bootstrap and the once-per-cwd async
+  `git remote get-url origin` read (`Effect::ResolveRepo`); for `cmd.v1`
+  verbs, one `get_focused_pane_info` read per verb that reaches a visible
+  rail (`PluginRuntime::client_tab`). See
   [`docs/smart-tabs-postmortem.md`](docs/smart-tabs-postmortem.md).
 - **Rail lockstep.** Emitted ANSI and the click-target map stay in 1:1 line
   correspondence, structurally (`CONTEXT.md` → *Lockstep*).

@@ -108,6 +108,13 @@ crystallizes *why* — these are constraints to preserve, not just happy acciden
     manifest delta, not a dirty tick) and #3 (cap concurrent in-flight calls). Decision logic
     lives in the pure `RadarState::cwd_bootstrap_targets`; the blocking call itself is isolated
     to `lib.rs::resolve_cwd` (wasm glue). Do not widen this to per-output or uncapped use.
+  - **Narrow exception (added for multi-client `cmd.v1` verbs, ICH-476):** a rail that is
+    about to run a verb reads `get_focused_pane_info` once, to learn whether its client
+    still has its tab active (`Visible` is per pane, so a tab another client views keeps a
+    frozen rail visible). It runs only after the permission, visibility and keybind-input
+    gates pass, so the call count is bounded by the user's presses, not output or ticks.
+    The decision is the pure `PluginRuntime::control`; the call is isolated to
+    `lib.rs::client_tab`.
 - **The one-shot timer must stay event-gated, and its cadence must match the reason.** zj-radar
   arms the 1 Hz *Fast* cadence only while there is *animating* work (a `Running` glyph that
   spins) or an un-carried completion edge still to settle — a backgrounded
