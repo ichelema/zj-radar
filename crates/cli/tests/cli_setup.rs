@@ -1383,6 +1383,9 @@ fn setup_shell_twice_leaves_one_block_and_uninstall_restores_the_bytes() {
     let zshrc = home.path().join("zdot/.zshrc");
     let original = "alias ll='ls -l'\nexport EDITOR=vim"; // no final newline
     fs::write(&bashrc, original).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&bashrc, fs::Permissions::from_mode(0o600)).unwrap();
+    let mode = || fs::metadata(&bashrc).unwrap().permissions().mode() & 0o777;
 
     let check = |want_ok: bool| {
         let out = setup_shell(home.path(), &["shell", "bash", "zsh", "--check"]);
@@ -1397,10 +1400,12 @@ fn setup_shell_twice_leaves_one_block_and_uninstall_restores_the_bytes() {
         assert_eq!(text.matches("# >>> zj-radar shell marks >>>").count(), 1, "{rc:?}:\n{text}");
     }
     assert!(fs::read_to_string(&bashrc).unwrap().starts_with(&format!("{original}\n# >>> zj-radar")));
+    assert_eq!(mode(), 0o600, "a private rc stays private");
     check(true);
 
     assert!(setup_shell(home.path(), &["shell", "bash", "zsh", "--uninstall", "-y"]).status.success());
     assert_eq!(fs::read(&bashrc).unwrap(), original.as_bytes(), "the rest of .bashrc is byte-identical");
+    assert_eq!(mode(), 0o600);
     assert_eq!(fs::read_to_string(&zshrc).unwrap(), "", "a .zshrc setup created ends empty");
     check(false);
 }
@@ -1441,27 +1446,44 @@ fn setup_shell_refuses_an_unknown_shell_and_a_bare_shell_without_shell_var() {
     assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0, "a refusal writes nothing");
 }
 
+/// The rc file `setup shell` writes for `shell` under [`setup_shell`]'s env.
+fn rc_file(home: &std::path::Path, shell: &str) -> std::path::PathBuf {
+    if shell == "bash" {
+        home.join(".bashrc")
+    } else {
+        home.join("zdot/.zshrc")
+    }
+}
+
+/// `cmd` with only a temp HOME/ZDOTDIR and PATH: no rc, history file or
+/// variable of the caller's reaches the shell (ICH-471).
+fn isolated(cmd: &mut std::process::Command, home: &std::path::Path) {
+    cmd.env_clear()
+        .env("HOME", home)
+        .env("ZDOTDIR", home.join("zdot"))
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("TERM", "dumb");
+}
+
 /// The whole terminal output of an interactive `shell` that reads `script`
-/// from a pipe (it still runs its prompt hooks), with only the rc file
-/// `setup shell` wrote: empty environment, temp HOME, no history file of
-/// the caller's (ICH-471).
-fn run_marked_shell(shell: &str, inside_zellij: bool, script: &str) -> Option<String> {
+/// from a pipe (it still runs its prompt hooks). Its rc file is `rc_before`
+/// followed by the block `setup shell` adds. `None` when `shell` is not
+/// installed.
+fn run_marked_shell(shell: &str, inside_zellij: bool, rc_before: &str, script: &str) -> Option<String> {
     use std::io::Write as _;
     let home = TempDir::new().unwrap();
-    std::process::Command::new(shell).args(["-c", "exit 0"]).output().ok()?;
+    let mut probe = std::process::Command::new(shell);
+    isolated(probe.args(["-c", "exit 0"]), home.path());
+    probe.output().ok()?;
+    let rc = rc_file(home.path(), shell);
+    fs::create_dir_all(rc.parent().unwrap()).unwrap();
+    fs::write(&rc, rc_before).unwrap();
     assert!(setup_shell(home.path(), &["shell", shell, "-y"]).status.success());
     let log = home.path().join("out");
     let out = fs::File::create(&log).unwrap();
     let mut cmd = std::process::Command::new(shell);
-    cmd.arg("-i")
-        .env_clear()
-        .env("HOME", home.path())
-        .env("ZDOTDIR", home.path().join("zdot"))
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("TERM", "dumb")
-        .stdin(std::process::Stdio::piped())
-        .stdout(out.try_clone().unwrap())
-        .stderr(out);
+    isolated(cmd.arg("-i"), home.path());
+    cmd.stdin(std::process::Stdio::piped()).stdout(out.try_clone().unwrap()).stderr(out);
     if inside_zellij {
         cmd.env("ZELLIJ_PANE_ID", "7");
     }
@@ -1471,23 +1493,59 @@ fn run_marked_shell(shell: &str, inside_zellij: bool, script: &str) -> Option<St
     Some(fs::read_to_string(&log).unwrap())
 }
 
+/// The OSC 133 marks in `out`, without the `ESC ] 133 ;` prefix and the BEL.
+fn marks(out: &str) -> Vec<&str> {
+    out.split("\x1b]133;").skip(1).map(|m| m.split('\x07').next().unwrap()).collect()
+}
+
 #[test]
 fn bash_and_zsh_blocks_mark_each_command_with_its_exit_code() {
     // A failure, an empty line (no command, so no mark), a success, then exit.
     let script = "false\n\ntrue\nexit\n";
     // bash quotes the line with `printf %q`, zsh with `${(qqqq)…}`: Zellij decodes both.
     for (shell, quote) in [("bash", "{}"), ("zsh", "$'{}'")] {
-        let Some(out) = run_marked_shell(shell, true, script) else {
+        let Some(out) = run_marked_shell(shell, true, "", script) else {
             eprintln!("{shell} not installed — skipping");
             continue;
         };
-        let marks: Vec<&str> = out.split("\x1b]133;").skip(1).map(|m| m.split('\x07').next().unwrap()).collect();
+        let marks = marks(&out);
         let c = |cmd: &str| format!("C;cmdline={}", quote.replace("{}", cmd));
         let want = ["A", &c("false"), "D;1", "A", "A", &c("true"), "D;0", "A"];
         assert!(marks.starts_with(&want), "{shell}: {marks:?}\n{out:?}");
         assert_eq!(marks.iter().filter(|m| m.starts_with('D')).count(), 2, "{shell}: {marks:?}");
 
-        let outside = run_marked_shell(shell, false, script).unwrap();
+        let outside = run_marked_shell(shell, false, "", script).unwrap();
         assert!(!outside.contains("]133;"), "{shell} outside Zellij writes no marks: {outside:?}");
     }
+}
+
+#[test]
+fn re_sourcing_the_rc_keeps_every_mark_once() {
+    // An rc that assigns PROMPT_COMMAND drops our call when sourced again.
+    for (shell, rc_before, rc) in
+        [("bash", "PROMPT_COMMAND='true'\n", "~/.bashrc"), ("zsh", "PS1='$ '\n", "$ZDOTDIR/.zshrc")]
+    {
+        let script = format!("false\nsource {rc}\nfalse\nexit 0\n");
+        let Some(out) = run_marked_shell(shell, true, rc_before, &script) else {
+            eprintln!("{shell} not installed — skipping");
+            continue;
+        };
+        let marks = marks(&out);
+        let ends: Vec<&str> = marks.iter().copied().filter(|m| m.starts_with('D')).collect();
+        assert_eq!(ends, ["D;1", "D;0", "D;1"], "{shell}: {marks:?}");
+        // One `A` per prompt (first, then after each of the three commands).
+        assert_eq!(marks.iter().filter(|m| **m == "A").count(), 4, "{shell}: {marks:?}");
+    }
+}
+
+#[test]
+fn a_child_bash_without_the_rc_prints_no_error() {
+    // A child bash inherits an exported PROMPT_COMMAND that names our function,
+    // but not the function.
+    let rc_before = "export PROMPT_COMMAND='true'\n";
+    let Some(out) = run_marked_shell("bash", true, rc_before, "bash --norc -i\necho child\nexit\nexit\n") else {
+        eprintln!("bash not installed — skipping");
+        return;
+    };
+    assert!(out.contains("child") && !out.contains("not found"), "{out:?}");
 }

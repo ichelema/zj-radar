@@ -325,7 +325,14 @@ bash skips the block. Open a new shell in a Zellij pane to load it.
 - `--check` reports each rc file, `--dry-run` prints the block, and
   `--uninstall` removes it and leaves the rest of the file as it was.
 - An rc file that already writes OSC 133 marks (another shell integration)
-  is left alone.
+  is left alone, and `--check` warns about it. Only that file is read, not
+  the files it sources.
+- zsh: setup reads `ZDOTDIR` from its own environment. If your `.zshenv` sets
+  `ZDOTDIR` without `export`, pass it: `ZDOTDIR=~/.config/zsh zj-radar setup shell zsh`.
+- bash: the command text comes from `history 1`, so a line kept out of
+  history (`HISTCONTROL=ignorespace`, `HISTIGNORE`) shows the previous
+  command's text. Prompt hooks after the block still see `$?`, but
+  `PIPESTATUS` holds one value.
 - If a dotfile manager owns the rc file, put the block in the manager's
   source instead (`--dry-run` prints it): the next apply undoes the edit.
 - Bare `zj-radar setup` never touches rc files.

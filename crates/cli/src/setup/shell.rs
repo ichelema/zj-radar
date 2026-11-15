@@ -59,11 +59,14 @@ impl Shell {
 // out of history (`HISTCONTROL=ignorespace`) names the previous one. `%q`
 // quoting is what Zellij decodes, and it keeps a BEL or ESC in the line from
 // ending the sequence. The precmd function goes FIRST in PROMPT_COMMAND and
-// returns the status it found, so the hooks after it still see `$?`.
-const BASH_HOOK: &str = r#"if [ -n "${ZELLIJ_PANE_ID:-}" ] && [ -z "${__zj_radar_marks:-}" ] &&
+// returns the status it found, so the hooks after it still see `$?` (not
+// `PIPESTATUS`). Re-sourcing the rc file is safe: an rc that assigns
+// PROMPT_COMMAND drops our call, so each part is added back when it is
+// missing, never twice. The call hides "command not found" in a child bash
+// that inherits an exported PROMPT_COMMAND without the function.
+const BASH_HOOK: &str = r#"if [ -n "${ZELLIJ_PANE_ID:-}" ] &&
   ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))); then
-  __zj_radar_marks=1
-  __zj_radar_ran=0
+  : "${__zj_radar_ran:=0}"
   __zj_radar_cmdline() {
     local line
     line=$(HISTTIMEFORMAT= builtin history 1)
@@ -77,15 +80,18 @@ const BASH_HOOK: &str = r#"if [ -n "${ZELLIJ_PANE_ID:-}" ] && [ -z "${__zj_radar
     printf '\e]133;A\a'
     return "$s"
   }
-  PS0="${PS0:-}"'${__zj_radar_ran:0:$((__zj_radar_ran=1,0))}\e]133;C;cmdline=$(__zj_radar_cmdline)\a'
-  PROMPT_COMMAND="__zj_radar_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+  [[ ${PS0:-} == *__zj_radar_cmdline* ]] ||
+    PS0="${PS0:-}"'${__zj_radar_ran:0:$((__zj_radar_ran=1,0))}\e]133;C;cmdline=$(__zj_radar_cmdline)\a'
+  [[ ${PROMPT_COMMAND:-} == *__zj_radar_precmd* ]] ||
+    PROMPT_COMMAND="__zj_radar_precmd 2>/dev/null${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 fi"#;
 
 // zsh's preexec gets the line as typed (`$1`) and runs only for a non-empty
 // line; `(qqqq)` quotes it as `$'…'`, which Zellij decodes. zsh restores `$?`
-// for every precmd hook, so the order among them does not matter.
-const ZSH_HOOK: &str = r#"if [[ -n "${ZELLIJ_PANE_ID:-}" && -z "${__zj_radar_marks:-}" ]]; then
-  typeset -g __zj_radar_marks=1 __zj_radar_ran=
+// for every precmd hook, so the order among them does not matter, and
+// `add-zsh-hook` adds a hook once, so re-sourcing the rc file is safe.
+const ZSH_HOOK: &str = r#"if [[ -n "${ZELLIJ_PANE_ID:-}" ]]; then
+  : ${__zj_radar_ran=}
   __zj_radar_preexec() {
     __zj_radar_ran=1
     printf '\e]133;C;cmdline=%s\a' "${(qqqq)1}"
@@ -179,15 +185,16 @@ fn edit_rc(existing: &str, block: &str, install: bool) -> Result<Outcome, String
 
 /// The 1-based line where `text` writes an OSC 133 mark outside our block
 /// (another shell integration, or marks the user wrote by hand), if any.
-/// Every way to spell the escape (`\e`, `\033`, `\x1b`) leaves `]133;`.
-/// ponytail: sees only this file, not the files it sources (`wezterm.sh`);
-/// double marks are harmless in Zellij 0.46, which ignores a `D` with no command running.
+/// Every way to spell the escape (`\e`, `\033`, `\x1b`) leaves `]133;`; a
+/// comment line does not count.
+/// ponytail: sees only this file, not the files it sources (`wezterm.sh`). Zellij 0.46
+/// ignores a second `D` or `A`, but a second `C` without `cmdline=` drops the command text.
 fn own_marks_line(text: &str) -> Option<usize> {
     let span = block_span(text).ok().flatten();
     let mut offset = 0;
     for (n, line) in text.split_inclusive('\n').enumerate() {
         let inside = span.is_some_and(|(b, e)| offset >= b && offset < e);
-        if !inside && line.contains("]133;") {
+        if !inside && !line.trim_start().starts_with('#') && line.contains("]133;") {
             return Some(n + 1);
         }
         offset += line.len();
@@ -257,7 +264,10 @@ fn shell_check_item(shell: Shell, path: &Path, text: &str) -> CheckItem {
     match (edit_rc(text, &shell_block(shell), true), own_marks_line(text)) {
         (Err(e), _) => CheckItem::missing(name, format!("{rc}: {e}")),
         (Ok(Outcome::Unchanged), _) => CheckItem::ok(name, format!("OSC 133 marks block in {rc}")),
-        (Ok(_), Some(line)) => CheckItem::ok(name, format!("{rc} writes its own OSC 133 marks (line {line})")),
+        // Only a warn: whether those marks carry the exit code (`D;<exit>`) is not checked.
+        (Ok(_), Some(line)) => {
+            CheckItem::warn(name, format!("{rc} writes its own OSC 133 marks (line {line}), so setup leaves it alone"))
+        }
         (Ok(_), None) if text.contains(SHELL_BLOCK_BEGIN) => {
             CheckItem::missing(name, format!("the marks block in {rc} is out of date — {rerun}"))
         }
@@ -394,6 +404,7 @@ mod tests {
         assert_eq!(own_marks_line("a\nprintf '\\033]133;A\\007'\n"), Some(2));
         assert_eq!(own_marks_line(&format!("{block}x\nprint -n '\\e]133;D;0\\a'\n")), Some(block.lines().count() + 2));
         assert_eq!(own_marks_line("export PORT=8133\n"), None);
+        assert_eq!(own_marks_line("  # old: printf '\\e]133;A\\a'\n"), None, "a comment is not a mark");
     }
 
     #[test]
@@ -435,7 +446,7 @@ mod tests {
         let block = shell_block(Shell::Zsh);
         let level = |text: &str| shell_check_item(Shell::Zsh, path, text).level;
         assert_eq!(level(&format!("a\n\n{block}")), CheckLevel::Ok);
-        assert_eq!(level("printf '\\e]133;A\\a'\n"), CheckLevel::Ok);
+        assert_eq!(level("printf '\\e]133;A\\a'\n"), CheckLevel::Warn);
         assert_eq!(level(""), CheckLevel::Missing);
         assert_eq!(level(&format!("{SHELL_BLOCK_BEGIN}\nold\n{SHELL_BLOCK_END}\n")), CheckLevel::Missing);
         assert_eq!(level(&format!("{SHELL_BLOCK_BEGIN}\nold\n")), CheckLevel::Missing);

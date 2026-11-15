@@ -19,7 +19,7 @@ impl CheckItem {
         Self { level: CheckLevel::Ok, name, detail: detail.into() }
     }
 
-    fn warn(name: &'static str, detail: impl Into<String>) -> Self {
+    pub(crate) fn warn(name: &'static str, detail: impl Into<String>) -> Self {
         Self { level: CheckLevel::Warn, name, detail: detail.into() }
     }
 
