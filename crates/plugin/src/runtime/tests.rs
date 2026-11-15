@@ -509,9 +509,44 @@ fn keybind_verbs_need_input_inside_the_window() {
     // A mark from the future (the clock stepped back since) is no fresh press.
     rt.input_received(3_600_000);
     assert_eq!(rt.keybind_control_pipe("attention-next", 1_000), Outcome::default());
-    // A CLI pipe is no key press: it skips the gate and keeps acting
-    // everywhere.
+    // A CLI pipe is no key press: it skips the gate and keeps acting for
+    // every client.
     assert_eq!(rt.control_pipe("attention-next").effects, switch);
+}
+
+/// ICH-476: client A left tab 0 for tab 2 while client B stays on tab 0, so
+/// A's rail on tab 0 never got `Visible(false)` and its frozen view still
+/// marks tab 0 active. Both of A's rails get the press; only the one on the
+/// tab Zellij says A has active may answer it.
+#[test]
+fn verbs_run_only_on_the_tab_the_client_has_active() {
+    // `tab(p, ..)` carries tab id p + 1: client A has tab 2 (id 3) active.
+    let a_on_tab_2: fn() -> Option<usize> = || Some(3);
+    let rail = |own: Option<usize>| {
+        let mut rt = runtime_with_granted_permission();
+        rt.client_tab = Some(a_on_tab_2);
+        rt.global_attention_changed(vec![fresh(r#"{"session_name":"alpha","running":0,"attention":1}"#)]);
+        if let Some(own) = own {
+            rt.tabs_changed((0..4).map(|p| tab(p, &format!("t{p}"), p == own)).collect());
+            rt.own_plugin_tab_changed(Some(own));
+        }
+        for p in [1u32, 3] {
+            rt.radar.set_tab_panes_for_position(p as usize, vec![pane(10 + p)]);
+            set_status(&mut rt.radar, 10 + p, Status::Pending, "working", 1);
+        }
+        rt
+    };
+    let (mut frozen, mut current) = (rail(Some(0)), rail(Some(2)));
+    assert_eq!(frozen.control(Verb::AttentionNext), Outcome::default(), "the frozen rail would vote tab 1");
+    assert_eq!(current.control(Verb::AttentionNext).effects, vec![Effect::SwitchTab { position: 3 }]);
+    assert_eq!(frozen.control_pipe("session-next"), Outcome::default(), "one press moves one cycle");
+    assert_ne!(current.control_pipe("session-next"), Outcome::default());
+    // A later client's instance on a tab it never activated has no own tab.
+    assert_eq!(rail(None).control_pipe("session-next"), Outcome::default(), "no own tab, no commit");
+    // A failed read is unknown: the rail acts, as before the gate.
+    let unknown: fn() -> Option<usize> = || None;
+    frozen.client_tab = Some(unknown);
+    assert_eq!(frozen.control(Verb::AttentionNext).effects, vec![Effect::SwitchTab { position: 1 }]);
 }
 
 // ── Cross-session badge + cycling ───────────────────────────────────────

@@ -388,6 +388,11 @@ pub(crate) struct PluginRuntime {
     /// wall-clock ms), until a keybind's `cmd.v1` press consumes it. See
     /// [`keybind_control_pipe`](Self::keybind_control_pipe).
     input_at_ms: Option<u64>,
+    /// Reads the tab id this instance's client has active: a blocking host
+    /// round-trip (`get_focused_pane_info`), set by the wasm glue at load and
+    /// asked only by [`control`](Self::control), once per verb that passed
+    /// every cheaper gate. Unset (host tests), or a failed read, is unknown.
+    pub(crate) client_tab: Option<fn() -> Option<usize>>,
     /// The tab position the latest manifest located this plugin's own pane
     /// in (`None` until one has). Refreshed by `own_plugin_tab_changed` on
     /// every `PaneUpdate`, so — unlike `RadarState`'s naming ownership, which
@@ -732,18 +737,21 @@ impl PluginRuntime {
     /// and it would vote for the attention tab after *its* tab — Zellij
     /// applies each `SwitchTab` in arrival order, the last one wins (#89).
     /// The session verbs are gated the same way so one press moves one
-    /// cycle selection and commits one `SwitchSession`, not one per tab
-    /// (except on a tab another client views, below). A
-    /// rail that was never shown counts as visible but has no tabs, so the
-    /// attention verbs already resolve to nothing there. Zellij runs one
-    /// instance per pane and client, and the broadcast reaches every
-    /// client's instances; a keybind press is narrowed to the presser's
-    /// instances by [`keybind_control_pipe`](Self::keybind_control_pipe).
-    /// `Visible` is per pane, not per client: a tab another client is
-    /// viewing stays visible here too, frozen view and all, so such a rail
-    /// still answers.
+    /// cycle selection and commits one `SwitchSession`, not one per tab.
+    /// Zellij runs one instance per pane and client, and the broadcast
+    /// reaches every client's instances; a keybind press is narrowed to the
+    /// presser's instances by [`keybind_control_pipe`](Self::keybind_control_pipe).
+    ///
+    /// `Visible` is per pane, not per client: a tab this client left while
+    /// another client still views it stays visible to this client's
+    /// instance, its view frozen, and no event tells that instance its
+    /// client moved on. So the last gate asks Zellij which tab the client has
+    /// active ([`client_tab`](Self::client_tab)) and acts only on its own.
+    /// A rail that never resolved its own tab (a later client's instance on
+    /// a tab it never activated) fails it too. An unknown answer acts, as
+    /// before the gate existed.
     pub(crate) fn control(&mut self, verb: Verb) -> Outcome {
-        if !self.permission.granted() || self.hidden {
+        if !self.permission.granted() || self.hidden || !self.on_clients_tab() {
             return Outcome::none();
         }
         let dir = match verb {
@@ -765,6 +773,14 @@ impl PluginRuntime {
                 self.arm_timer_if_needed(self.last_now_epoch_s, &mut effects);
                 Outcome::with_effects(render, effects)
             }
+        }
+    }
+
+    /// Whether this instance's client has this rail's tab active (see `control`).
+    fn on_clients_tab(&self) -> bool {
+        match self.client_tab.and_then(|read| read()) {
+            Some(active) => self.radar.own_tab_id() == Some(TabId::new(active)),
+            None => true,
         }
     }
 

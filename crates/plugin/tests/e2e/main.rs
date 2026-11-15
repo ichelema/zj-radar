@@ -1346,3 +1346,110 @@ keybinds {
     );
     eprintln!("[e2e] PASS: a keybind session-next moved only the pressing client");
 }
+
+/// Two clients on different tabs (ICH-476). Client A leaves tab 1 for tab 3
+/// while client B stays on tab 1, so A's rail on tab 1 gets no
+/// `Visible(false)` and its view freezes with tab 1 active. A keybind
+/// `attention-next` from A reaches both of A's rails: the one on tab 3 votes
+/// tab 4, the frozen one would vote tab 2, and the last `SwitchTab` wins. A
+/// must land on tab 4, the next attention tab after ITS tab, every time.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn keybind_attention_next_follows_the_pressing_clients_tab() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+
+    let temp_home = pre_grant_permissions(&wasm);
+    temp_home.append_config(
+        r#"
+keybinds {
+    shared_except "locked" {
+        bind "Alt y" {
+            MessagePlugin { name "zj_radar.cmd.v1"; payload "attention-next"; }
+        }
+        bind "Alt 3" {
+            GoToTab 3
+        }
+    }
+}
+"#,
+    );
+    let w = wasm.canonicalize().unwrap_or_else(|_| wasm.clone());
+    let layout = format!(
+        r#"layout {{
+    default_tab_template {{
+        pane split_direction="vertical" {{
+            pane size=32 borderless=true {{
+                plugin location="file:{}"
+            }}
+            children
+        }}
+    }}
+    tab name="t1" focus=true {{
+        pane focus=true cwd="/tmp"
+    }}
+    tab name="t2" {{
+        pane focus=true cwd="/tmp"
+    }}
+    tab name="t3" {{
+        pane focus=true cwd="/tmp"
+    }}
+    tab name="t4" {{
+        pane focus=true cwd="/tmp"
+    }}
+}}"#,
+        w.display()
+    );
+    let a = ZellijSession::start(&format!("zjr_tabs_{}", std::process::id()), &layout, &wasm, temp_home);
+
+    // With A alone, CLI actions act on A: mark each tab's shell with its pane
+    // id and leave an agent waiting on tabs 2 and 4.
+    let mut panes: Vec<u32> = Vec::new();
+    for tab in 1..=4 {
+        if tab > 1 {
+            a.run_action_checked(&["go-to-tab", &tab.to_string()]);
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let id = a.discover_terminal_pane_id();
+        assert!(!panes.contains(&id), "go-to-tab {tab} did not land: pane {id} again");
+        if tab % 2 == 0 {
+            a.emit_program_status("state=blocked:app=claude-code:kind=question:msg=cGljayBvbmU=");
+        }
+        panes.push(id);
+    }
+    let on = |client: &ZellijSession, tab: usize| {
+        screen_text(&client.screen()).contains(&format!("ZPID={}", panes[tab - 1]))
+    };
+    assert!(
+        a.wait_until(Duration::from_secs(8), |s| {
+            s.run_action(&["go-to-tab", "1"]);
+            on(s, 1)
+        }),
+        "A never got back to tab 1"
+    );
+
+    let other = a.attach_client();
+    assert!(other.wait_until(Duration::from_secs(10), |s| on(s, 1)), "B did not attach on tab 1");
+    a.press("\x1b3"); // Alt+3: A leaves tab 1 to B
+    assert!(a.wait_until(Duration::from_secs(8), |s| on(s, 3)), "A never reached tab 3");
+    assert!(
+        a.wait_until(Duration::from_secs(10), |s| sidebar_region(&s.screen(), 32).matches('◆').count() >= 2),
+        "A's rail never showed both waiting tabs:\n{}",
+        sidebar_region(&a.screen(), 32)
+    );
+
+    for round in 1..=10 {
+        a.press("\x1by"); // Alt+y, bound to attention-next above
+        let settled = a.wait_until(Duration::from_secs(8), |s| on(s, 4) || on(s, 2));
+        // The frozen rail's vote lands within milliseconds of the right one.
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(settled && on(&a, 4), "round {round}: A did not land on tab 4 (tab 2 = the frozen rail's vote)");
+        assert!(on(&other, 1), "round {round}: B left tab 1");
+        a.press("\x1b3");
+        assert!(a.wait_until(Duration::from_secs(8), |s| on(s, 3)), "round {round}: A never got back to tab 3");
+    }
+    eprintln!("[e2e] PASS: attention-next followed the pressing client's own tab 10 times");
+}
