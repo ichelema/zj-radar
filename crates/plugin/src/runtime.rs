@@ -750,6 +750,7 @@ impl PluginRuntime {
     /// A rail that never resolved its own tab (a later client's instance on
     /// a tab it never activated) fails it too. An unknown answer acts, as
     /// before the gate existed.
+    /// ponytail: the read is at handling time, not at the press; a frozen rail on the tab the first `SwitchTab` lands on can still step again (ICH-479, design.md §5).
     pub(crate) fn control(&mut self, verb: Verb) -> Outcome {
         if !self.permission.granted() || self.hidden || !self.on_clients_tab() {
             return Outcome::none();

@@ -336,7 +336,9 @@ rail of that tab. A rail that never resolved its own tab (a later client's
 instance on a tab it never activated) does not run it either. The read is
 blocking, but it runs once per verb that reaches a visible rail: its rate is
 the user's presses, never pane output (`docs/smart-tabs-postmortem.md`). A
-failed read leaves the verb running, as before the gate (ICH-476).
+failed read leaves the verb running, as before the gate (ICH-476). The read
+happens when the rail handles the pipe, not at the press, which leaves one
+case open (*Whose press*, last limit).
 
 **Whose press.** Zellij keeps one plugin instance per pane and client, and
 `switch_tab_to` / `switch_session` act on the instance's own client. The
@@ -361,6 +363,15 @@ only the clicking client's instance. Limits:
 - `zellij pipe` from the CLI keeps the broadcast. It is not a key press, and
   its own `InputReceived` would only name the client that last pressed a key.
   Each client's rail on that client's active tab runs it.
+- Another client viewing the tab a verb sends the presser to keeps the
+  presser's rail there visible and frozen. `GoToTab` and the tab read share
+  the screen's queue, and the instances run on a pool of plugin threads in no
+  set order. If that rail handles the pipe after the first rail's `SwitchTab`
+  reached the screen, it reads its own tab as the client's, passes the gate,
+  and votes a second step from its frozen view: the presser lands one
+  attention tab further. Nothing the rail receives tells it apart. The fix
+  needs Zellij to deliver a keybind's pipe with press-time data, or only to
+  the presser's active-tab instances (ICH-479).
 
 **Layout is the integration seam.** The sidebar is a borderless left column
 inside a vertical split, outside `children`, so `swap_tiled_layout` cycling
