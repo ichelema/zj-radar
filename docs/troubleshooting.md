@@ -216,6 +216,37 @@ tests). Ghostty's window padding is drawn over the trailing columns.
 
 **Fix:** in Ghostty's config, `window-padding-color = extend`.
 
+## A resurrected session has no rails or panes (mini rail)
+
+**Symptom:** a session closed, killed or crashed while it showed the mini
+rail comes back as one bare terminal per tab: no rails, no split panes, no
+working directories. `zellij action dump-layout` in mini mode prints each tab
+as `tab … { }`.
+
+**Why:** Zellij 0.46 saves a tab wrongly when a collapsed pane sits next to a
+fixed-size one. In mini mode the full rail is collapsed and the 4-column mini
+rail slides into its place; when Zellij writes the session layout (every 60 s
+by default, and at `dump-layout`) it puts the full rail back but not the mini,
+finds two panes on the same columns and saves the tab empty. Full mode is not
+affected.
+
+**Fix:** switch back to the full rail (`sidebar-toggle`, or click `»`) before
+you close a session you want to resurrect. A session already saved empty
+cannot be recovered.
+
+## The rail moves after a split or a fullscreen pane (mini rail)
+
+**Symptom:** after `sidebar-toggle`, the full rail or the mini rail shows up
+between two panes or at the right edge instead of at the left.
+
+**Why:** Zellij 0.46 can bring a collapsed pane back in the wrong place when
+the tab changed while it was collapsed: a pane split with a direction
+(`Ctrl p r`, `new-pane -d right`), or a toggle while a pane was fullscreen.
+
+**Fix:** after a fullscreen, toggle again: the rails return to their place.
+In a tab split with a direction, open new panes without a direction (swap
+layouts keep both rails in place) or close the extra pane.
+
 ## Sidebar is still the old version after `zj-radar update`
 
 A running session keeps the plugin it loaded. Restart Zellij, or open a new

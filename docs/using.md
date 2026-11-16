@@ -132,7 +132,10 @@ the remote directory's name.
   `»`** at the top of the mini rail to bring the full rail back. Click a tab
   row in the mini rail to switch to that tab. The `«` shows only when the
   layout carries the mini rail
-  ([`install.md`](install.md#add-the-sidebar-to-a-layout)).
+  ([`install.md`](install.md#add-the-sidebar-to-a-layout)). Two Zellij 0.46
+  limits apply to it: a session saved in mini mode does not resurrect, and a
+  directional split can move the rails
+  ([troubleshooting](troubleshooting.md#a-resurrected-session-has-no-rails-or-panes-mini-rail)).
 - Right-click does nothing yet: Zellij does not deliver right-clicks to
   plugins ([zellij#5350](https://github.com/zellij-org/zellij/issues/5350)).
 
