@@ -889,7 +889,9 @@ sidebar: line 0 is the `»` toggle (column 1); then one line per tab — its
 number right-aligned in 2 columns, a space, the tab's status glyph (the same
 glyph and colors as the full rail). Each tab line clicks through to its tab.
 No header, ledger, pane lines, or footer. `height` is explicit: the face is
-always as tall as the pane, never padded.
+always as tall as the pane, never padded. This is the 4-column form, drawn
+when the mini pane sits at the screen's right edge; left of a terminal Zellij
+gives it 3 content columns, and what users see there is §AN.
 
 ```rail-input
 width 4
