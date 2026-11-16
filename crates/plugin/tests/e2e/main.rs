@@ -1518,3 +1518,99 @@ fn sidebar_toggle_swaps_the_full_and_mini_rail_in_every_tab() {
     assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(32)), "» reaches tab one too: {:?}", s.panes());
     eprintln!("[e2e] PASS: sidebar-toggle and » swap the rails in every tab");
 }
+
+/// ICH-494: with two rails per tab, a tab's collapsed rail gets no
+/// `Visible(false)` when its tab leaves the screen; if it answered
+/// `attention-next` with its frozen view it would step a second time once
+/// the first `SwitchTab` landed on its tab. Each press must move one tab.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn attention_next_moves_one_tab_per_press_with_two_rails() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+    let temp_home = pre_grant_permissions(&wasm);
+    temp_home.append_config(
+        r#"
+keybinds {
+    shared_except "locked" {
+        bind "Alt y" {
+            MessagePlugin { name "zj_radar.cmd.v1"; payload "attention-next"; }
+        }
+    }
+}
+"#,
+    );
+    let w = wasm.canonicalize().unwrap_or_else(|_| wasm.clone());
+    let w = w.display();
+    let layout = format!(
+        r#"layout {{
+    default_tab_template {{
+        pane split_direction="vertical" {{
+            pane size=32 borderless=true {{
+                plugin location="file:{w}"
+            }}
+            pane size=4 borderless=true {{
+                plugin location="file:{w}" {{
+                    mini true
+                }}
+            }}
+            children
+        }}
+    }}
+    tab name="t1" focus=true {{
+        pane focus=true cwd="/tmp"
+    }}
+    tab name="t2" {{
+        pane focus=true cwd="/tmp"
+    }}
+    tab name="t3" {{
+        pane focus=true cwd="/tmp"
+    }}
+    tab name="t4" {{
+        pane focus=true cwd="/tmp"
+    }}
+}}"#
+    );
+    let s = ZellijSession::start(&format!("zjr_att2_{}", std::process::id()), &layout, &wasm, temp_home);
+
+    // Visit every tab (so every rail has seen its tab active), mark each shell
+    // with its pane id, and leave an agent waiting on tabs 2, 3 and 4.
+    let mut panes: Vec<u32> = Vec::new();
+    for tab in 1..=4 {
+        if tab > 1 {
+            s.run_action_checked(&["go-to-tab", &tab.to_string()]);
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let id = s.discover_terminal_pane_id();
+        assert!(!panes.contains(&id), "go-to-tab {tab} did not land: pane {id} again");
+        if tab > 1 {
+            s.emit_program_status("state=blocked:app=claude-code:kind=question:msg=cGljayBvbmU=");
+        }
+        panes.push(id);
+    }
+    let on = |s: &ZellijSession, tab: usize| screen_text(&s.screen()).contains(&format!("ZPID={}", panes[tab - 1]));
+    assert!(
+        s.wait_until(Duration::from_secs(8), |s| {
+            s.run_action(&["go-to-tab", "1"]);
+            on(s, 1)
+        }),
+        "never got back to tab 1"
+    );
+    assert!(
+        s.wait_until(Duration::from_secs(10), |s| sidebar_region(&s.screen(), 31).matches('◆').count() >= 3),
+        "the rail never showed the three waiting tabs:\n{}",
+        sidebar_region(&s.screen(), 32)
+    );
+
+    for (press, want) in [2, 3, 4, 2, 3, 4, 2, 3, 4].into_iter().enumerate() {
+        s.press("\x1by"); // Alt+y: attention-next
+        assert!(s.wait_until(Duration::from_secs(8), |s| on(s, want)), "press {press}: never reached tab {want}");
+        // A second, frozen rail's vote would land within milliseconds.
+        std::thread::sleep(Duration::from_millis(800));
+        assert!(on(&s, want), "press {press}: moved past tab {want}");
+    }
+    eprintln!("[e2e] PASS: attention-next moved one tab per press with two rails per tab");
+}

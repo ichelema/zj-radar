@@ -2036,9 +2036,9 @@ fn mini_config() -> config::Config {
     config::Config { mini: true, ..config() }
 }
 
-/// A granted mini rail as `load` leaves it: collapsed.
+/// A granted mini rail as `load` leaves it: collapsed, so never shown.
 fn granted_mini() -> PluginRuntime {
-    PluginRuntime { collapsed: true, ..runtime_with_config(mini_config()) }.granted()
+    PluginRuntime { collapsed: true, hidden: true, ..runtime_with_config(mini_config()) }.granted()
 }
 
 /// A granted full rail that has seen its ready, collapsed mini sibling.
@@ -2088,8 +2088,9 @@ fn sidebar_toggle_flips_both_rails_of_a_pair_in_opposite_directions() {
     let (mut mini, mut full) = (granted_mini(), full_with_mini());
     let (m, f) = (mini.control_pipe("sidebar-toggle"), full.control_pipe("sidebar-toggle"));
     assert_eq!((collapses(&m), collapses(&f)), (vec![false], vec![true]));
-    assert!(m.render, "the expanding rail repaints the frames it skipped");
     assert!(!f.render, "a collapsing rail paints nothing");
+    assert!(!m.render, "an expanded rail paints once shown, not before");
+    assert!(mini.tabs_changed(vec![tab(0, "a", true)]).render, "the manifest that shows it repaints");
     let (m, f) = (mini.control_pipe("sidebar-toggle"), full.control_pipe("sidebar-toggle"));
     assert_eq!((collapses(&m), collapses(&f)), (vec![true], vec![false]));
 }
@@ -2169,9 +2170,45 @@ fn a_click_on_the_toggle_cell_broadcasts_and_collapses_nothing_locally() {
     assert_eq!(full.mouse_click(0, 31).effects, vec![Effect::BroadcastSidebarToggle]);
 
     let mut mini = granted_mini();
-    mini.tabs_changed(vec![tab(0, "a", true)]);
     mini.control_pipe("sidebar-toggle");
+    mini.tabs_changed(vec![tab(0, "a", true)]);
     mini.render(20, 4);
     assert_eq!(mini.mouse_click(0, 1).effects, vec![Effect::BroadcastSidebarToggle]);
     assert_eq!(mini.mouse_click(1, 0).effects, vec![Effect::SwitchTab { position: 0 }]);
+}
+
+/// A tab whose attention verbs both rails would answer: tab 0 is this rail's,
+/// tab 1 needs the user.
+fn with_attention_tab(rt: &mut PluginRuntime) {
+    rt.tabs_changed(vec![tab(0, "a", true), tab(1, "b", false)]);
+    rt.radar.set_tab_panes_for_position(1, vec![pane(11)]);
+    set_status(&mut rt.radar, 11, Status::Pending, "working", 1);
+}
+
+/// Zellij never sends a collapsed pane `Visible(false)`, and manifests reach
+/// it in its tab: if it answered attention verbs, a tab's collapsed rail
+/// would step again once the first `SwitchTab` lands there.
+#[test]
+fn a_collapsed_rail_never_answers_attention_verbs() {
+    let mut mini = granted_mini();
+    with_attention_tab(&mut mini);
+    assert_eq!(mini.control(Verb::AttentionNext), Outcome::default());
+    let mut full = full_with_mini();
+    with_attention_tab(&mut full);
+    full.control_pipe("sidebar-toggle");
+    assert_eq!(full.control(Verb::AttentionNext), Outcome::default());
+}
+
+/// A rail expanded by a toggle while its tab is off screen gets no
+/// `Visible` event: it stays hidden (no verbs, no paint) until a manifest or
+/// `Visible(true)` shows it.
+#[test]
+fn a_rail_expanded_off_screen_stays_hidden_until_shown() {
+    let mut full = full_with_mini();
+    full.control_pipe("sidebar-toggle"); // collapse
+    let expand = full.control_pipe("sidebar-toggle");
+    assert_eq!(collapses(&expand), vec![false]);
+    assert!(!expand.render);
+    with_attention_tab(&mut full);
+    assert_eq!(full.control(Verb::AttentionNext).effects, vec![Effect::SwitchTab { position: 1 }]);
 }

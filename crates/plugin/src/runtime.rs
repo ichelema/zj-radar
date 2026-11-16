@@ -504,7 +504,7 @@ impl PluginRuntime {
         // The mini rail starts collapsed, granted or not: until it is, Zellij's
         // permission prompt would be squeezed into 4 columns.
         if self.config.mini {
-            self.collapsed = true;
+            (self.collapsed, self.hidden) = (true, true);
             effects.push(Effect::SetCollapsed(true));
         }
         Outcome::with_effects(false, effects)
@@ -551,9 +551,11 @@ impl PluginRuntime {
     }
 
     pub(crate) fn tabs_changed(&mut self, tabs: Vec<RadarTab>) -> Outcome {
-        self.hidden = false; // manifests reach the active tab's plugins only (see `hidden`)
+        let revealed = self.manifest_reveals();
         let had_naming_tab = self.radar.has_naming_tab();
         let mut change = self.radar.tabs_changed(tabs);
+        change.force_render |= revealed;
+        change.render |= revealed;
         // Ownership just resolved: a cwd that arrived before it (bootstrap
         // fires from the PaneUpdate that precedes this TabUpdate) computed no
         // rename, so re-run naming now rather than waiting for an unrelated
@@ -565,7 +567,7 @@ impl PluginRuntime {
     }
 
     pub(crate) fn panes_changed(&mut self, update: PaneUpdate) -> Outcome {
-        self.hidden = false; // manifests reach the active tab's plugins only (see `hidden`)
+        let revealed = self.manifest_reveals();
         let now = crate::clock::now_epoch_s();
         if let Some(theme) = update.theme.clone() {
             self.pane_theme = Some(theme);
@@ -577,8 +579,20 @@ impl PluginRuntime {
             self.own_tab_position.is_some_and(|pos| update.tab_panes.get(&pos).is_some_and(|panes| !panes.is_empty()));
         let mut effects = Vec::new();
         self.sync_selectable(&mut effects);
-        let change = self.radar.panes_changed(update, self.tick, self.config.naming);
+        let mut change = self.radar.panes_changed(update, self.tick, self.config.naming);
+        change.force_render |= revealed;
+        change.render |= revealed;
         self.project(effects, change, now)
+    }
+
+    /// A manifest's word on visibility: it reaches the active tab's plugins
+    /// only (see `hidden`), so it shows this rail unless the rail is collapsed
+    /// (see `set_collapsed`). `true` when that reveals a hidden rail, which
+    /// then repaints like a `Visible(true)` (the rail expanded in its own tab).
+    fn manifest_reveals(&mut self) -> bool {
+        let revealed = self.hidden && !self.collapsed;
+        self.hidden &= self.collapsed;
+        revealed
     }
 
     /// `elapsed_s` is the duration Zellij reports on `Event::Timer` — the
@@ -800,7 +814,8 @@ impl PluginRuntime {
             Verb::AttentionNext | Verb::SessionNext => Direction::Next,
             Verb::AttentionPrev | Verb::SessionPrev => Direction::Prev,
         };
-        if !self.permission.granted() || self.hidden || !self.on_clients_tab() {
+        // `paints`, not `hidden`: a tab's collapsed rail is not on screen either.
+        if !self.permission.granted() || !self.paints() || !self.on_clients_tab() {
             return Outcome::none();
         }
         if matches!(verb, Verb::AttentionNext | Verb::AttentionPrev) {
@@ -861,11 +876,16 @@ impl PluginRuntime {
     }
 
     /// Record and emit a collapse change; `false` when already in that state.
+    /// Collapsing also marks the rail hidden: Zellij never sends a collapsed
+    /// pane `Visible(false)` when its tab leaves the screen, so a rail that is
+    /// later expanded in a background tab would otherwise act and paint with a
+    /// frozen view. `Visible(true)` or the next manifest clears it once shown.
     fn set_collapsed(&mut self, collapsed: bool, effects: &mut Vec<Effect>) -> bool {
         if self.collapsed == collapsed {
             return false;
         }
         self.collapsed = collapsed;
+        self.hidden |= collapsed;
         effects.push(Effect::SetCollapsed(collapsed));
         true
     }
