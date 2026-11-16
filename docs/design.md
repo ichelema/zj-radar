@@ -277,6 +277,8 @@ closes the tab exactly as before.
 - `InitialKeybinds`, which is never handled. Subscribing to it is Zellij's
   opt-out that strips the full keybinding table from every `ModeUpdate`, so
   the per-instance protobuf decode of each mode change stays small.
+- `SessionUpdate`, never from `load` and for one event at a time: the
+  manifest a rail in a background tab asks for (*The rail pair*, below).
 
 **Event routing.** Zellij delivers `TabUpdate`, `PaneUpdate`, and `ModeUpdate`
 only to the plugins in each client's *active* tab. `PaneAttentionChanged`,
@@ -293,7 +295,8 @@ unless a `blocked` or `error` child makes Zellij raise the pane, which
 **Child records arrive late (Zellij 0.46).** Of the events the rail
 subscribes to, only `PaneUpdate` carries `program_status`. `SessionUpdate`
 carries the same manifest to every instance, but Zellij does not send it on a
-record change, and the rail does not subscribe to it (§10). Storing a record
+record change, and the rail listens for it one event at a time, for its pair
+only (*The rail pair*, below; §10). Storing a record
 (`attention/tracker.rs::on_signal`, `ProgramStatus` arm) does not mark the
 pane changed: `PaneUpdate` follows a change in any pane's resolved attention
 or frame marker (`resolve`), a title change, or a focus, layout, or tab
@@ -424,6 +427,57 @@ collapsed; `sidebar-toggle` switches between the two, see
 [`configuration.md`](configuration.md)). Exactly one of the two takes space at
 a time.
 
+**The rail pair.** Collapse belongs to the pane (`set_self_collapsed`) and
+every client sees it, while Zellij runs one instance of each rail per pane and
+client. So several instances drive one pane, and each has to learn where that
+pane and the other rail of its tab stand. Both are in the pane manifest
+(`PaneInfo.is_collapsed`). A mini rail is *ready* once it has named its pane
+`zj-radar mini <server pid>` (`Effect::NameMiniPane`): `PaneInfo` carries no
+plugin options, and the pid sets aside the name a resurrected layout carries
+over from the server that saved it.
+
+- **At load** a mini instance collapses its pane. It does so blind, before
+  any event: Zellij holds them all back until the grant, and an ungranted
+  mini would squeeze the permission prompt into 4 columns.
+- **Its first manifest** settles a mini (`PluginRuntime::settle`). It comes
+  back up when its full rail is collapsed, or when its pane has no name yet
+  and another tab shows its mini (a tab opened in mini mode). Then it names
+  its pane.
+- **Every manifest** corrects what an instance believes of its own pane, and
+  each rail follows the other into mini mode only, on the edge: the mini
+  coming up collapses the full rail, the full rail going away brings the mini
+  up. Nothing but a toggle leaves mini mode, so the collapse a new mini
+  instance does at load moves no full rail, and a manifest that still shows
+  the state before a toggle moves nothing.
+- **`sidebar-toggle`** flips an instance that knows its pair: a full rail with
+  a ready mini, a settled mini. Any other does not flip. It cannot tell which
+  way the session went, because another client's instance may have moved its
+  pane already. It waits two ticks, looks at the session, and follows what it
+  finds.
+
+`PaneUpdate` reaches the active tab only, so a rail in a background tab asks
+for one `SessionUpdate`, which carries the session's manifest to every
+instance (`Effect::WatchSession`): at its grant when no manifest has shown its
+pane, and two ticks after a toggle that found it without its pair. The glue
+subscribes, re-declares the pane's selectability (Zellij answers every
+`SetSelectable` with a state report), and unsubscribes at the first event that
+holds its pane. This is a subscription, not a read: nothing blocks, and its
+rate is the grants and the user's toggles. Staying subscribed costs too much.
+With 12 tabs, 24 rails subscribed from `load` got their grant after 3.7–8.7 s
+(the slowest one) instead of 0.5–1.3 s. Limits:
+
+- A client that attaches to a session showing its mini rails sees them
+  disappear and come back: its new instances collapse at load and settle on
+  their first manifest. That took 13–132 ms with 5 tabs, and up to about 2 s
+  with 12.
+- A tab whose rail did not know its pair follows a toggle one to two seconds
+  late (2 s in a quiet session, where the toggle arms the ticks): a tab
+  nobody visited, on the first toggle of a session. Showing the tab pairs
+  its rail at once.
+- A toggle in the moment between an instance's load and its first manifest
+  can leave that tab out of step with the others until a later toggle or
+  until the tab is shown.
+
 `new_tab_template` is mandatory. When omitted, Zellij derives one from
 `default_tab_template` and drops a `children` nested inside a split
 ([zellij#3247](https://github.com/zellij-org/zellij/issues/3247)); the new tab
@@ -446,8 +500,9 @@ speeds or not at all (`PluginRuntime::desired_cadence`):
 - **Fast (1 Hz)** while there is tick-windowed work: the permission request
   still in flight; a spinning glyph (`TrackedObservation::animating`: Running
   and not steady); an active ping flash (two ticks after a pane flips to
-  Pending); and a pending cross-session cycle selection awaiting its
-  idle-commit.
+  Pending); a pending cross-session cycle selection awaiting its
+  idle-commit; and the two ticks a rail waits after a toggle before it looks
+  for its pair (§5, *The rail pair*).
 - **Frame (`spinner_fps`, default 4 Hz)** is Fast subdivided for the
   spinner, used instead of Fast only while this rail is visible, granted, and
   something spins at full speed (animating and not yet eased,
@@ -658,6 +713,8 @@ list is refreshed only on request: a plugin calling the blocking
 §1. `GlobalAttentionUpdate` is pushed and already carries each peer's counts
 and attention panes. The session's own name arrives push-style via
 `Event::ModeUpdate`, and may legitimately be `None` before Zellij assigns one.
+The one `SessionUpdate` a rail takes for its pair (§5, *The rail pair*) is
+read for the current session's pane manifest only, never for the peer list.
 
 **Badge.** `Sessions::badge()` is re-derived on every call. It renders zero
 lines while only the current session is known; from two entries on, one line

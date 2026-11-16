@@ -429,7 +429,8 @@ impl ZellijSession {
 
     /// Poll the PTY buffer until the plugin's " RADAR" header appears, indicating
     /// the plugin has loaded, received permissions, and rendered its first frame.
-    /// Gives up after 30 seconds.
+    /// A client that attaches to a session showing its mini rails gets the
+    /// mini's `»` instead. Gives up after 30 seconds.
     fn wait_until_ready(&self) {
         let deadline = Instant::now() + Duration::from_secs(30);
 
@@ -440,7 +441,7 @@ impl ZellijSession {
             // The plugin renders " RADAR" as its header line in all states
             // (both the onboarding screen and the tab-row view). Checked first:
             // the PTY buffer accumulates, so prompt text lingers after a grant.
-            if text.contains(" RADAR") {
+            if text.contains(" RADAR") || text.contains('»') {
                 // Extra beat so the plugin finishes its initial render cycle.
                 std::thread::sleep(Duration::from_millis(500));
                 return;
@@ -1103,7 +1104,9 @@ pub fn two_sidebar_tabs_layout(plugin_wasm: &Path) -> String {
 }
 
 /// The two-rail shape `setup zellij --inject` writes (ICH-494): the full rail
-/// and, right of it, the 4-column mini rail, in every tab of two.
+/// and, right of it, the 4-column mini rail, in every tab of two and in the
+/// tabs opened later (`new_tab_template` names their terminal: Zellij drops a
+/// nested `children` from the template it would derive, zellij#3247).
 pub fn mini_rail_tabs_layout(plugin_wasm: &Path) -> String {
     let wasm_abs = plugin_wasm.canonicalize().unwrap_or_else(|_| plugin_wasm.to_path_buf());
     let w = wasm_abs.display();
@@ -1120,6 +1123,19 @@ pub fn mini_rail_tabs_layout(plugin_wasm: &Path) -> String {
                 }}
             }}
             children
+        }}
+    }}
+    new_tab_template {{
+        pane split_direction="vertical" {{
+            pane size=32 borderless=true {{
+                plugin location="file:{w}"
+            }}
+            pane size=4 borderless=true {{
+                plugin location="file:{w}" {{
+                    mini true
+                }}
+            }}
+            pane focus=true cwd="/tmp"
         }}
     }}
     tab name="one" focus=true {{

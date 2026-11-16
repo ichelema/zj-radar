@@ -150,8 +150,8 @@ keybinds {
   session running these verbs do nothing.
 - `sidebar-toggle` collapses the full rail and expands the mini rail in every
   tab, or the reverse. It needs a layout with both rail panes; with only the
-  full rail it does nothing. A tab opened after a toggle starts with the full
-  rail, and the next toggle flips it with the others.
+  full rail it does nothing. A tab opened while the mini rails show starts
+  with the mini rail, and a client that attaches finds every tab as it was.
 
 These binds broadcast too, for the reason above: in a session without a
 rail they do nothing.

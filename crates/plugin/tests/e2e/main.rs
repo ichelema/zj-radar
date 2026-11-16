@@ -1454,10 +1454,27 @@ keybinds {
     eprintln!("[e2e] PASS: attention-next followed the pressing client's own tab 10 times");
 }
 
+/// The column a tab's terminal starts at, which is the width the rails take
+/// on its left: 32 with the full rail, 4 with the mini (ICH-494).
+fn terminal_x(s: &ZellijSession, tab: u64) -> Option<u64> {
+    s.panes()
+        .into_iter()
+        .find_map(|p| (p["is_plugin"] == false && p["tab_position"] == tab).then(|| p["pane_x"].as_u64()).flatten())
+}
+
+/// How many mini rails have named their pane: what tells a full rail its
+/// mini is ready, and so that a toggle will flip the pair.
+fn ready_minis(s: &ZellijSession) -> usize {
+    s.panes().iter().filter(|p| p["title"].as_str().is_some_and(|title| title.starts_with("zj-radar mini "))).count()
+}
+
+fn toggle_sidebar(s: &ZellijSession) {
+    s.run_action_checked(&["pipe", "--name", "zj_radar.cmd.v1", "--", "sidebar-toggle"]);
+}
+
 /// ICH-494: `sidebar-toggle` swaps every tab between the full rail (32
 /// columns) and the mini rail (4 columns), and a click on the mini rail's `»`
 /// brings the full rail back through `zellij pipe` run by the plugin.
-/// The terminal's `pane_x` is the width the rails take on its left.
 #[test]
 #[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
 fn sidebar_toggle_swaps_the_full_and_mini_rail_in_every_tab() {
@@ -1472,29 +1489,22 @@ fn sidebar_toggle_swaps_the_full_and_mini_rail_in_every_tab() {
         &wasm,
         pre_grant_permissions(&wasm),
     );
-    let terminal_x = |s: &ZellijSession, tab: u64| {
-        s.panes()
-            .into_iter()
-            .find_map(|p| (p["is_plugin"] == false && p["tab_position"] == tab).then(|| p["pane_x"].as_u64()).flatten())
-    };
-    let mini_named = |s: &ZellijSession| s.panes().iter().any(|p| p["title"] == "zj-radar mini");
     let wait = Duration::from_secs(10);
 
     assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(32)), "full rail first: {:?}", s.panes());
-    assert!(s.wait_until(wait, mini_named), "the granted mini rail never named its pane: {:?}", s.panes());
+    assert!(s.wait_until(wait, |s| ready_minis(s) == 2), "the mini rails never named their panes: {:?}", s.panes());
     let pane_one = s.discover_terminal_pane_id(); // tab one's shell prints ZPID=<id>
 
-    s.run_action_checked(&["pipe", "--name", "zj_radar.cmd.v1", "--", "sidebar-toggle"]);
+    toggle_sidebar(&s);
     assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(4)), "toggle → mini: {:?}", s.panes());
+    // Tab two was never on screen, so no manifest reaches its rails: its full
+    // rail looks at the session to follow its mini (ICH-521).
+    assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(4)), "tab two, never visited: {:?}", s.panes());
 
-    // Tab two's full rail never saw a manifest, so it learns the toggle from
-    // its mini on the first one, when the tab opens.
     s.run_action_checked(&["go-to-tab", "2"]);
-    assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(4)), "tab two follows: {:?}", s.panes());
-
-    s.run_action_checked(&["pipe", "--name", "zj_radar.cmd.v1", "--", "sidebar-toggle"]);
+    toggle_sidebar(&s);
     assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(32)), "toggle → full: {:?}", s.panes());
-    s.run_action_checked(&["pipe", "--name", "zj_radar.cmd.v1", "--", "sidebar-toggle"]);
+    toggle_sidebar(&s);
     assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(4)), "toggle → mini again: {:?}", s.panes());
 
     // Each tab's number and glyph share one physical row of the 4-column
@@ -1517,6 +1527,81 @@ fn sidebar_toggle_swaps_the_full_and_mini_rail_in_every_tab() {
     assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(32)), "» click → full: {:?}", s.panes());
     assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(32)), "» reaches tab one too: {:?}", s.panes());
     eprintln!("[e2e] PASS: sidebar-toggle and » swap the rails in every tab");
+}
+
+/// ICH-494: Zellij gives every client its own instance of each rail, and a
+/// new mini instance collapses its pane at load, before it can know the
+/// session shows its minis. A client that attaches or detaches must leave
+/// every tab on the mini rail, the tab nobody visited included.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn mini_mode_survives_a_client_attaching_and_detaching() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+    let s = ZellijSession::start(
+        &format!("zjr_minic_{}", std::process::id()),
+        &mini_rail_tabs_layout(&wasm),
+        &wasm,
+        pre_grant_permissions(&wasm),
+    );
+    let wait = Duration::from_secs(10);
+    let every_tab = |s: &ZellijSession, x: u64| (0..2).all(|tab| terminal_x(s, tab) == Some(x));
+
+    assert!(s.wait_until(wait, |s| ready_minis(s) == 2), "the mini rails never named their panes: {:?}", s.panes());
+    toggle_sidebar(&s);
+    assert!(s.wait_until(wait, |s| every_tab(s, 4)), "toggle → mini in both tabs: {:?}", s.panes());
+
+    // The new instances' collapse shows for a moment; then it must hold.
+    let mut other = s.attach_client();
+    assert!(s.wait_until(wait, |s| every_tab(s, 4)), "a second client attached: {:?}", s.panes());
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(every_tab(&s, 4), "a second client reset the mini rails: {:?}", s.panes());
+
+    other.press("\x0fd"); // Ctrl-o d: detach
+    let detached = std::time::Instant::now() + wait;
+    while other.is_alive() && std::time::Instant::now() < detached {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!other.is_alive(), "the second client never detached");
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(every_tab(&s, 4), "a client detaching reset the mini rails: {:?}", s.panes());
+
+    toggle_sidebar(&s);
+    assert!(s.wait_until(wait, |s| every_tab(s, 32)), "toggle → full in both tabs: {:?}", s.panes());
+    eprintln!("[e2e] PASS: mini mode held while a second client attached and detached");
+}
+
+/// ICH-494: a tab opened while the session shows its mini rails comes up on
+/// the mini rail too, and the next toggle takes it along.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn a_tab_opened_in_mini_mode_comes_up_mini() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+    let s = ZellijSession::start(
+        &format!("zjr_minit_{}", std::process::id()),
+        &mini_rail_tabs_layout(&wasm),
+        &wasm,
+        pre_grant_permissions(&wasm),
+    );
+    let wait = Duration::from_secs(10);
+    let every_tab = |s: &ZellijSession, x: u64| (0..3).all(|tab| terminal_x(s, tab) == Some(x));
+
+    assert!(s.wait_until(wait, |s| ready_minis(s) == 2), "the mini rails never named their panes: {:?}", s.panes());
+    toggle_sidebar(&s);
+    assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(4)), "toggle → mini: {:?}", s.panes());
+
+    s.run_action_checked(&["new-tab"]);
+    assert!(s.wait_until(wait, |s| every_tab(s, 4)), "a tab opened in mini mode: {:?}", s.panes());
+    toggle_sidebar(&s);
+    assert!(s.wait_until(wait, |s| every_tab(s, 32)), "toggle → full in all three tabs: {:?}", s.panes());
+    eprintln!("[e2e] PASS: a tab opened in mini mode came up on the mini rail");
 }
 
 /// ICH-494: with two rails per tab, a tab's collapsed rail gets no

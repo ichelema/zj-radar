@@ -196,13 +196,24 @@ pub(crate) enum Effect {
     /// only the clicked instance; every instance, this one included, toggles
     /// when the broadcast comes back.
     BroadcastSidebarToggle,
-    /// Name this mini rail's pane [`MINI_PANE_TITLE`] (`rename_plugin_pane`):
-    /// the full rail's only way to tell a ready mini sibling from any other
-    /// plugin pane, since `PaneInfo` carries no alias options.
+    /// Ask for one `SessionUpdate`: the session's manifest, and the only one
+    /// that reaches a rail whose tab is in the background. The glue
+    /// subscribes, re-declares `selectable` (Zellij answers every such
+    /// declaration with a state report) and unsubscribes at the first one
+    /// that has this rail's pane. A subscription, not a read: nothing blocks.
+    WatchSession {
+        selectable: bool,
+    },
+    /// Name this mini rail's pane (`rename_plugin_pane`, [`MINI_PANE_TITLE`]
+    /// and the server's pid): the full rail's only way to tell a ready mini
+    /// sibling from any other plugin pane, since `PaneInfo` carries no alias
+    /// options.
     NameMiniPane,
 }
 
-/// The pane title a granted mini rail gives itself (`Effect::NameMiniPane`).
+/// The pane title a mini rail gives itself (`Effect::NameMiniPane`), followed
+/// by the Zellij server's pid: a resurrected session's layout carries the old
+/// name over, and that pane is not ready until its new instance says so.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // read by the wasm glue only
 pub(crate) const MINI_PANE_TITLE: &str = "zj-radar mini";
 
@@ -432,15 +443,51 @@ pub(crate) struct PluginRuntime {
     /// emits on change only — the first sync always emits, declaring the
     /// initial state explicitly rather than trusting the host's default.
     selectable_sent: Option<bool>,
-    /// This rail's own pane is collapsed: the last `SetCollapsed` this
-    /// instance emitted (a fresh pane is expanded, as the layout draws it). A
-    /// collapsed rail paints nothing, like a hidden one (see [`paints`](Self::paints)).
+    /// This rail's own pane is collapsed, as the host has it: what this
+    /// instance last asked for (`SetCollapsed`), corrected by every manifest
+    /// (`pair_changed`). Zellij runs one instance per pane and client, and
+    /// another client's may have moved the pane. A collapsed rail paints
+    /// nothing, like a hidden one (see [`paints`](Self::paints)).
     collapsed: bool,
-    /// Full rail only: the collapse state of the ready mini rail sharing this
-    /// tab, from the latest manifest (`None` = no ready mini, as in a layout
-    /// that predates the mini rail). A full rail only collapses while one is
-    /// known, so it can never leave its tab with no rail at all.
-    mini_sibling: Option<bool>,
+    /// The other rail of this tab in the latest manifest, as
+    /// `Some(collapsed)`: a full rail's ready mini (`None` = none, as in a
+    /// layout that predates the mini rail), a mini's full rail. A full rail
+    /// only collapses while a ready mini is known, so it can never leave its
+    /// tab with no rail at all.
+    sibling: Option<bool>,
+    /// Full rail: the latest manifest shows no other rail pane in its tab, so
+    /// there is no mini to look for.
+    alone: bool,
+    /// Mini only: it has taken its place from a manifest (see
+    /// [`settle`](Self::settle)).
+    settled: bool,
+    /// One `SessionUpdate` is asked for and not here yet (`Effect::WatchSession`).
+    session_look: bool,
+    /// Ticks until this rail asks for one (0 = none due): a toggle that found
+    /// it without its pair is looked up once it has landed everywhere (see
+    /// [`sidebar_toggle`](Self::sidebar_toggle)).
+    look_in: u8,
+}
+
+/// How many ticks a toggle's look waits ([`PluginRuntime::look_in`]): two, so
+/// at least one whole second passes and the manifest shows every rail's flip.
+const LOOK_TICKS: u8 = 2;
+
+/// A rail's pair as a manifest has it (see [`PluginRuntime::pair_changed`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Pair {
+    /// This rail's own pane is collapsed.
+    pub collapsed: bool,
+    /// Mini only: its pane already carries the mini title, so an instance has
+    /// settled it since the server started.
+    pub named: bool,
+    /// The other rail of the tab, as `Some(collapsed)`: a full rail's ready
+    /// mini, a mini's full rail.
+    pub sibling: Option<bool>,
+    /// The tab holds no other rail pane, ready or not.
+    pub alone: bool,
+    /// Another tab shows its ready mini: the session is in mini mode.
+    pub peer_mini_shown: bool,
 }
 
 /// See [`PluginRuntime::last_render_key`].
@@ -502,7 +549,9 @@ impl PluginRuntime {
         // closed a rail-only tab (`desired_selectable`).
         self.sync_selectable(&mut effects);
         // The mini rail starts collapsed, granted or not: until it is, Zellij's
-        // permission prompt would be squeezed into 4 columns.
+        // permission prompt would be squeezed into 4 columns. Blind, since no
+        // state reaches a plugin before its grant: `settle` brings it back up
+        // where the session shows its minis.
         if self.config.mini {
             (self.collapsed, self.hidden) = (true, true);
             effects.push(Effect::SetCollapsed(true));
@@ -640,6 +689,12 @@ impl PluginRuntime {
         let mut effects = Vec::new();
         self.tick += 1;
         self.radar.timer(self.tick);
+        if self.look_in > 0 {
+            self.look_in -= 1;
+            if self.look_in == 0 {
+                self.watch_session(&mut effects);
+            }
+        }
         // BEFORE re-arming below, commit an idle cycle selection if one is
         // pending. Committing here — not after `project` re-arms — matters:
         // a commit clears `Sessions::wants_fast_cadence`, and the chain must
@@ -839,40 +894,100 @@ impl PluginRuntime {
     /// the other verbs it acts on EVERY instance, hidden or not and whatever
     /// the client's tab, with no `client_tab` read: collapse is pane-level,
     /// so each tab's pair must flip together for the next tab switch to show
-    /// the same width. Within a tab exactly one of the pair is expanded: both
-    /// start that way and receive the same broadcast. A full rail with no
-    /// known ready mini is a no-op, so an old layout never loses its rail.
-    /// Inert until granted: an ungranted mini stays collapsed.
+    /// the same width. Within a tab exactly one of the pair is expanded, and
+    /// both receive the same broadcast. Inert until granted.
+    ///
+    /// Only a rail that knows its pair flips: a full rail with a ready mini,
+    /// a settled mini. Any other cannot tell which way the session went (its
+    /// pane may have been moved already by another client's instance), so it
+    /// waits [`LOOK_TICKS`] and looks: by then the pair shows where the toggle
+    /// left it, and `pair_changed` follows. A full rail alone in its tab does
+    /// nothing, so a layout without the mini never loses its rail.
     fn sidebar_toggle(&mut self) -> Outcome {
-        if !self.permission.granted() || (!self.config.mini && self.mini_sibling.is_none()) {
+        if !self.permission.granted() {
             return Outcome::none();
         }
+        // A manifest already asked for is older than this toggle.
+        self.session_look = false;
         let mut effects = Vec::new();
-        self.set_collapsed(!self.collapsed, &mut effects);
-        self.collapse_outcome(effects)
+        let knows_its_pair = if self.config.mini { self.settled } else { self.sibling.is_some() };
+        if knows_its_pair {
+            self.set_collapsed(!self.collapsed, &mut effects);
+            return self.collapse_outcome(effects);
+        }
+        if !self.alone {
+            self.look_in = LOOK_TICKS;
+            self.arm_timer_if_needed(self.last_now_epoch_s, &mut effects);
+        }
+        Outcome::with_effects(false, effects)
     }
 
-    /// A manifest's word on the ready mini rail in this rail's tab
-    /// (`Some(collapsed)`, or `None` for none). Full rails follow it: on each
-    /// change they take the opposite state, which re-pairs a full rail that
-    /// missed a toggle (a background tab's rail that never saw a manifest
-    /// knows no mini, so it ignored the toggle). Edge-triggered: a manifest
-    /// that repeats the mini's state moves nothing, so a stale one racing
-    /// the toggle cannot flip the pair back. A mini that leaves expands it.
-    pub(crate) fn mini_sibling_changed(&mut self, mini: Option<bool>) -> Outcome {
-        if self.config.mini || mini == self.mini_sibling {
-            return Outcome::none();
-        }
-        let button_changed = mini.is_some() != self.mini_sibling.is_some();
-        self.mini_sibling = mini;
+    /// A manifest's word on this rail's pair (see [`Pair`]).
+    ///
+    /// Each rail follows the other into mini mode only, on the edge: the mini
+    /// coming up collapses the full rail, the full rail going away brings the
+    /// mini up. Nothing but a toggle leaves mini mode, so the collapse every
+    /// new mini instance does at `load` moves no one, and a stale manifest
+    /// racing a toggle repeats a state and moves nothing either.
+    pub(crate) fn pair_changed(&mut self, pair: Pair) -> Outcome {
         let mut effects = Vec::new();
-        let changed = self.set_collapsed(mini == Some(false), &mut effects);
-        if button_changed && !changed {
+        let was = std::mem::replace(&mut self.sibling, pair.sibling);
+        self.alone = pair.alone;
+        self.collapsed = pair.collapsed;
+        self.hidden |= pair.collapsed;
+        if self.config.mini {
+            if !self.settled {
+                self.settle(pair, &mut effects);
+            } else if pair.sibling == Some(true) && was != pair.sibling {
+                self.set_collapsed(false, &mut effects);
+            }
+            return self.collapse_outcome(effects);
+        }
+        if pair.sibling == Some(false) && was != pair.sibling {
+            self.set_collapsed(true, &mut effects);
+        } else if pair.sibling.is_none() && self.collapsed {
+            self.set_collapsed(false, &mut effects); // never a tab with no rail
+        }
+        if was.is_some() != pair.sibling.is_some() && !self.collapsed {
             // The header's `«` comes or goes: repaint past the rows-diff gate.
             let change = RadarChange { render: true, force_render: true, ..RadarChange::default() };
             return self.project(effects, change, self.last_now_epoch_s);
         }
         self.collapse_outcome(effects)
+    }
+
+    /// A mini takes its place from its first manifest, once: shown while its
+    /// full rail is collapsed, or in a tab opened while the session shows its
+    /// minis. The expand goes out whatever the manifest says of this pane:
+    /// `load` collapsed it blind, and the manifest may be older than that.
+    /// Naming the pane is what tells the full rail this mini is ready.
+    fn settle(&mut self, pair: Pair, effects: &mut Vec<Effect>) {
+        self.settled = true;
+        let shown = pair.sibling == Some(true) || (!pair.named && pair.peer_mini_shown);
+        self.collapsed = !shown;
+        self.hidden |= !shown;
+        if shown {
+            effects.push(Effect::SetCollapsed(false));
+        }
+        if !pair.named {
+            effects.push(Effect::NameMiniPane);
+        }
+    }
+
+    /// The session's manifest, asked for once (`Effect::WatchSession`): how a
+    /// rail whose tab is in the background learns its pair. One that nobody
+    /// is waiting for any more is older than what the rail did since, and is
+    /// dropped: no later one would correct it.
+    pub(crate) fn session_pair_changed(&mut self, pair: Pair) -> Outcome {
+        if !std::mem::take(&mut self.session_look) {
+            return Outcome::none();
+        }
+        self.pair_changed(pair)
+    }
+
+    fn watch_session(&mut self, effects: &mut Vec<Effect>) {
+        self.session_look = true;
+        effects.push(Effect::WatchSession { selectable: self.desired_selectable() });
     }
 
     /// Record and emit a collapse change; `false` when already in that state.
@@ -1068,11 +1183,12 @@ impl PluginRuntime {
         // terminal neighbor is known (`desired_selectable`); a rail-only tab
         // keeps it reachable.
         self.sync_selectable(&mut effects);
-        // A granted mini names its pane, which is what tells its full sibling
-        // it is ready: an ungranted mini (its prompt answered nowhere) never
-        // gets a full rail to collapse in its favour.
-        if granted && self.config.mini {
-            effects.push(Effect::NameMiniPane);
+        // No manifest found this rail's pane, so its tab is in the background
+        // and none will: look at the session once, for its pair. An ungranted
+        // mini (its prompt answered nowhere) never settles, so it never gets
+        // a full rail to collapse in its favour.
+        if granted && self.own_tab_position.is_none() {
+            self.watch_session(&mut effects);
         }
         Outcome::with_effects(true, effects)
     }
@@ -1154,7 +1270,7 @@ impl PluginRuntime {
             session_tree: self.config.session_tree,
             mode: self.shown_mode(),
             mini: self.config.mini,
-            sidebar_toggle: !self.config.mini && self.mini_sibling.is_some(),
+            sidebar_toggle: !self.config.mini && self.sibling.is_some(),
         }
     }
 
@@ -1231,6 +1347,8 @@ impl PluginRuntime {
         }
         if self.permission.is_requesting()
             || self.timer_should_continue()
+            // A look is due in a tick or two (`look_in`).
+            || self.look_in > 0
             // A pending cross-session cycle selection needs the idle-commit
             // in `timer` to fire promptly, not wait out a Slow (or fully
             // disarmed) chain.
