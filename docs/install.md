@@ -181,6 +181,11 @@ default_tab_template {
         pane size=32 borderless=true {
             plugin location="radar"   // ← alias
         }
+        pane size=4 borderless=true {
+            plugin location="radar" {
+                mini true
+            }
+        }
         children
     }
     pane size=2 borderless=true {
@@ -194,6 +199,11 @@ new_tab_template {
         pane size=32 borderless=true {
             plugin location="radar"
         }
+        pane size=4 borderless=true {
+            plugin location="radar" {
+                mini true
+            }
+        }
         pane focus=true
     }
     pane size=2 borderless=true {
@@ -201,6 +211,10 @@ new_tab_template {
     }
 }
 ```
+
+The second pane in each template is the mini rail: 4 columns, right after the
+full rail. It starts collapsed, and `sidebar-toggle` switches between the two
+(see [configuration](configuration.md)). Only one of them takes space at a time.
 
 Both templates are required. Zellij derives `new_tab_template` from
 `default_tab_template` when you omit it and drops a `children` nested inside a
@@ -354,6 +368,10 @@ zj-radar update --check    # report only; exit 1 when an update is available
    `~/.config/zellij/plugins/zj_radar.wasm` comes from the same release. The
    file is rewritten only when its bytes differ.
 3. Runs the doctor (`setup --check`).
+
+A layout injected by an earlier version has no mini rail yet:
+`zj-radar setup zellij --inject` adds it next to each injected rail pane and
+leaves the rest of the layout as it was.
 
 Restart Zellij, or open a new session, to load the new sidebar. A running
 session keeps the old plugin.

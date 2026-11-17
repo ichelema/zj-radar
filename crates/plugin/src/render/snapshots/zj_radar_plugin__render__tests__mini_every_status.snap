@@ -1,0 +1,10 @@
+---
+source: crates/plugin/src/render/tests.rs
+expression: "snapshot_mini(&rows, &mini_opts(10))"
+---
+ »
+ 1 ○
+ 2 ●
+ 3 ⠋
+ 4 ◆
+ 5 ✗

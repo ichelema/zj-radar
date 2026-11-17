@@ -109,6 +109,9 @@ pub struct State {
     runtime: PluginRuntime,
     #[cfg(target_arch = "wasm32")]
     plugin_id: Option<u32>,
+    /// What a ready mini rail's pane is called (`runtime::MINI_PANE_TITLE`).
+    #[cfg(target_arch = "wasm32")]
+    mini_title: String,
 }
 
 // ── Pure helper wrappers (no host calls) — compiled only for host tests ──
@@ -232,6 +235,23 @@ impl State {
                 Effect::MarkSeen { session, pane_id } => {
                     mark_session_pane_seen(&session, PaneId::Terminal(pane_id));
                 }
+                Effect::SetCollapsed(collapsed) => set_self_collapsed(collapsed),
+                // The child inherits the server's environment (ZELLIJ_SESSION_NAME),
+                // so the bare `zellij pipe` reaches this session; no plugin url
+                // means a broadcast to every rail. Its result is not read.
+                Effect::BroadcastSidebarToggle => run_command(
+                    &["zellij", "pipe", "--name", CMD_PIPE, "--", "sidebar-toggle"],
+                    BTreeMap::from([("zj_radar".to_string(), "sidebar-toggle".to_string())]),
+                ),
+                Effect::WatchSession { selectable } => {
+                    subscribe(&[EventType::SessionUpdate]);
+                    set_selectable(selectable);
+                }
+                Effect::NameMiniPane => {
+                    if let Some(plugin_id) = self.plugin_id {
+                        rename_plugin_pane(plugin_id, &self.mini_title);
+                    }
+                }
             }
         }
     }
@@ -254,6 +274,46 @@ impl State {
                 self.handle_effects(outcome.effects);
             }
         }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl State {
+    /// Read this rail's pair off a manifest (`runtime::Pair`) and hand it to
+    /// the runtime. `session`: the manifest came with a `SessionUpdate`, the
+    /// one asked for (`Effect::WatchSession`). A ready mini is a tiled pane of
+    /// this plugin that named itself (`Effect::NameMiniPane`): `PaneInfo` has
+    /// no alias options.
+    fn pair_changed(&mut self, manifest: &PaneManifest, session: bool) -> bool {
+        let own = |pane: &&PaneInfo| pane.is_plugin && Some(pane.id) == self.plugin_id;
+        let Some((own_tab, own)) = manifest.panes.iter().find_map(|(tab, panes)| Some((tab, panes.iter().find(own)?)))
+        else {
+            // A session being laid out reports before this pane is in its
+            // tab: keep listening, a later manifest has it.
+            return false;
+        };
+        if session {
+            unsubscribe(&[EventType::SessionUpdate]);
+        }
+        let rail = |p: &&PaneInfo| p.is_plugin && !p.is_floating && p.id != own.id && p.plugin_url == own.plugin_url;
+        let ready_mini = |p: &&PaneInfo| rail(p) && p.title == self.mini_title;
+        let rails = || manifest.panes[own_tab].iter().filter(rail);
+        // A full rail's sibling is its ready mini; a mini's is its full rail.
+        let is_mini = self.runtime.config.mini;
+        let pair = runtime::Pair {
+            collapsed: own.is_collapsed,
+            named: own.title == self.mini_title,
+            sibling: rails().find(|p| ready_mini(p) != is_mini).map(|p| p.is_collapsed),
+            alone: rails().next().is_none(),
+            peer_mini_shown: manifest
+                .panes
+                .iter()
+                .filter(|(tab, _)| *tab != own_tab)
+                .flat_map(|(_, panes)| panes)
+                .any(|p| ready_mini(&p) && !p.is_collapsed),
+        };
+        let outcome = if session { self.runtime.session_pair_changed(pair) } else { self.runtime.pair_changed(pair) };
+        self.handle_outcome(outcome)
     }
 }
 
@@ -328,8 +388,9 @@ impl ZellijPlugin for State {
             // `RequestStateUpdateForPlugins` → `Tab::update_input_modes`,
             // unconditional on every successful plugin load — no polling,
             // no other plugin required) and carries `ModeInfo.session_name`,
-            // which is all this plugin ever needed from `SessionUpdate` in
-            // the first place.
+            // which is all the badge ever needed from `SessionUpdate`. (The
+            // rail pair takes one `SessionUpdate` at a time for its pane
+            // manifest, never from here: `Effect::WatchSession`.)
             EventType::ModeUpdate,
             // Never handled (falls to `update`'s `_ => false`), subscribed
             // purely as an opt-out: Zellij ≥0.44 treats a plugin subscribed
@@ -354,6 +415,7 @@ impl ZellijPlugin for State {
         ]);
         let ids = get_plugin_ids();
         self.plugin_id = Some(ids.plugin_id);
+        self.mini_title = format!("{} {}", runtime::MINI_PANE_TITLE, ids.zellij_pid);
         self.runtime.client_tab = Some(client_tab);
         let outcome = self.runtime.load(config::Config::from_map(&config));
         self.handle_outcome(outcome);
@@ -383,6 +445,8 @@ impl ZellijPlugin for State {
                     })
                 });
                 self.runtime.own_plugin_tab_changed(own_tab_position);
+                // Before `panes_changed`: it reveals a rail by its collapse state.
+                let paired = self.pair_changed(&manifest, false);
                 // Pure adapter: copy the host's `PaneInfo` fields into `RawPane`s.
                 // All policy — plugin-skip, title sanitize, theme-color precedence —
                 // lives in the host-tested `PaneUpdate::from_raw`.
@@ -418,7 +482,7 @@ impl ZellijPlugin for State {
                     })
                     .collect();
                 let outcome = self.runtime.panes_changed(radar_state::PaneUpdate::from_raw(raw));
-                self.handle_outcome(outcome)
+                self.handle_outcome(outcome) || paired
             }
             Event::GlobalAttentionUpdate(global) => {
                 let peers = global
@@ -471,6 +535,10 @@ impl ZellijPlugin for State {
                 let outcome = self.runtime.mouse_right_click(line, col as usize);
                 self.handle_outcome(outcome)
             }
+            Event::SessionUpdate(sessions, _) => match sessions.iter().find(|s| s.is_current_session) {
+                Some(session) => self.pair_changed(&session.panes, true),
+                None => false,
+            },
             Event::PermissionRequestResult(status) => {
                 let granted = status == PermissionStatus::Granted;
                 let outcome = self.runtime.permission_result(granted);

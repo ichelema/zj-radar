@@ -141,7 +141,9 @@ fn permission_result_updates_selectability() {
     // The first sync declares the state explicitly — and with no manifest
     // yet, that state is selectable. The flip to passive is the manifest's
     // job (`rail_turns_passive_only_once_a_terminal_pane_shares_its_tab`).
-    assert_eq!(outcome, Outcome { render: true, effects: vec![Effect::SetSelectable(true)] });
+    // No manifest also means no word on its pair: it looks at the session.
+    let effects = vec![Effect::SetSelectable(true), Effect::WatchSession { selectable: true }];
+    assert_eq!(outcome, Outcome { render: true, effects });
 }
 
 #[test]
@@ -1619,6 +1621,9 @@ mod timer_chain_fuzz {
         /// The cross-session cycle's own direct `arm_timer_if_needed` call
         /// site (`control()`), which bypasses `project()` entirely.
         SessionCycle,
+        /// The other direct call site: a toggle on a full rail that knows no
+        /// mini arms the ticks its look waits (`sidebar_toggle`).
+        SidebarToggle,
     }
 
     fn arb_step() -> impl Strategy<Value = Step> {
@@ -1626,6 +1631,7 @@ mod timer_chain_fuzz {
             4 => Just(Step::Fire),
             1 => any::<bool>().prop_map(Step::SetRunning),
             1 => Just(Step::SessionCycle),
+            1 => Just(Step::SidebarToggle),
         ]
     }
 
@@ -1660,6 +1666,10 @@ mod timer_chain_fuzz {
                     }
                     Step::SessionCycle => {
                         let out = rt.control(Verb::SessionNext);
+                        sim.schedule_from(&out.effects);
+                    }
+                    Step::SidebarToggle => {
+                        let out = rt.control(Verb::SidebarToggle);
                         sim.schedule_from(&out.effects);
                     }
                 }
@@ -2028,4 +2038,372 @@ fn pane_attention_changed_renders_only_on_a_change() {
     };
     assert!(rt.attention_changed(7, working.clone()).render);
     assert!(!rt.attention_changed(7, working).render);
+}
+
+// ---- Mini rail: `sidebar-toggle` and the full/mini pair (ICH-494) ----
+
+fn mini_config() -> config::Config {
+    config::Config { mini: true, ..config() }
+}
+
+/// A mini rail as `load` leaves it, granted: collapsed, and not settled yet.
+fn loaded_mini() -> PluginRuntime {
+    PluginRuntime { collapsed: true, hidden: true, ..runtime_with_config(mini_config()) }.granted()
+}
+
+/// A full rail's manifest row: its own pane expanded, its ready mini
+/// `collapsed` or shown.
+fn mini_is(collapsed: bool) -> Pair {
+    Pair { sibling: Some(collapsed), ..Pair::default() }
+}
+
+/// A named mini's manifest row: its own pane and its full rail, each
+/// collapsed or not.
+fn mini_row(collapsed: bool, full_collapsed: bool) -> Pair {
+    Pair { collapsed, named: true, sibling: Some(full_collapsed), ..Pair::default() }
+}
+
+/// A granted mini rail settled beside its expanded full rail: collapsed.
+fn granted_mini() -> PluginRuntime {
+    let mut rt = loaded_mini();
+    rt.pair_changed(mini_row(true, false));
+    rt
+}
+
+/// A granted full rail that has seen its ready, collapsed mini sibling.
+fn full_with_mini() -> PluginRuntime {
+    let mut rt = granted_runtime();
+    rt.pair_changed(mini_is(true));
+    rt
+}
+
+impl PluginRuntime {
+    fn granted(mut self) -> Self {
+        self.permission = PermissionState::Resolved { granted: true };
+        self
+    }
+}
+
+fn collapses(outcome: &Outcome) -> Vec<bool> {
+    outcome
+        .effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::SetCollapsed(c) => Some(*c),
+            _ => None,
+        })
+        .collect()
+}
+
+fn looks(outcome: &Outcome) -> bool {
+    outcome.effects.iter().any(|e| matches!(e, Effect::WatchSession { .. }))
+}
+
+#[test]
+fn the_mini_rail_loads_collapsed_and_the_full_rail_does_not() {
+    let mut mini = runtime_with_config(mini_config());
+    assert_eq!(collapses(&mini.load(mini_config())), vec![true]);
+    let mut full = runtime_with_config(config());
+    assert_eq!(collapses(&full.load(config())), Vec::<bool>::new());
+}
+
+/// The mini names its pane when it settles, not at its grant: the name is
+/// what tells the full rail it is ready.
+#[test]
+fn a_mini_settles_from_its_first_manifest_and_names_its_pane() {
+    let mut fresh = loaded_mini();
+    assert!(!fresh.permission_result(true).effects.contains(&Effect::NameMiniPane), "no manifest yet");
+    let settled = fresh.pair_changed(Pair { collapsed: true, sibling: Some(false), ..Pair::default() });
+    assert_eq!(settled.effects, vec![Effect::NameMiniPane], "full rail shown: the mini stays down");
+    assert_eq!(fresh.pair_changed(mini_row(true, false)), Outcome::default(), "it settles once");
+
+    // Another client's mini instance, in a session that shows its minis: the
+    // row can be older than the collapse `load` asked for, so it expands anyway.
+    let mut attached = loaded_mini();
+    let settled = attached.pair_changed(mini_row(false, true));
+    assert_eq!(settled.effects, vec![Effect::SetCollapsed(false)]);
+    assert_eq!(collapses(&attached.control_pipe("sidebar-toggle")), vec![true], "shown, so a toggle collapses it");
+}
+
+#[test]
+fn a_mini_opened_while_the_session_shows_its_minis_comes_up_and_its_full_rail_follows() {
+    let mut mini = loaded_mini();
+    let settled =
+        mini.pair_changed(Pair { collapsed: true, sibling: Some(false), peer_mini_shown: true, ..Pair::default() });
+    assert_eq!(settled.effects, vec![Effect::SetCollapsed(false), Effect::NameMiniPane]);
+    let mut full = granted_runtime();
+    assert_eq!(collapses(&full.pair_changed(mini_is(false))), vec![true]);
+
+    // A pane already named was settled by another instance: its pair decides.
+    let mut named = loaded_mini();
+    let settled = named.pair_changed(Pair { peer_mini_shown: true, ..mini_row(true, false) });
+    assert_eq!(settled, Outcome::default());
+}
+
+#[test]
+fn sidebar_toggle_flips_both_rails_of_a_pair_in_opposite_directions() {
+    let (mut mini, mut full) = (granted_mini(), full_with_mini());
+    let (m, f) = (mini.control_pipe("sidebar-toggle"), full.control_pipe("sidebar-toggle"));
+    assert_eq!((collapses(&m), collapses(&f)), (vec![false], vec![true]));
+    assert!(!f.render, "a collapsing rail paints nothing");
+    assert!(!m.render, "an expanded rail paints once shown, not before");
+    assert!(mini.tabs_changed(vec![tab(0, "a", true)]).render, "the manifest that shows it repaints");
+    let (m, f) = (mini.control_pipe("sidebar-toggle"), full.control_pipe("sidebar-toggle"));
+    assert_eq!((collapses(&m), collapses(&f)), (vec![true], vec![false]));
+}
+
+/// Another client's instance may have moved the pane: the manifest says where
+/// it is, and the toggle flips from there.
+#[test]
+fn a_toggle_flips_from_the_state_the_manifest_showed() {
+    let mut full = full_with_mini();
+    assert_eq!(collapses(&full.pair_changed(Pair { collapsed: true, ..mini_is(false) })), Vec::<bool>::new());
+    assert_eq!(collapses(&full.control_pipe("sidebar-toggle")), vec![false]);
+    let mut mini = granted_mini();
+    assert_eq!(collapses(&mini.pair_changed(mini_row(false, true))), Vec::<bool>::new());
+    assert_eq!(collapses(&mini.control_pipe("sidebar-toggle")), vec![true]);
+}
+
+#[test]
+fn sidebar_toggle_is_inert_until_granted() {
+    let mut mini = PluginRuntime { collapsed: true, ..runtime_with_config(mini_config()) };
+    assert_eq!(mini.control_pipe("sidebar-toggle"), Outcome::default());
+    assert_eq!(runtime_with_config(config()).control_pipe("sidebar-toggle"), Outcome::default());
+}
+
+fn tab_read_must_not_run() -> Option<usize> {
+    panic!("sidebar-toggle must not read the client's tab")
+}
+
+/// Collapse is pane-level, so every tab's pair flips, visible or not, and
+/// no `get_focused_pane_info` read is spent on it.
+#[test]
+fn sidebar_toggle_acts_on_hidden_rails_without_a_tab_read() {
+    let mut full = full_with_mini();
+    full.client_tab = Some(tab_read_must_not_run);
+    full.visibility_changed(false);
+    assert_eq!(collapses(&full.control_pipe("sidebar-toggle")), vec![true]);
+}
+
+#[test]
+fn a_keybind_toggle_needs_no_input_on_this_client() {
+    let mut mini = granted_mini();
+    assert_eq!(collapses(&mini.keybind_control_pipe("sidebar-toggle", 10_000)), vec![false]);
+}
+
+/// The mini coming up collapses the full rail and the full rail going away
+/// brings the mini up; the way back is a toggle's alone, so the collapse a
+/// new mini instance does at `load` never pulls a tab out of mini mode.
+#[test]
+fn each_rail_follows_the_other_into_mini_mode_only() {
+    let mut full = granted_runtime();
+    let first = full.pair_changed(mini_is(true));
+    assert_eq!(collapses(&first), Vec::<bool>::new(), "mini collapsed: the full rail stays");
+    assert!(first.render, "the header's toggle cell appears");
+    assert_eq!(collapses(&full.pair_changed(mini_is(false))), vec![true], "the mini came up");
+    assert_eq!(full.pair_changed(Pair { collapsed: true, ..mini_is(false) }), Outcome::default(), "edge-triggered");
+    let down = full.pair_changed(Pair { collapsed: true, ..mini_is(true) });
+    assert_eq!(collapses(&down), Vec::<bool>::new(), "the mini went down: the full rail stays collapsed");
+
+    let mut mini = granted_mini();
+    assert_eq!(collapses(&mini.pair_changed(mini_row(true, true))), vec![false], "the full rail went away");
+    assert_eq!(mini.pair_changed(mini_row(false, true)), Outcome::default(), "edge-triggered");
+    let back = mini.pair_changed(mini_row(false, false));
+    assert_eq!(collapses(&back), Vec::<bool>::new(), "the full rail came back: the mini stays up");
+}
+
+/// A tab is never left with no rail: a mini that leaves, or was never ready,
+/// gives the full rail back.
+#[test]
+fn a_collapsed_full_rail_with_no_ready_mini_expands() {
+    let mut full = full_with_mini();
+    full.control_pipe("sidebar-toggle");
+    assert_eq!(collapses(&full.pair_changed(Pair { collapsed: true, ..Pair::default() })), vec![false]);
+    let mut attached = granted_runtime();
+    assert_eq!(
+        collapses(&attached.pair_changed(Pair { collapsed: true, alone: true, ..Pair::default() })),
+        vec![false]
+    );
+}
+
+/// The toggle's two `SetCollapsed` land in either order, so a manifest can
+/// still show the other rail where it was: it must not flip this one back.
+#[test]
+fn a_stale_manifest_after_a_toggle_does_not_undo_it() {
+    let mut full = full_with_mini();
+    full.control_pipe("sidebar-toggle"); // into mini mode
+    assert_eq!(full.pair_changed(mini_is(true)), Outcome::default());
+    assert_eq!(collapses(&full.pair_changed(Pair { collapsed: true, ..mini_is(false) })), Vec::<bool>::new());
+    full.control_pipe("sidebar-toggle"); // and out: the mini is still up in this one
+    assert_eq!(full.pair_changed(mini_is(false)), Outcome::default());
+
+    let mut mini = granted_mini();
+    mini.control_pipe("sidebar-toggle");
+    mini.pair_changed(mini_row(false, true));
+    mini.control_pipe("sidebar-toggle"); // out of mini mode: the full rail is still down in this one
+    assert_eq!(mini.pair_changed(mini_row(true, true)), Outcome::default());
+}
+
+/// No manifest reaches a rail whose tab is in the background, so at its
+/// grant it asks for the session's, once.
+#[test]
+fn a_rail_granted_before_any_manifest_looks_at_the_session() {
+    for config in [config(), mini_config()] {
+        let mut background = runtime_with_config(config.clone());
+        assert!(looks(&background.permission_result(true)));
+        let mut on_screen = runtime_with_config(config.clone());
+        on_screen.own_plugin_tab_changed(Some(0));
+        assert!(!looks(&on_screen.permission_result(true)), "its manifests come by themselves");
+        assert!(!looks(&runtime_with_config(config).permission_result(false)));
+    }
+}
+
+/// The glue stops listening at the first `SessionUpdate`; one that still
+/// comes is older than what the rail did since, and nothing would correct it.
+#[test]
+fn a_session_manifest_is_taken_once() {
+    let mut full = runtime_with_config(config());
+    full.permission_result(true);
+    assert_eq!(collapses(&full.session_pair_changed(mini_is(false))), vec![true], "the one it asked for");
+    assert_eq!(full.session_pair_changed(mini_is(true)), Outcome::default());
+    assert_eq!(collapses(&full.control_pipe("sidebar-toggle")), vec![false], "still collapsed, as it left itself");
+
+    let mut never_asked = granted_runtime();
+    assert_eq!(never_asked.session_pair_changed(mini_is(false)), Outcome::default());
+}
+
+/// A manifest asked for before a toggle shows the session as it was.
+#[test]
+fn a_toggle_drops_the_session_manifest_already_asked_for() {
+    let mut full = runtime_with_config(config());
+    full.permission_result(true); // looks
+    full.pair_changed(mini_is(true)); // its tab came on screen first
+    assert_eq!(collapses(&full.control_pipe("sidebar-toggle")), vec![true]);
+    assert_eq!(full.session_pair_changed(mini_is(true)), Outcome::default());
+    assert_eq!(collapses(&full.control_pipe("sidebar-toggle")), vec![false]);
+}
+
+/// A full rail that knows no ready mini cannot tell which way a toggle went:
+/// another client's instance may have collapsed its pane already. It looks
+/// two ticks later, when the mini shows where the toggle left the tab.
+#[test]
+fn a_toggle_on_a_full_rail_without_its_mini_looks_two_ticks_later() {
+    let toggled = || {
+        let mut full = granted_runtime();
+        let toggle = full.control_pipe("sidebar-toggle");
+        assert_eq!(toggle.effects, vec![Effect::SetTimeout(Cadence::Fast)], "no flip, a tick armed");
+        assert!(!looks(&full.timer_fast()), "one tick: the toggle may still be landing");
+        let second = full.timer_fast();
+        assert_eq!(second.effects, vec![Effect::WatchSession { selectable: true }]);
+        assert_eq!(full.timer_chain.armed(), None, "nothing left to tick for");
+        full
+    };
+    assert_eq!(collapses(&toggled().session_pair_changed(mini_is(false))), vec![true], "the mini came up");
+    assert_eq!(collapses(&toggled().session_pair_changed(mini_is(true))), Vec::<bool>::new(), "the mini is down");
+    assert_eq!(toggled().session_pair_changed(Pair::default()), Outcome::default(), "no ready mini");
+    // Its pane was collapsed by another client's instance, which knew the mini.
+    let mut second_client = toggled();
+    let row = second_client.session_pair_changed(Pair { collapsed: true, ..mini_is(false) });
+    assert_eq!(collapses(&row), Vec::<bool>::new(), "already where the toggle left it");
+}
+
+#[test]
+fn each_toggle_restarts_the_wait_for_the_look() {
+    let mut full = granted_runtime();
+    full.control_pipe("sidebar-toggle");
+    assert!(!looks(&full.timer_fast()));
+    full.control_pipe("sidebar-toggle");
+    assert!(!looks(&full.timer_fast()), "one tick after the second toggle");
+    assert!(looks(&full.timer_fast()));
+    assert!(!looks(&full.timer_fast()), "one look per wait");
+}
+
+/// A layout without the mini: nothing to look for, and never a lost rail.
+#[test]
+fn a_full_rail_alone_in_its_tab_ignores_the_toggle() {
+    let mut full = granted_runtime();
+    full.pair_changed(Pair { alone: true, ..Pair::default() });
+    assert_eq!(full.control_pipe("sidebar-toggle"), Outcome::default());
+    assert!(!looks(&full.timer_fast()) && !looks(&full.timer_fast()));
+}
+
+/// A mini that has seen no manifest does not know where its pair stands: it
+/// flips nothing, and settles from a manifest newer than the toggle.
+#[test]
+fn an_unsettled_mini_does_not_flip_on_a_toggle() {
+    let mut mini = runtime_with_config(mini_config());
+    mini.load(mini_config());
+    assert!(looks(&mini.permission_result(true)));
+    assert_eq!(collapses(&mini.control_pipe("sidebar-toggle")), Vec::<bool>::new());
+    assert_eq!(mini.session_pair_changed(mini_row(false, true)), Outcome::default(), "asked for before the toggle");
+    mini.timer_fast();
+    assert!(looks(&mini.timer_fast()));
+    assert_eq!(mini.session_pair_changed(mini_row(true, true)).effects, vec![Effect::SetCollapsed(false)]);
+}
+
+#[test]
+fn a_collapsed_rail_paints_nothing() {
+    let mut mini = granted_mini();
+    assert!(!mini.tabs_changed(vec![tab(0, "a", true)]).render);
+    let mut full = granted_runtime();
+    assert!(full.tabs_changed(vec![tab(0, "a", true)]).render);
+}
+
+#[test]
+fn a_click_on_the_toggle_cell_broadcasts_and_collapses_nothing_locally() {
+    let mut full = full_with_mini();
+    full.tabs_changed(vec![tab(0, "a", true)]);
+    full.render(20, 32);
+    assert_eq!(full.mouse_click(0, 31).effects, vec![Effect::BroadcastSidebarToggle]);
+
+    let mut mini = granted_mini();
+    mini.control_pipe("sidebar-toggle");
+    mini.tabs_changed(vec![tab(0, "a", true)]);
+    mini.render(20, 4);
+    assert_eq!(mini.mouse_click(0, 1).effects, vec![Effect::BroadcastSidebarToggle]);
+    assert_eq!(mini.mouse_click(1, 0).effects, vec![Effect::SwitchTab { position: 0 }]);
+}
+
+/// A tab whose attention verbs both rails would answer: tab 0 is this rail's,
+/// tab 1 needs the user.
+fn with_attention_tab(rt: &mut PluginRuntime) {
+    rt.tabs_changed(vec![tab(0, "a", true), tab(1, "b", false)]);
+    rt.radar.set_tab_panes_for_position(1, vec![pane(11)]);
+    set_status(&mut rt.radar, 11, Status::Pending, "working", 1);
+}
+
+/// Zellij never sends a collapsed pane `Visible(false)`, and manifests reach
+/// it in its tab: if it answered attention verbs, a tab's collapsed rail
+/// would step again once the first `SwitchTab` lands there.
+#[test]
+fn a_collapsed_rail_never_answers_attention_verbs() {
+    let mut mini = granted_mini();
+    with_attention_tab(&mut mini);
+    assert_eq!(mini.control(Verb::AttentionNext), Outcome::default());
+    let mut full = full_with_mini();
+    with_attention_tab(&mut full);
+    full.control_pipe("sidebar-toggle");
+    assert_eq!(full.control(Verb::AttentionNext), Outcome::default());
+}
+
+/// A rail expanded by a toggle while its tab is off screen gets no
+/// `Visible` event: it stays hidden (no verbs, no paint) until a manifest or
+/// `Visible(true)` shows it.
+#[test]
+fn a_rail_expanded_off_screen_stays_hidden_until_shown() {
+    let mut full = full_with_mini();
+    full.control_pipe("sidebar-toggle"); // collapse
+    let expand = full.control_pipe("sidebar-toggle");
+    assert_eq!(collapses(&expand), vec![false]);
+    assert!(!expand.render);
+    with_attention_tab(&mut full);
+    assert_eq!(full.control(Verb::AttentionNext).effects, vec![Effect::SwitchTab { position: 1 }]);
+
+    // The same for a rail another client's instance collapsed: the manifest
+    // is all this one knows of it.
+    let mut other = full_with_mini();
+    with_attention_tab(&mut other);
+    other.pair_changed(Pair { collapsed: true, ..mini_is(false) });
+    assert_eq!(collapses(&other.control_pipe("sidebar-toggle")), vec![false]);
+    assert_eq!(other.control(Verb::AttentionNext), Outcome::default());
 }

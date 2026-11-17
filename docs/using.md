@@ -127,6 +127,15 @@ the remote directory's name.
   tab marker. Use it when an agent ends a finished turn with a courtesy
   question ("want me to also…?"). A question that actually blocks the agent
   clears on its own when you answer it.
+- **Click `«`** at the right of the header to shrink every tab's rail to the
+  4-column mini rail, which shows each tab's number and status glyph. **Click
+  `»`** at the top of the mini rail to bring the full rail back. Click a tab
+  row in the mini rail to switch to that tab. The `«` shows only when the
+  layout carries the mini rail
+  ([`install.md`](install.md#add-the-sidebar-to-a-layout)). Two Zellij 0.46
+  limits apply to it: a session saved in mini mode does not resurrect, and a
+  directional split can move the rails
+  ([troubleshooting](troubleshooting.md#a-resurrected-session-has-no-rails-or-panes-mini-rail)).
 - Right-click does nothing yet: Zellij does not deliver right-clicks to
   plugins ([zellij#5350](https://github.com/zellij-org/zellij/issues/5350)).
 
@@ -135,14 +144,15 @@ settings; the rail sends none.
 
 ## Keybinds
 
-Nothing is bound by default. Four verbs are available for your own bindings,
+Nothing is bound by default. Five verbs are available for your own bindings,
 delivered over the `zj_radar.cmd.v1` pipe:
 
 - `attention-next` / `attention-prev` cycle focus through the tabs that need
   you, errored, or finished, in tab order.
 - `session-next` / `session-prev` step the cross-session badge selection (below).
+- `sidebar-toggle` switches every tab between the full rail and the mini rail.
 
-Bindings for all four, and for changing options from a key, are in
+Bindings for all five, and for changing options from a key, are in
 [`configuration.md`](configuration.md#binding-keys-to-commands).
 
 ## Cross-session badge

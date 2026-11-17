@@ -1453,3 +1453,249 @@ keybinds {
     }
     eprintln!("[e2e] PASS: attention-next followed the pressing client's own tab 10 times");
 }
+
+/// The column a tab's terminal starts at, which is the width the rails take
+/// on its left: 32 with the full rail, 4 with the mini (ICH-494).
+fn terminal_x(s: &ZellijSession, tab: u64) -> Option<u64> {
+    s.panes()
+        .into_iter()
+        .find_map(|p| (p["is_plugin"] == false && p["tab_position"] == tab).then(|| p["pane_x"].as_u64()).flatten())
+}
+
+/// How many mini rails have named their pane: what tells a full rail its
+/// mini is ready, and so that a toggle will flip the pair.
+fn ready_minis(s: &ZellijSession) -> usize {
+    s.panes().iter().filter(|p| p["title"].as_str().is_some_and(|title| title.starts_with("zj-radar mini "))).count()
+}
+
+fn toggle_sidebar(s: &ZellijSession) {
+    s.run_action_checked(&["pipe", "--name", "zj_radar.cmd.v1", "--", "sidebar-toggle"]);
+}
+
+/// ICH-494: `sidebar-toggle` swaps every tab between the full rail (32
+/// columns) and the mini rail (4 columns), and a click on the mini rail's `»`
+/// brings the full rail back through `zellij pipe` run by the plugin.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn sidebar_toggle_swaps_the_full_and_mini_rail_in_every_tab() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+    let s = ZellijSession::start(
+        &format!("zjr_mini_{}", std::process::id()),
+        &mini_rail_tabs_layout(&wasm),
+        &wasm,
+        pre_grant_permissions(&wasm),
+    );
+    let wait = Duration::from_secs(10);
+
+    assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(32)), "full rail first: {:?}", s.panes());
+    assert!(s.wait_until(wait, |s| ready_minis(s) == 2), "the mini rails never named their panes: {:?}", s.panes());
+    let pane_one = s.discover_terminal_pane_id(); // tab one's shell prints ZPID=<id>
+
+    toggle_sidebar(&s);
+    assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(4)), "toggle → mini: {:?}", s.panes());
+    // Tab two was never on screen, so no manifest reaches its rails: its full
+    // rail looks at the session to follow its mini (ICH-521).
+    assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(4)), "tab two, never visited: {:?}", s.panes());
+
+    s.run_action_checked(&["go-to-tab", "2"]);
+    toggle_sidebar(&s);
+    assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(32)), "toggle → full: {:?}", s.panes());
+    toggle_sidebar(&s);
+    assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(4)), "toggle → mini again: {:?}", s.panes());
+
+    // Each tab's number and glyph share one physical row of the 4-column
+    // strip (no wrap), so the glyph cell clicks through to its own tab.
+    let row = |s: &ZellijSession, i: usize| sidebar_region(&s.screen(), 4).lines().nth(i).unwrap_or("").to_string();
+    let rows_ok = |s: &ZellijSession| {
+        let (one, two) = (row(s, 1), row(s, 2));
+        one.trim().starts_with('1') && one.trim().chars().count() >= 2 && two.trim().starts_with('2')
+    };
+    assert!(s.wait_until(wait, rows_ok), "mini grid:\n{}", sidebar_region(&s.screen(), 4));
+    let glyph_col = row(&s, 1).trim_end().chars().count() as u16; // 1-based column of the last cell
+    let tab_one = s.wait_until(wait, |s| {
+        s.click_at(glyph_col, 2);
+        s.dump_screen().contains(&format!("ZPID={pane_one}"))
+    });
+    assert!(tab_one, "a click on tab 1's glyph must open tab 1:\n{}", s.dump_screen());
+
+    // `»` sits in the mini rail's top line, column 1 (1-based: col 2, row 1).
+    s.click_at(2, 1);
+    assert!(s.wait_until(wait, |s| terminal_x(s, 1) == Some(32)), "» click → full: {:?}", s.panes());
+    assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(32)), "» reaches tab one too: {:?}", s.panes());
+    eprintln!("[e2e] PASS: sidebar-toggle and » swap the rails in every tab");
+}
+
+/// ICH-494: Zellij gives every client its own instance of each rail, and a
+/// new mini instance collapses its pane at load, before it can know the
+/// session shows its minis. A client that attaches or detaches must leave
+/// every tab on the mini rail, the tab nobody visited included.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn mini_mode_survives_a_client_attaching_and_detaching() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+    let s = ZellijSession::start(
+        &format!("zjr_minic_{}", std::process::id()),
+        &mini_rail_tabs_layout(&wasm),
+        &wasm,
+        pre_grant_permissions(&wasm),
+    );
+    let wait = Duration::from_secs(10);
+    let every_tab = |s: &ZellijSession, x: u64| (0..2).all(|tab| terminal_x(s, tab) == Some(x));
+
+    assert!(s.wait_until(wait, |s| ready_minis(s) == 2), "the mini rails never named their panes: {:?}", s.panes());
+    toggle_sidebar(&s);
+    assert!(s.wait_until(wait, |s| every_tab(s, 4)), "toggle → mini in both tabs: {:?}", s.panes());
+
+    // The new instances' collapse shows for a moment; then it must hold.
+    let mut other = s.attach_client();
+    assert!(s.wait_until(wait, |s| every_tab(s, 4)), "a second client attached: {:?}", s.panes());
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(every_tab(&s, 4), "a second client reset the mini rails: {:?}", s.panes());
+
+    other.press("\x0fd"); // Ctrl-o d: detach
+    let detached = std::time::Instant::now() + wait;
+    while other.is_alive() && std::time::Instant::now() < detached {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!other.is_alive(), "the second client never detached");
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(every_tab(&s, 4), "a client detaching reset the mini rails: {:?}", s.panes());
+
+    toggle_sidebar(&s);
+    assert!(s.wait_until(wait, |s| every_tab(s, 32)), "toggle → full in both tabs: {:?}", s.panes());
+    eprintln!("[e2e] PASS: mini mode held while a second client attached and detached");
+}
+
+/// ICH-494: a tab opened while the session shows its mini rails comes up on
+/// the mini rail too, and the next toggle takes it along.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn a_tab_opened_in_mini_mode_comes_up_mini() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+    let s = ZellijSession::start(
+        &format!("zjr_minit_{}", std::process::id()),
+        &mini_rail_tabs_layout(&wasm),
+        &wasm,
+        pre_grant_permissions(&wasm),
+    );
+    let wait = Duration::from_secs(10);
+    let every_tab = |s: &ZellijSession, x: u64| (0..3).all(|tab| terminal_x(s, tab) == Some(x));
+
+    assert!(s.wait_until(wait, |s| ready_minis(s) == 2), "the mini rails never named their panes: {:?}", s.panes());
+    toggle_sidebar(&s);
+    assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(4)), "toggle → mini: {:?}", s.panes());
+
+    s.run_action_checked(&["new-tab"]);
+    assert!(s.wait_until(wait, |s| every_tab(s, 4)), "a tab opened in mini mode: {:?}", s.panes());
+    toggle_sidebar(&s);
+    assert!(s.wait_until(wait, |s| every_tab(s, 32)), "toggle → full in all three tabs: {:?}", s.panes());
+    eprintln!("[e2e] PASS: a tab opened in mini mode came up on the mini rail");
+}
+
+/// ICH-494: with two rails per tab, a tab's collapsed rail gets no
+/// `Visible(false)` when its tab leaves the screen; if it answered
+/// `attention-next` with its frozen view it would step a second time once
+/// the first `SwitchTab` landed on its tab. Each press must move one tab.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn attention_next_moves_one_tab_per_press_with_two_rails() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+    let temp_home = pre_grant_permissions(&wasm);
+    temp_home.append_config(
+        r#"
+keybinds {
+    shared_except "locked" {
+        bind "Alt y" {
+            MessagePlugin { name "zj_radar.cmd.v1"; payload "attention-next"; }
+        }
+    }
+}
+"#,
+    );
+    let w = wasm.canonicalize().unwrap_or_else(|_| wasm.clone());
+    let w = w.display();
+    let layout = format!(
+        r#"layout {{
+    default_tab_template {{
+        pane split_direction="vertical" {{
+            pane size=32 borderless=true {{
+                plugin location="file:{w}"
+            }}
+            pane size=4 borderless=true {{
+                plugin location="file:{w}" {{
+                    mini true
+                }}
+            }}
+            children
+        }}
+    }}
+    tab name="t1" focus=true {{
+        pane focus=true cwd="/tmp"
+    }}
+    tab name="t2" {{
+        pane focus=true cwd="/tmp"
+    }}
+    tab name="t3" {{
+        pane focus=true cwd="/tmp"
+    }}
+    tab name="t4" {{
+        pane focus=true cwd="/tmp"
+    }}
+}}"#
+    );
+    let s = ZellijSession::start(&format!("zjr_att2_{}", std::process::id()), &layout, &wasm, temp_home);
+
+    // Visit every tab (so every rail has seen its tab active), mark each shell
+    // with its pane id, and leave an agent waiting on tabs 2, 3 and 4.
+    let mut panes: Vec<u32> = Vec::new();
+    for tab in 1..=4 {
+        if tab > 1 {
+            s.run_action_checked(&["go-to-tab", &tab.to_string()]);
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let id = s.discover_terminal_pane_id();
+        assert!(!panes.contains(&id), "go-to-tab {tab} did not land: pane {id} again");
+        if tab > 1 {
+            s.emit_program_status("state=blocked:app=claude-code:kind=question:msg=cGljayBvbmU=");
+        }
+        panes.push(id);
+    }
+    let on = |s: &ZellijSession, tab: usize| screen_text(&s.screen()).contains(&format!("ZPID={}", panes[tab - 1]));
+    assert!(
+        s.wait_until(Duration::from_secs(8), |s| {
+            s.run_action(&["go-to-tab", "1"]);
+            on(s, 1)
+        }),
+        "never got back to tab 1"
+    );
+    assert!(
+        s.wait_until(Duration::from_secs(10), |s| sidebar_region(&s.screen(), 31).matches('◆').count() >= 3),
+        "the rail never showed the three waiting tabs:\n{}",
+        sidebar_region(&s.screen(), 32)
+    );
+
+    for (press, want) in [2, 3, 4, 2, 3, 4, 2, 3, 4].into_iter().enumerate() {
+        s.press("\x1by"); // Alt+y: attention-next
+        assert!(s.wait_until(Duration::from_secs(8), |s| on(s, want)), "press {press}: never reached tab {want}");
+        // A second, frozen rail's vote would land within milliseconds.
+        std::thread::sleep(Duration::from_millis(800));
+        assert!(on(&s, want), "press {press}: moved past tab {want}");
+    }
+    eprintln!("[e2e] PASS: attention-next moved one tab per press with two rails per tab");
+}

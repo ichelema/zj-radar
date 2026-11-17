@@ -387,8 +387,9 @@ impl RadarState {
     }
 
     /// Record which tab contains this plugin pane. Ownership resolves once and
-    /// then rests on Zellij's stable `TabId`: every tab has one sidebar, so no
-    /// instance ever needs write authority over a peer's name.
+    /// then rests on Zellij's stable `TabId`: an instance only ever names its
+    /// own tab, never a peer's. A tab's full and mini rail both own it and
+    /// derive the same name from the same manifest, so they agree.
     pub(crate) fn own_plugin_tab_changed(&mut self, position: Option<usize>) {
         if self.naming_tab_id.is_some() {
             return;

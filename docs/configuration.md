@@ -40,6 +40,7 @@ the field as it was, so a typo never resets a setting.
 | `task_lines` | `lines` · `count` · `off` | `lines` | How an agent's background tasks show: a `┊` line per task, only a `+N` count on the agent's row, or nothing. See [`using.md`](using.md). |
 | `ledger` | `true` · `false` | `true` | Show the `─ earlier ─` list of recent completions. `false` shows only live panes; history is still recorded, so `true` brings it back. See [`using.md`](using.md). |
 | `session_tree` | `true` · `false` | `false` | Draw peer sessions' tab trees on this rail (off keeps one line per session). See [`using.md`](using.md#cross-session-badge). |
+| `mini` | `true` · `false` | `false` | This pane is the 4-column mini rail. Set it on the mini rail's layout pane, not on the alias: `pane size=4 borderless=true { plugin location="radar" { mini true } }`. Read once at load; `config.v1` cannot change it. See note 3. |
 
 Notes:
 
@@ -50,6 +51,10 @@ Notes:
    Window managers often claim those chords, and macOS terminals type `¡`
    unless option-as-alt is on. `zj-radar run` binds Alt-1..9 but does not set
    this, because it cannot verify the chord arrives.
+3. The mini rail sits right of the full rail in the layout
+   ([`install.md`](install.md#add-the-sidebar-to-a-layout)). It starts
+   collapsed, and `sidebar-toggle` switches every tab between the two (see
+   [Binding keys to commands](#binding-keys-to-commands)).
 
 ## Runtime config
 
@@ -126,6 +131,10 @@ keybinds {
         bind "Alt Shift s" {
             MessagePlugin { name "zj_radar.cmd.v1"; payload "session-prev"; }
         }
+        // Switch every tab between the full rail and the 4-column mini rail.
+        bind "Alt b" {
+            MessagePlugin { name "zj_radar.cmd.v1"; payload "sidebar-toggle"; }
+        }
     }
 }
 ```
@@ -139,12 +148,17 @@ keybinds {
   after the last tap; landing back on your own session cancels. A committed
   switch lands on the target's attention tab if it has one. With only one
   session running these verbs do nothing.
+- `sidebar-toggle` collapses the full rail and expands the mini rail in every
+  tab, or the reverse. It needs a layout with both rail panes; with only the
+  full rail it does nothing. A tab opened while the mini rails show starts
+  with the mini rail, and a client that attaches finds every tab as it was.
 
 These binds broadcast too, for the reason above: in a session without a
 rail they do nothing.
 
 With two or more clients attached to one session, a key press moves only the
-client that pressed it. A `zellij pipe` from the command line still moves
+client that pressed it. `sidebar-toggle` is the exception: Zellij collapses
+panes for every client, so every client sees the new width. A `zellij pipe` from the command line still moves
 every client. A press can also move another client that acted within the
 last tenth of a second, for example by typing or clicking
 ([why](design.md#5-plugin--zellij-wiring)). When another client is looking at

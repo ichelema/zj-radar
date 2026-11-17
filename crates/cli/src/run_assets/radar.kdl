@@ -4,6 +4,11 @@ layout {
             pane size=32 borderless=true {
                 plugin location="radar"
             }
+            pane size=4 borderless=true {
+                plugin location="radar" {
+                    mini true
+                }
+            }
             children
         }
         pane size=2 borderless=true {
@@ -16,6 +21,11 @@ layout {
             pane size=32 borderless=true {
                 plugin location="radar"
             }
+            pane size=4 borderless=true {
+                plugin location="radar" {
+                    mini true
+                }
+            }
             pane focus=true
         }
         pane size=2 borderless=true {
@@ -27,6 +37,11 @@ layout {
         pane split_direction="vertical" {
             pane size=32 borderless=true {
                 plugin location="radar"
+            }
+            pane size=4 borderless=true {
+                plugin location="radar" {
+                    mini true
+                }
             }
             children
         }

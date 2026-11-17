@@ -197,6 +197,12 @@ pub struct RenderOpts {
     /// (`footer_tally`). `None` draws no label: `show_mode` is off, or no
     /// `ModeUpdate` has arrived yet.
     pub mode: Option<crate::mode::Mode>,
+    /// Draw the 4-column mini face (`render_mini`) instead of the full rail.
+    pub mini: bool,
+    /// Draw the `«` toggle cell in the full rail's header: on only while the
+    /// runtime knows a ready mini rail shares this tab, so an old layout
+    /// never shows a button that does nothing.
+    pub sidebar_toggle: bool,
 }
 
 impl RenderOpts {
@@ -307,13 +313,20 @@ pub struct RailTarget {
 /// than the small set of physical cells that are actionable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HotspotAction {
-    Acknowledge { target: RailTarget },
+    Acknowledge {
+        target: RailTarget,
+    },
+    /// Switch every rail of the session between full and mini: the full
+    /// rail's header `«` and the mini rail's top `»`.
+    ToggleSidebar,
 }
 
 impl HotspotAction {
     fn glyph(&self) -> &'static str {
         match self {
             Self::Acknowledge { .. } => "✓",
+            // `«` (full) and `»` (mini) are both one cell; `width` is all that reads this.
+            Self::ToggleSidebar => "«",
         }
     }
 
@@ -713,7 +726,6 @@ fn tab_header_line(row: &TabRow, opts: &RenderOpts, tab_target: &RailTarget) -> 
         .then(|| HotspotAction::Acknowledge { target: tab_target.clone() });
     let hotspot = HotspotSlot::new(opts.width, TAB_HEADER_HOTSPOT_MIN, hotspot);
     let width = hotspot.content_width();
-    let now_tick = opts.now_tick;
     let st = row.display.status;
 
     // Status HUES are always ANSI-16 role codes so the terminal renders them in
@@ -731,14 +743,7 @@ fn tab_header_line(row: &TabRow, opts: &RenderOpts, tab_target: &RailTarget) -> 
 
     // col 1: status glyph (working spins; eases to a slow blink for
     // long-runners — see `spin_glyph`).
-    let glyph_char = if st == Status::Running {
-        let detail = row.display.detail.as_ref();
-        let since_tick = detail.map(|d| d.since_tick).unwrap_or(now_tick);
-        let kind = detail.map(|d| d.kind).unwrap_or(Kind::Other);
-        running_glyph(kind, now_tick, opts.now_frame, since_tick)
-    } else {
-        st.glyph_for(opts.glyphs)
-    };
+    let glyph_char = tab_glyph(row, opts);
     // The whole label (glyph + number + name) shares the status color so each
     // row reads as its state at a glance — design: "4 web" is green, "5 infra"
     // red, "3 pinky" peach+bold. Idle recedes to the dim idle_text; waiting is
@@ -808,6 +813,20 @@ fn tab_header_line(row: &TabRow, opts: &RenderOpts, tab_target: &RailTarget) -> 
     let line =
         Line::new(format!("{}{}{}{}\n", bar, label, " ".repeat(gap), marker), Some(tab_target.clone()), LineBg::Card);
     hotspot.finish(line, &hue(Role::Attention))
+}
+
+/// A tab's status glyph — the Running spinner (or steady mark) or the status
+/// glyph set; shared by the full tab header and the mini face.
+fn tab_glyph(row: &TabRow, opts: &RenderOpts) -> char {
+    let st = row.display.status;
+    if st == Status::Running {
+        let detail = row.display.detail.as_ref();
+        let since_tick = detail.map(|d| d.since_tick).unwrap_or(opts.now_tick);
+        let kind = detail.map(|d| d.kind).unwrap_or(Kind::Other);
+        running_glyph(kind, opts.now_tick, opts.now_frame, since_tick)
+    } else {
+        st.glyph_for(opts.glyphs)
+    }
 }
 
 /// Columns [`HotspotSlot::new`] reserves once a hotspot is admitted:
@@ -1525,7 +1544,10 @@ fn render_header(rows: &[TabRow], opts: &RenderOpts, overflow: bool, has_content
     if !opts.header || !has_content {
         return vec![];
     }
-    let width = opts.width;
+    // The `«` cell takes the last column plus one space: every budget below
+    // works against the width left of it. Skipped when too narrow to hold it.
+    let toggle = opts.sidebar_toggle && opts.width > 2;
+    let width = if toggle { opts.width - 2 } else { opts.width };
     let accent = Role::Accent.ansi();
     let primary = if overflow { format!("{}▲", rows.len()) } else { format!("·{}", rows.len()) };
     let title = " RADAR";
@@ -1568,12 +1590,20 @@ fn render_header(rows: &[TabRow], opts: &RenderOpts, overflow: bool, has_content
         right_segs.into_iter().map(|s| s.to_string()).collect::<String>()
     };
     let mut title_line = String::new();
-    title_line.push_str(&format!("{}{}{}\n", Seg::new(accent, title_clamped), " ".repeat(gap), right_rendered,));
+    title_line.push_str(&format!("{}{}{}", Seg::new(accent, title_clamped), " ".repeat(gap), right_rendered,));
+    if toggle {
+        title_line.push_str(&format!(" {}", Seg::new(accent, "«")));
+    }
+    let hotspot = toggle.then(|| (opts.width - 1, HotspotAction::ToggleSidebar));
 
-    let mut lines = vec![Line::new(title_line, None, LineBg::Rail)];
+    let mut lines = vec![Line::new(title_line, None, LineBg::Rail).with_hotspot(hotspot)];
     // Header line 2: rule across the full width — only in non-Cards densities.
     if opts.density != Density::Cards {
-        lines.push(Line::new(format!("{}\n", header_rule(width, opts.now_tick, working, accent)), None, LineBg::Rail));
+        lines.push(Line::new(
+            format!("{}\n", header_rule(opts.width, opts.now_tick, working, accent)),
+            None,
+            LineBg::Rail,
+        ));
     }
     // The one fact `header_lines` states independently (it must, for the body
     // budget — see its doc) re-checked against what was actually emitted.
@@ -2189,7 +2219,56 @@ fn render_bottom(rows: &[TabRow], ledger: &[LedgerLine], leftover: usize, opts: 
     }
 }
 
+/// The 4-column mini face: a `»` toggle line, then one `NN ●` line per tab
+/// (number right-aligned in 2 columns, one space, status glyph; 3-digit
+/// numbers drop the space). Overflow reuses the full rail's planner with
+/// every tab 1 line tall: idle tabs fold into a final muted `+N`, and when
+/// the non-idle tabs alone don't fit the bottom ones are cut. No density, no
+/// surfaces: the face is never painted.
+fn render_mini(rows: &[TabRow], opts: &RenderOpts) -> RenderedRail {
+    let toggle = Line::new(format!(" {}\n", Seg::new(Role::Accent.ansi(), "»")), None, LineBg::Rail)
+        .with_hotspot(Some((1, HotspotAction::ToggleSidebar)));
+    let metas: Vec<RowMeta> =
+        rows.iter().map(|r| RowMeta { status: r.display.status, full_lines: 1, compact_lines: 1 }).collect();
+    let (plan, folded) = plan_overflow(&metas, opts.height.saturating_sub(1));
+    let mut lines = vec![toggle];
+    for &(i, _) in &plan {
+        let row = &rows[i];
+        let st = row.display.status;
+        // Same colors as the full tab header's label; the active tab's number
+        // takes the spine's color (the full rail's active cue) instead.
+        let label_color = if st == Status::Idle { tc_fg(opts.theme.idle_text) } else { st.role().ansi().to_string() };
+        let num_color = if row.active { spine_role(st).ansi().to_string() } else { label_color.clone() };
+        // The number gets every cell but the glyph's: Zellij can hand the
+        // `size=4` pane fewer content columns, and a wider line would wrap the
+        // glyph onto the next row, under the next tab's click target.
+        let num_w = opts.width.saturating_sub(1).max(1);
+        let digits = row.number.to_string();
+        let (num, sep) = if num_w >= 3 && digits.len() <= 2 {
+            (format!("{digits:>2}"), " ")
+        } else {
+            // ponytail: too many digits for the cells keeps the last ones (`100` → `00` at 3 columns), fine below 100 tabs.
+            let tail = &digits[digits.len().saturating_sub(num_w)..];
+            (format!("{tail:>num_w$}"), "")
+        };
+        let text = format!(
+            "{}{sep}{}\n",
+            Seg { color: &num_color, bold: st != Status::Idle || row.active, text: num.into() },
+            Seg { color: &label_color, bold: st != Status::Idle, text: tab_glyph(row, opts).to_string().into() },
+        );
+        lines.push(Line::new(text, Some(target_for_row(row)), LineBg::None));
+    }
+    if folded > 0 {
+        lines.push(Line::new(format!("{}\n", Seg::new(Role::Muted.ansi(), format!("+{folded}"))), None, LineBg::None));
+    }
+    lines.truncate(opts.height);
+    RenderedRail::from_lines(lines)
+}
+
 pub fn render_rail(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) -> RenderedRail {
+    if opts.mini {
+        return render_mini(rows, opts);
+    }
     // Truly nothing to show only when there are no rows AND no ledger history
     // — the caller routes that case to `onboarding` instead (spec §7/§9). Zero
     // rows with a non-empty ledger still renders: header + bottom region, no

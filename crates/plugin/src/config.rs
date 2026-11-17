@@ -129,6 +129,10 @@ pub struct Config {
     /// spinning (`runtime::Cadence::Frame`). `1` is the plain 1 Hz tick;
     /// clamped to `1..=MAX_SPINNER_FPS`.
     pub spinner_fps: u32,
+    /// This instance is the 4-column mini rail (`mini true` on the layout
+    /// pane). A load-only alias option: `config.v1` can't flip it, since the
+    /// pane's width comes from the layout, not from this flag.
+    pub mini: bool,
 }
 
 /// Default spinner rate: a 10-frame braille loop in 2.5s instead of 10s.
@@ -150,6 +154,7 @@ impl Default for Config {
             session_tree: false,
             show_mode: false,
             spinner_fps: DEFAULT_SPINNER_FPS,
+            mini: false,
         }
     }
 }
@@ -199,6 +204,8 @@ macro_rules! config_fields {
             pub fn from_map(cfg: &BTreeMap<String, String>) -> Config {
                 let mut config = Config::default();
                 config.apply_overrides(cfg);
+                // Load-only keys: outside the table, so `apply_overrides` never sees them.
+                config.mini = cfg.get("mini").and_then(|v| parse_bool(v)).unwrap_or(false);
                 config
             }
 
@@ -286,6 +293,17 @@ mod tests {
         let over = format!(r#"{{"naming":"{}"}}"#, "x".repeat(crate::payload::MAX_PAYLOAD_BYTES));
         assert!(over.len() > crate::payload::MAX_PAYLOAD_BYTES, "sanity: fixture exceeds the cap");
         assert!(overrides_from_json(&over).is_none());
+    }
+
+    /// `mini` comes from the layout pane at load; a live override can't flip
+    /// it, since the pane's width is the layout's.
+    #[test]
+    fn mini_is_read_at_load_only() {
+        assert!(Config::from_map(&map(&[("mini", "true")])).mini);
+        assert!(!Config::from_map(&map(&[])).mini);
+        let mut c = Config::default();
+        c.apply_overrides(&map(&[("mini", "true")]));
+        assert!(!c.mini);
     }
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
