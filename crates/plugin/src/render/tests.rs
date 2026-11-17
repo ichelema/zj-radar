@@ -3913,6 +3913,36 @@ fn session_tree_keeps_the_name_order_around_the_local_cards() {
 }
 
 #[test]
+fn peer_trees_above_the_current_session_never_squeeze_local_tabs() {
+    // The current session sorts last, so both large peer trees render ABOVE
+    // the local cards. They still draw only from the leftover child budget:
+    // every local card, the footer, and the rail height must survive.
+    let rows: Vec<TabRow> = (1..=4)
+        .map(|n| {
+            tab(n, format!("local{n}"), display(Status::Running, 0, 1, Some(pd(format!("job{n}"), Status::Running))))
+        })
+        .collect();
+    let badge = vec![
+        peer_with_tree("alpha", 10, 3),
+        peer_with_tree("beta", 10, 3),
+        badge_entry("work", true, 4, 0, None, false),
+    ];
+    let opts =
+        RenderOpts { height: 30, density: crate::config::Density::Cards, badge, session_tree: true, ..ro(32, 0) };
+    let rail = render_rail(&rows, &[], &opts);
+    let text = super::test_util::grid(&rail.ansi, 32);
+    for n in 1..=4 {
+        assert!(text.contains(&format!("job{n}")), "local tab {n} must keep its card:\n{text}");
+    }
+    assert!(!text.contains("idle ▾"), "no local tab may fold into the idle strip:\n{text}");
+    assert!(text.contains("working"), "the footer tally must survive:\n{text}");
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} missing:\n{text}"));
+    assert!(at("alpha") < at("beta") && at("beta") < at("work"), "both headings render above `work`:\n{text}");
+    assert!(!text.contains("a9.2"), "the peer trees are clipped, not the local content:\n{text}");
+    assert_eq!(rail.line_count(), 30);
+}
+
+#[test]
 fn idle_strip_sits_under_the_local_cards_not_the_peer_tree() {
     // Enough idle local tabs on a short rail to fold into the strip.
     let rows: Vec<TabRow> = (1..=20).map(|n| tab(n, format!("idle{n}"), display(Status::Idle, 0, 0, None))).collect();

@@ -1250,9 +1250,9 @@ fn session_next_switches_to_the_session_with_attention() {
     );
     eprintln!("[e2e] PASS: A's badge shows B needing attention (GlobalAttentionUpdate)");
 
-    // Cycle from A. `Sessions::ordered()` puts the current session first,
-    // then attention>0 peers by name, then the rest — B is the only
-    // attention>0 peer, so a single `session-next` tap selects it outright.
+    // Cycle from A. `Sessions::ordered()` sorts every session by name and
+    // the first tap selects the entry after the current one — B sorts right
+    // after A, so a single `session-next` tap selects it outright.
     // The actual switch is a LATER idle-commit (`timer`'s `Sessions::tick`),
     // firing on the very next Fast tick after the tap (~1s here, since A's
     // `running` row above keeps Fast armed) — not an immediate effect of the

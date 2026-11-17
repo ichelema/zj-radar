@@ -177,8 +177,8 @@ pub struct RenderOpts {
     /// truly delivers the chord may claim it; everything else omits the hint
     /// line rather than promising a chord that does nothing.
     pub jump_hint: bool,
-    /// The cross-session badge, current-first once the own session name is
-    /// known (`Sessions::badge()`'s contract). Its headings come from
+    /// The cross-session badge, every session by name with the current one
+    /// in its place (`Sessions::badge()`'s contract). Its headings come from
     /// [`render_session_badge`] and, with `session_tree` on, each peer's tab
     /// tree from [`render_peer_children`]; `render_body` places both. Zero
     /// lines whenever `len() <= 1` (only this session, or no other session
@@ -188,9 +188,10 @@ pub struct RenderOpts {
     /// `task_lines` config: full `┊` task lines, only the compact `+N` count,
     /// or nothing.
     pub task_lines: crate::config::TaskLines,
-    /// `session_tree` config: expand the badge into a session tree — the
-    /// current session's heading above its cards, each peer's heading and
-    /// read-only tab/agent tree below them. Off (the default) keeps the
+    /// `session_tree` config: expand the badge into a session tree in badge
+    /// order — peers sorting before the current session above its heading,
+    /// the current heading above its cards, later peers below them, each
+    /// peer with its read-only tab/agent tree. Off (the default) keeps the
     /// compact badge block above the cards.
     pub session_tree: bool,
     /// The Zellij input mode the footer shows flush right on the tally line
@@ -1634,8 +1635,8 @@ fn header_rule(width: usize, now_tick: u64, working: bool, accent: &str) -> Stri
 }
 
 /// The cross-session badge: one line per session `Sessions::badge()` tracks
-/// (current-first, per its ordering contract — this function trusts that
-/// order and does not re-sort) — the headings only; with `session_tree` on,
+/// (by name, per its ordering contract — this function trusts that order
+/// and does not re-sort) — the headings only; with `session_tree` on,
 /// [`render_peer_children`] draws each peer's tree and `render_body` splits
 /// the headings around the local cards (see the separator note below).
 /// Renders ZERO lines when `entries.len() <= 1` — only the current
@@ -1677,7 +1678,8 @@ fn header_rule(width: usize, now_tick: u64, working: bool, accent: &str) -> Stri
 /// per-entry lines use): one line per entry in `entries` order, then the
 /// separator. `render_body` relies on that shape to split the lines — the
 /// whole block above the cards by default, or with `session_tree` the
-/// current heading above them and the peer headings plus separator below —
+/// earlier peer headings and the current heading above them and the later
+/// peer headings plus separator below —
 /// and reserves all of them (`badge_heading_lines`) out of the body budget.
 fn render_session_badge(entries: &[BadgeEntry], opts: &RenderOpts) -> Vec<Line> {
     if entries.len() <= 1 {

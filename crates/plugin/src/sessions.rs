@@ -9,8 +9,8 @@
 //! reporting is gone, so there is no staleness grading here.
 //!
 //! Ordering is a single source of truth shared by `badge()` (what's shown)
-//! and `cycle()` (what Alt+[/] steps through): current session first, then
-//! `attention > 0` sessions by name, then the rest by name.
+//! and `cycle()` (what Alt+[/] steps through): every session, the current
+//! one included, by name only.
 
 use crate::radar_state::Direction;
 use crate::status::Status;
@@ -441,6 +441,16 @@ mod tests {
         s.set_own(own("z"));
         s.cycle(Direction::Next);
         assert_eq!(selected(&s).as_deref(), Some("a"), "a last current session wraps to the first entry");
+
+        // Prev as the first tap also starts after the current session: the
+        // stale direction is ignored until a selection exists.
+        let mut s = Sessions::default();
+        s.update_global(vec![summary("a", 0, 0), summary("z", 0, 0)]);
+        s.set_own(own("m"));
+        s.cycle(Direction::Prev);
+        assert_eq!(selected(&s).as_deref(), Some("z"), "a first Prev tap selects the entry after `m` too");
+        s.cycle(Direction::Prev);
+        assert_eq!(selected(&s).as_deref(), Some("m"), "later Prev taps step backward");
     }
 
     #[test]
