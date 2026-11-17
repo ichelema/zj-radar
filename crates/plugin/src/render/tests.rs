@@ -3969,6 +3969,14 @@ fn the_current_line_survives_more_earlier_sessions_than_the_rail_has_rows() {
                 let row = text.lines().position(|l| l.contains("• work"));
                 let row = row.unwrap_or_else(|| panic!("{case}: the current line fell off the rail:\n{text}"));
                 assert!(rail.targets[row].is_none(), "{case}: the current line stays click-inert:\n{text}");
+                // Only the earliest headings give way, and only as many as
+                // needed: either none is hidden, or `• work` sits on the last row.
+                let shown: Vec<usize> = (0..8).filter(|n| text.contains(&format!("pa{n}"))).collect();
+                assert!(
+                    shown.iter().copied().eq(8 - shown.len()..8),
+                    "{case}: the earliest headings give way:\n{text}"
+                );
+                assert!(shown.len() == 8 || row == height - 1, "{case}: no more headings hidden than needed:\n{text}");
             }
         }
     }

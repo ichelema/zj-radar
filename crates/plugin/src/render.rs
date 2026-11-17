@@ -1680,7 +1680,9 @@ fn header_rule(width: usize, now_tick: u64, working: bool, accent: &str) -> Stri
 /// whole block above the cards by default, or with `session_tree` the
 /// earlier peer headings and the current heading above them and the later
 /// peer headings plus separator below —
-/// and reserves all of them (`badge_heading_lines`) out of the body budget.
+/// and reserves every heading it keeps (`badge_heading_lines`) out of the
+/// body budget; headings sorting before the current one may be dropped so the
+/// current line stays on the rail.
 fn render_session_badge(entries: &[BadgeEntry], opts: &RenderOpts) -> Vec<Line> {
     if entries.len() <= 1 {
         return vec![];
@@ -1838,7 +1840,8 @@ fn render_body(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) -> Vec
     // never by position: until the own session name is known, the badge can
     // hold only peers, none of them may head the local cards, and all of
     // them follow the cards. Headings (one line per entry, then the
-    // separator, in `entries` order) are always reserved; peer *children* are
+    // separator, in `entries` order) are reserved once kept — only those
+    // sorting before the current one can be dropped (below); peer *children* are
     // not — they take only what's left once the cards and bottom region have
     // theirs (below).
     //
@@ -1923,7 +1926,7 @@ fn render_body(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) -> Vec
 
     // Peer sessions (in badge order: by name), each heading followed by as
     // much of its tab tree as the leftover `child_budget` allows — earlier
-    // peers fill first, and headings always render.
+    // peers fill first, and every kept heading renders.
     let mut peer_block = |(heading, entry): (Line, &BadgeEntry)| {
         let children = render_peer_children(entry, child_budget, opts);
         child_budget -= children.len();

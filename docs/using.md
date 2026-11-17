@@ -165,6 +165,9 @@ and a shell command that failed, count; a shell command that is still running
 (`cargo test`, a dev server) does not, and neither does a muted pane. One
 exception: a working Opencode pane counts only in its own session, because
 Zellij does not report it as working to the others. With a single session the badge is invisible.
+Your own line always stays on screen: when the session lines do not fit under
+the header, just enough of the sessions sorting before yours are hidden to keep
+it on the last row, and lines past the bottom of the rail are cut.
 
 - **Click a line** to switch to that session, landing on a pane that needs
   you if it has one.
@@ -176,10 +179,8 @@ Zellij does not report it as working to the others. With a single session the ba
   a peer pane row to switch there and focus that pane; a peer tab row focuses
   its first listed pane. Peer rows only use the height left after your local
   tabs, the ledger, and the footer, so a short rail shows fewer of them (or
-  none); session lines stay visible. When there are more session lines than
-  the rail has rows, the ones sorting before yours give way first, so your own
-  line stays on screen. `session_tree` controls whether *your* rail draws
-  peers' trees.
+  none); session lines take priority over them. `session_tree` controls
+  whether *your* rail draws peers' trees.
 - **`session-next` / `session-prev`** move a highlight through the same order.
   The switch happens about a second after your last tap; landing back on your
   own session cancels.
