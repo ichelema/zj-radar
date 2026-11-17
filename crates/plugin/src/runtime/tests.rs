@@ -695,6 +695,22 @@ fn session_cycle_commits_via_switch_session_effect_on_idle_tick() {
 }
 
 #[test]
+fn first_session_tap_on_a_short_rail_shows_the_selected_line() {
+    // `work` sorts after nine peers and the rail is 8 rows: the first tap
+    // wraps to `pa0`, which the overflow rule would hide.
+    let mut rt = runtime_with_granted_permission();
+    rt.tabs_changed(vec![tab(0, "team", false)]);
+    let peers = (0..9).map(|n| fresh(&format!(r#"{{"session_name":"pa{n}","running":0,"attention":0}}"#))).collect();
+    rt.global_attention_changed(peers);
+    assert!(!rt.render(8, 40).contains("pa0"), "setup: pa0 is hidden before the tap");
+
+    rt.control_pipe("session-next");
+    let ansi = rt.render(8, 40);
+    assert!(ansi.contains("pa0"), "the selected line must be in the frame:\n{ansi}");
+    assert!(ansi.contains('•'), "the current line must stay too:\n{ansi}");
+}
+
+#[test]
 fn session_cycle_is_inert_without_permission() {
     let mut rt = PluginRuntime::default();
     rt.session_name_changed(Some("work".into()));

@@ -3983,6 +3983,44 @@ fn the_current_line_survives_more_earlier_sessions_than_the_rail_has_rows() {
 }
 
 #[test]
+fn a_pending_selection_among_hidden_headings_stays_on_the_rail_with_the_current_line() {
+    // `work` sorts after eight peers; on a short rail the earliest headings
+    // give way, but the pending cycle selection must stay visible (and
+    // clickable) next to `• work`, however early it sorts.
+    use crate::config::Density;
+    let rows: Vec<TabRow> = (1..=3).map(|n| tab(n, format!("local{n}"), display(Status::Idle, 0, 0, None))).collect();
+    for density in [Density::Cards, Density::Comfortable, Density::Compact] {
+        for session_tree in [false, true] {
+            for selected in 0..8 {
+                let mut badge: Vec<BadgeEntry> = (0..8).map(|n| peer_with_tree(&format!("pa{n}"), 1, 1)).collect();
+                badge[selected].selected = true;
+                badge.push(badge_entry("work", true, 0, 0, None, false));
+                badge.push(peer_with_tree("zz", 1, 1));
+                let header = header_lines(true, density, true);
+                for height in header + 2..=14 {
+                    let opts = RenderOpts {
+                        height,
+                        density,
+                        badge: badge.clone(),
+                        session_tree,
+                        ..ro_full(32, 0, density, GlyphSet::Plain)
+                    };
+                    let rail = render_rail(&rows, &[], &opts);
+                    let text = super::test_util::grid(&rail.ansi, 32);
+                    let case = format!("{density:?} tree={session_tree} selected=pa{selected} height={height}");
+                    assert!(rail.line_count() <= height, "{case}:\n{text}");
+                    assert!(text.contains("• work"), "{case}: the current line fell off the rail:\n{text}");
+                    let row = text.lines().position(|l| l.contains(&format!("pa{selected}")));
+                    let row = row.unwrap_or_else(|| panic!("{case}: the selection is hidden:\n{text}"));
+                    let target = rail.targets[row].as_ref().unwrap_or_else(|| panic!("{case}: not clickable"));
+                    assert_eq!(target.session.as_deref(), Some(format!("pa{selected}").as_str()), "{case}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn idle_strip_sits_under_the_local_cards_not_the_peer_tree() {
     // Enough idle local tabs on a short rail to fold into the strip.
     let rows: Vec<TabRow> = (1..=20).map(|n| tab(n, format!("idle{n}"), display(Status::Idle, 0, 0, None))).collect();

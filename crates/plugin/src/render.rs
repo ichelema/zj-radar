@@ -1682,7 +1682,8 @@ fn header_rule(width: usize, now_tick: u64, working: bool, accent: &str) -> Stri
 /// peer headings plus separator below —
 /// and reserves every heading it keeps (`badge_heading_lines`) out of the
 /// body budget; headings sorting before the current one may be dropped so the
-/// current line stays on the rail.
+/// current line stays on the rail, except the pending cycle selection, which
+/// takes the first row instead.
 fn render_session_badge(entries: &[BadgeEntry], opts: &RenderOpts) -> Vec<Line> {
     if entries.len() <= 1 {
         return vec![];
@@ -1858,9 +1859,15 @@ fn render_body(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) -> Vec
     // on the last row instead of falling off the rail. Each heading drops
     // with its own target, so lockstep holds.
     let room = opts.height.saturating_sub(header_lines(opts.header, opts.density, has_content));
-    let skip = current.filter(|&i| room > 0 && i >= room).map_or(0, |i| i + 1 - room);
-    let mut headings = render_session_badge(&opts.badge, opts).into_iter().skip(skip);
-    for entry in opts.badge.iter().skip(skip) {
+    let mut skip = current.filter(|&i| room > 0 && i >= room).map_or(0, |i| i + 1 - room);
+    // A pending cycle selection among the hidden headings takes the first row
+    // and the window gives up one more (needs two rows: with one, `•` wins).
+    let pinned = opts.badge.iter().position(|e| e.selected).filter(|&s| room >= 2 && s < skip);
+    skip += usize::from(pinned.is_some());
+    let kept = |i: &usize| *i >= skip || Some(*i) == pinned;
+    let mut headings =
+        render_session_badge(&opts.badge, opts).into_iter().enumerate().filter(|(i, _)| kept(i)).map(|(_, line)| line);
+    for entry in opts.badge.iter().enumerate().filter(|(i, _)| kept(i)).map(|(_, e)| e) {
         let Some(line) = headings.next() else { break };
         if entry.is_current || !opts.session_tree {
             past_current |= entry.is_current;
