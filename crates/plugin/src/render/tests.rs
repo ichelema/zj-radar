@@ -3960,11 +3960,12 @@ fn session_tree_off_keeps_the_compact_badge_above_the_cards() {
     // Default: the badge is one line per session above the cards — the peer
     // the summary may carry a tree (a peer with the option on), but it's ignored.
     let rows = vec![tab(1, "local", display(Status::Running, 0, 1, Some(pd("localjob", Status::Running))))];
-    let badge = vec![badge_entry("work", true, 1, 0, None, false), peer_with_tree("peer", 2, 2)];
+    // Badge order is by name ("peer" < "work"), the current line in its place.
+    let badge = vec![peer_with_tree("peer", 2, 2), badge_entry("work", true, 1, 0, None, false)];
     let opts = RenderOpts { height: 40, density: crate::config::Density::Cards, badge, ..ro(32, 0) };
     let text = super::test_util::grid(&render_rail(&rows, &[], &opts).ansi, 32);
     let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} missing:\n{text}"));
-    assert!(at("work") < at("peer") && at("peer") < at("localjob"), "both headings precede the cards:\n{text}");
+    assert!(at("peer") < at("work") && at("work") < at("localjob"), "both headings precede the cards:\n{text}");
     assert!(!text.contains("t0") && !text.contains("a0.0"), "no peer children with the tree off:\n{text}");
 }
 

@@ -804,6 +804,29 @@ fn session_tree_puts_a_peer_sorting_first_above_the_own_heading() {
 }
 
 #[test]
+fn session_tree_off_keeps_the_current_line_in_its_name_place() {
+    // Tree off (the default): one compact block, in name order. Line 0 =
+    // title, 1 = rule, 2 = "alpha", 3 = own "work" (click-inert), 4 = "zeta".
+    let mut rt = runtime_with_granted_permission(); // own session name "work"
+    rt.tabs_changed(vec![tab(0, "team", false)]);
+    rt.global_attention_changed(vec![
+        fresh(r#"{"session_name":"zeta","running":0,"attention":1,"attention_tab_position":2}"#),
+        fresh(r#"{"session_name":"alpha","running":1,"attention":0}"#),
+    ]);
+    rt.render(100, 80);
+
+    assert_eq!(
+        rt.mouse_click(2, 0).effects,
+        vec![Effect::SwitchSession { name: "alpha".into(), tab_position: None, pane_id: None }]
+    );
+    assert_eq!(rt.mouse_click(3, 0), Outcome::default(), "own line is click-inert");
+    assert_eq!(
+        rt.mouse_click(4, 0).effects,
+        vec![Effect::SwitchSession { name: "zeta".into(), tab_position: Some(2), pane_id: None }]
+    );
+}
+
+#[test]
 fn clicking_a_session_line_emits_switch_session() {
     // Two live sessions (own "work" + peer "zeta") put two badge lines
     // between the header and the first tab card (`render::render_session_badge`,

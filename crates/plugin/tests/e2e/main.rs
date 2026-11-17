@@ -1230,8 +1230,8 @@ fn session_next_switches_to_the_session_with_attention() {
     // A `working` status in A's OWN terminal arms A's Fast cadence
     // (an active `Running` row animates every tick — see
     // `timer_should_continue`/`needs_fast_ticks`) without giving A any
-    // attention of its own, so it doesn't interfere with the ordering
-    // assertion below (B is still the only attention>0 peer).
+    // attention of its own, so A's badge line stays bare and the needle
+    // below can only match B's line. Attention no longer orders the badge.
     a.emit_program_status(&osc("working", "keep-fast"));
 
     // A's badge must show B's name TOGETHER WITH the attention glyph+count —
