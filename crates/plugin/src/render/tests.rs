@@ -3896,6 +3896,23 @@ fn peers_never_head_the_local_cards_before_the_own_session_is_known() {
 }
 
 #[test]
+fn session_tree_keeps_the_name_order_around_the_local_cards() {
+    // Badge order is by name: alpha, work (current), zeta. The current
+    // heading heads the local cards in its place, so alpha (and its tree)
+    // renders above it and zeta below the cards.
+    let rows = vec![tab(1, "local", display(Status::Running, 0, 1, Some(pd("localjob", Status::Running))))];
+    let badge =
+        vec![peer_with_tree("alpha", 1, 1), badge_entry("work", true, 1, 0, None, false), peer_with_tree("zeta", 1, 1)];
+    let opts =
+        RenderOpts { height: 20, density: crate::config::Density::Cards, badge, session_tree: true, ..ro(32, 0) };
+    let rail = render_rail(&rows, &[], &opts);
+    let text = super::test_util::grid(&rail.ansi, 32);
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} missing:\n{text}"));
+    assert!(at("alpha") < at("work") && at("work") < at("localjob") && at("localjob") < at("zeta"), "{text}");
+    insta::assert_snapshot!("session_tree_current_in_the_middle_grid", text);
+}
+
+#[test]
 fn idle_strip_sits_under_the_local_cards_not_the_peer_tree() {
     // Enough idle local tabs on a short rail to fold into the strip.
     let rows: Vec<TabRow> = (1..=20).map(|n| tab(n, format!("idle{n}"), display(Status::Idle, 0, 0, None))).collect();

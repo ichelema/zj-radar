@@ -197,12 +197,14 @@ impl Sessions {
             self.selection.as_ref().and_then(|sel| order.iter().position(|s| s.summary.session_name == sel.name));
         self.selection = match (current_position, order.len()) {
             (_, 0) => None,
-            (None, _) => {
+            (None, len) => {
                 // Nothing selected yet (or the selection vanished): start at
-                // the first non-current entry (index 0 is the current
-                // session, when own is known).
-                order.iter().position(|s| !s.is_current).map(|index| SelectionState {
-                    name: order[index].summary.session_name.clone(),
+                // the entry right after the current session, wrapping (the
+                // first entry while own is unknown). A lone current session
+                // selects nothing.
+                let start = order.iter().position(|s| s.is_current).map_or(0, |i| (i + 1) % len);
+                (!order[start].is_current).then(|| SelectionState {
+                    name: order[start].summary.session_name.clone(),
                     taps_since_last_fire: true,
                 })
             }
@@ -248,8 +250,8 @@ impl Sessions {
         })
     }
 
-    /// The ordered badge: current session first, then attention>0 sessions
-    /// by name, then the rest by name. Derived fresh from `peers`/`own` every
+    /// The ordered badge: every session by name, the current one in its
+    /// place (`ordered()`). Derived fresh from `peers`/`own` every
     /// call — never cached — so it can never drift from its inputs.
     pub(crate) fn badge(&self) -> Vec<BadgeEntry> {
         let order = self.ordered();
@@ -282,28 +284,28 @@ impl Sessions {
         self.selection.is_some()
     }
 
-    /// The shared ordering: the current session first (at most one — `own`,
-    /// once known), then attention>0 peers by name, then the rest of the
-    /// peers by name. Both `badge()` and `cycle()` go through this so
+    /// The shared ordering: every session — the current one (`own`, once
+    /// known) included — by name only, so switching session or an attention
+    /// edge never moves a line. Both `badge()` and `cycle()` go through this so
     /// "what's shown" and "what Alt+[/] steps through" can never disagree.
     fn ordered(&self) -> Vec<OrderedEntry<'_>> {
         let own_name = self.own.as_ref().map(|p| p.session_name.as_str());
         // `own`'s counts come from set_own's direct knowledge — it must
         // always win a name collision, so a peer sharing our own session's
         // name is dropped outright rather than shown as a second line.
-        let (mut attention, mut rest): (Vec<_>, Vec<_>) = self
-            .peers
+        let mut order: Vec<_> = self
+            .own
             .iter()
-            .filter(|p| own_name != Some(p.session_name.as_str()))
-            .map(|summary| OrderedEntry { summary, is_current: false })
-            .partition(|e| e.summary.attention > 0);
-        fn by_name(a: &OrderedEntry<'_>, b: &OrderedEntry<'_>) -> std::cmp::Ordering {
-            a.summary.session_name.cmp(&b.summary.session_name)
-        }
-        attention.sort_by(by_name);
-        rest.sort_by(by_name);
-        let current = self.own.as_ref().map(|p| OrderedEntry { summary: p, is_current: true });
-        current.into_iter().chain(attention).chain(rest).collect()
+            .map(|summary| OrderedEntry { summary, is_current: true })
+            .chain(
+                self.peers
+                    .iter()
+                    .filter(|p| own_name != Some(p.session_name.as_str()))
+                    .map(|summary| OrderedEntry { summary, is_current: false }),
+            )
+            .collect();
+        order.sort_by(|a, b| a.summary.session_name.cmp(&b.summary.session_name));
+        order
     }
 }
 
@@ -360,8 +362,8 @@ mod tests {
         assert!(s.update_global(vec![global_peer("alpha", Some(42))]));
         let badge = s.badge();
         let names: Vec<&str> = badge.iter().map(|b| b.name.as_str()).collect();
-        assert_eq!(names, vec!["work", "alpha"]);
-        assert_eq!(badge[1].attention_pane_id, Some(42));
+        assert_eq!(names, vec!["alpha", "work"]);
+        assert_eq!(badge[0].attention_pane_id, Some(42));
         s.cycle(Direction::Next);
         s.tick();
         let t = s.tick().unwrap();
@@ -409,23 +411,36 @@ mod tests {
     }
 
     #[test]
-    fn badge_orders_current_then_attention_then_rest() {
+    fn badge_orders_by_name_and_a_switch_moves_nothing() {
+        let names = |s: &Sessions| s.badge().iter().map(|b| (b.name.clone(), b.is_current)).collect::<Vec<_>>();
         let mut s = Sessions::default();
-        s.update_global(vec![summary("zeta", 1, 2), summary("alpha", 1, 0)]);
-        s.set_own(SessionSummary {
-            session_name: "work".into(),
-            running: 3,
-            attention: 0,
-            attention_tab_position: None,
-            tabs: vec![],
-        });
-        // (Bound rather than chained straight off `s.badge()`: the literal
-        // brief snippet borrows from a temporary `Vec<BadgeEntry>` that would
-        // be dropped at the end of the `let` statement — a compile-mechanics
-        // issue, not a semantic change; the assertion is unchanged.)
-        let badge = s.badge();
-        let names: Vec<&str> = badge.iter().map(|b| b.name.as_str()).collect();
-        assert_eq!(names, vec!["work", "zeta", "alpha"]);
+        s.update_global(vec![summary("z", 1, 2), summary("a", 1, 0)]);
+        s.set_own(SessionSummary { running: 3, ..own("m") });
+        let expected =
+            |current: &str| ["a", "m", "z"].iter().map(|n| (n.to_string(), *n == current)).collect::<Vec<_>>();
+        assert_eq!(names(&s), expected("m"), "attention does not lift `z` above the others");
+        // Switch to `z`: `m` becomes a peer, `z` the own session.
+        s.update_global(vec![summary("m", 3, 0), summary("a", 1, 0)]);
+        s.set_own(SessionSummary { attention: 2, ..own("z") });
+        assert_eq!(names(&s), expected("z"), "the newly current session stays in its place");
+    }
+
+    #[test]
+    fn first_cycle_tap_starts_after_the_current_session_and_wraps() {
+        let selected = |s: &Sessions| s.badge().into_iter().find(|b| b.selected).map(|b| b.name);
+        let mut s = Sessions::default();
+        s.update_global(vec![summary("a", 0, 0), summary("z", 0, 0)]);
+        s.set_own(own("m"));
+        s.cycle(Direction::Next);
+        assert_eq!(selected(&s).as_deref(), Some("z"), "the entry after `m`");
+        s.cycle(Direction::Next);
+        assert_eq!(selected(&s).as_deref(), Some("a"), "wraps past the end");
+
+        let mut s = Sessions::default();
+        s.update_global(vec![summary("a", 0, 0), summary("b", 0, 0)]);
+        s.set_own(own("z"));
+        s.cycle(Direction::Next);
+        assert_eq!(selected(&s).as_deref(), Some("a"), "a last current session wraps to the first entry");
     }
 
     #[test]
@@ -433,7 +448,7 @@ mod tests {
         let mut s = Sessions::default();
         s.set_own(own("work"));
         s.update_global(vec![summary("alpha", 0, 1), summary("beta", 1, 0)]);
-        // Order: work(current), alpha(attention), beta.
+        // Order by name: alpha, beta, work(current).
         s.cycle(Direction::Next); // select alpha
         assert_eq!(s.tick(), None, "the fire covering the tap must not commit — it clears the flag");
         s.cycle(Direction::Next); // skip to beta
@@ -491,7 +506,7 @@ mod tests {
         let mut s = Sessions::default();
         s.set_own(own("work"));
         s.update_global(vec![summary("alpha", 1, 0), summary("beta", 1, 0)]);
-        // Order: work(current), alpha, beta. Several taps land, each one
+        // Order: alpha, beta, work(current). Several taps land, each one
         // arriving before the next fire — faster than the old 1-tick grain
         // could distinguish. Every fire covering a tap must skip, not just
         // the first.
@@ -585,10 +600,10 @@ mod tests {
         let mut s = Sessions::default();
         s.set_own(own("work"));
         s.update_global(vec![summary("alpha", 1, 0), summary("beta", 1, 0)]);
-        // Order: work (current), alpha, beta — both zero-attention, by name.
-        s.cycle(Direction::Next); // selects alpha (first non-current)
+        // Order by name: alpha, beta, work (current).
+        s.cycle(Direction::Next); // selects alpha (wraps past work)
 
-        // "aardvark" joins and sorts ahead of "alpha" in the rest bucket. A
+        // "aardvark" joins and sorts ahead of "alpha". A
         // positional-index selection (old index 1) would now point at
         // "aardvark" instead of "alpha". `update_global` REPLACES the
         // peer set wholesale, so this is the same "membership changed under
@@ -624,37 +639,37 @@ mod tests {
         let mut s = Sessions::default();
         s.set_own(own("work"));
         s.update_global(vec![summary("alpha", 1, 0), summary("beta", 1, 0), summary("gamma", 1, 0)]);
-        // No attention: order is work (current), then alpha, beta, gamma by name.
+        // Order by name: alpha, beta, gamma, work (current).
 
-        s.cycle(Direction::Next); // selects alpha (first non-current)
+        s.cycle(Direction::Next); // selects alpha (wraps past work)
 
         // alpha vanishes, leaving a fresh order with *two* non-current entries
-        // (beta, gamma) — order: work, beta, gamma.
+        // (beta, gamma) — order: beta, gamma, work.
         s.update_global(vec![summary("beta", 1, 0), summary("gamma", 1, 0)]);
 
         // Cycling with Prev is what actually discriminates restart-fresh from
-        // an index-0 fallback: restart-fresh ignores the stale direction and
-        // always selects the first non-current entry (beta). A regression
-        // that resolved the vanished name to index 0 ("as if `work`/current
-        // were selected") would instead advance *backward* from there and
-        // land on the last entry (gamma) — the same bug that, under
-        // Direction::Next, would coincidentally land on beta too and pass
-        // silently.
+        // a current-session fallback: restart-fresh ignores the stale
+        // direction and always selects the entry after the current one
+        // (wrapping to beta). A regression that resolved the vanished name
+        // to the current entry ("as if `work` were selected") would instead
+        // advance *backward* from there and land on gamma — the same bug
+        // that, under Direction::Next, would coincidentally land on beta too
+        // and pass silently.
         s.cycle(Direction::Prev);
         let badge = s.badge();
         let selected: Vec<&str> = badge.iter().filter(|b| b.selected).map(|b| b.name.as_str()).collect();
         assert_eq!(
             selected,
             vec!["beta"],
-            "restart-fresh must ignore the stale direction and pick the first \
-             non-current entry, not fall back to advancing from index 0"
+            "restart-fresh must ignore the stale direction and pick the entry \
+             after the current one, not advance from the current entry"
         );
 
         s.tick(); // the fire covering the last tap: skip, clears the flag
         let t = s.tick().expect("a quiet fire commits");
         assert_eq!(
             t.name, "beta",
-            "after vanished selection, cycle must restart and select the first non-current entry"
+            "after vanished selection, cycle must restart and select the entry after the current one"
         );
     }
 
