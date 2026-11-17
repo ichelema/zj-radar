@@ -158,7 +158,7 @@ Bindings for all five, and for changing options from a key, are in
 ## Cross-session badge
 
 Run more than one Zellij session on the same machine and each rail grows one
-line per session, sorted by name, your own session included: switching
+line per session, sorted by name (ignoring case), your own session included: switching
 session or a change in attention never moves a line. Each line shows the session name with its working and needs-you
 pane counts. Every session counts the same way: an agent that works or waits,
 and a shell command that failed, count; a shell command that is still running

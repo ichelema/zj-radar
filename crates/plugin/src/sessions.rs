@@ -10,7 +10,7 @@
 //!
 //! Ordering is a single source of truth shared by `badge()` (what's shown)
 //! and `cycle()` (what Alt+[/] steps through): every session, the current
-//! one included, by name only.
+//! one included, by name only, ignoring case.
 
 use crate::radar_state::Direction;
 use crate::status::Status;
@@ -285,7 +285,8 @@ impl Sessions {
     }
 
     /// The shared ordering: every session — the current one (`own`, once
-    /// known) included — by name only, so switching session or an attention
+    /// known) included — by name only, ignoring case (the exact name breaks
+    /// ties, so the order stays total), so switching session or an attention
     /// edge never moves a line. Both `badge()` and `cycle()` go through this so
     /// "what's shown" and "what Alt+[/] steps through" can never disagree.
     fn ordered(&self) -> Vec<OrderedEntry<'_>> {
@@ -304,7 +305,7 @@ impl Sessions {
                     .map(|summary| OrderedEntry { summary, is_current: false }),
             )
             .collect();
-        order.sort_by(|a, b| a.summary.session_name.cmp(&b.summary.session_name));
+        order.sort_by_cached_key(|e| (e.summary.session_name.to_lowercase(), e.summary.session_name.clone()));
         order
     }
 }
@@ -423,6 +424,15 @@ mod tests {
         s.update_global(vec![summary("m", 3, 0), summary("a", 1, 0)]);
         s.set_own(SessionSummary { attention: 2, ..own("z") });
         assert_eq!(names(&s), expected("z"), "the newly current session stays in its place");
+    }
+
+    #[test]
+    fn badge_order_ignores_case_and_breaks_ties_by_exact_name() {
+        let mut s = Sessions::default();
+        s.update_global(vec![summary("Zeta", 0, 0), summary("alpha", 0, 0), summary("Work", 0, 0)]);
+        s.set_own(own("work"));
+        let names: Vec<String> = s.badge().into_iter().map(|b| b.name).collect();
+        assert_eq!(names, ["alpha", "Work", "work", "Zeta"], "`alpha` before `Zeta`; `Work` < `work` on the tie");
     }
 
     #[test]

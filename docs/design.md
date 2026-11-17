@@ -719,12 +719,12 @@ read for the current session's pane manifest only, never for the peer list.
 
 **Badge.** `Sessions::badge()` is re-derived on every call. It renders zero
 lines while only the current session is known; from two entries on, one line
-per session in the order shared with cycling: every session by name, the
-current one in its place, so a switch or an attention edge moves no line.
-The first cycle tap selects the entry after the current one. Each line shows
-the name plus running and attention counts when nonzero. The current line
-carries an accent
-`•` and no click target. A pending cycle selection renders bold.
+per session in the order shared with cycling: every session by name (ignoring
+case, the exact name breaking ties), the current one in its place, so a switch
+or an attention edge moves no line. The first cycle tap selects the entry after
+the current one. Each line shows the name plus running and attention counts
+when nonzero. The current line carries an accent `•` and no click target. A
+pending cycle selection renders bold.
 
 **Switching.** A click on a peer line, or a cycle commit, emits
 `Effect::SwitchSession`. Peer tab positions are ordinals, not Zellij
