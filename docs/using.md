@@ -158,26 +158,29 @@ Bindings for all five, and for changing options from a key, are in
 ## Cross-session badge
 
 Run more than one Zellij session on the same machine and each rail grows one
-line per session: your session first, then sessions that need attention, then
-the rest. Each line shows the session name with its working and needs-you
+line per session, sorted by name (ignoring case), your own session included: switching
+session or a change in attention never moves a line. Each line shows the session name with its working and needs-you
 pane counts. Every session counts the same way: an agent that works or waits,
 and a shell command that failed, count; a shell command that is still running
 (`cargo test`, a dev server) does not, and neither does a muted pane. One
 exception: a working Opencode pane counts only in its own session, because
 Zellij does not report it as working to the others. With a single session the badge is invisible.
+Your own line always stays on screen: when the session lines do not fit under
+the header, just enough of the sessions sorting before yours are hidden to keep
+it on the last row, and lines past the bottom of the rail are cut.
 
 - **Click a line** to switch to that session, landing on a pane that needs
   you if it has one.
 - **`session_tree true`** ([configuration](configuration.md#options)) expands
-  the badge into a tree. Your session's line heads your own tabs; each other
-  session follows with the tabs and panes it counts, plus its finished ones;
+  the badge into a tree, in the same name order. Your session's line heads
+  your own tabs; each other session sits in its place with the tabs and panes it counts, plus its finished ones;
   idle, muted, and running shell-command panes have no row. A tree lists at
   most 16 panes per tab and 64 tabs. Click
   a peer pane row to switch there and focus that pane; a peer tab row focuses
   its first listed pane. Peer rows only use the height left after your local
   tabs, the ledger, and the footer, so a short rail shows fewer of them (or
-  none); session lines always remain visible. `session_tree` controls whether
-  *your* rail draws peers' trees.
+  none); session lines take priority over them. `session_tree` controls
+  whether *your* rail draws peers' trees.
 - **`session-next` / `session-prev`** move a highlight through the same order.
   The switch happens about a second after your last tap; landing back on your
   own session cancels.

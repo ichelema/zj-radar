@@ -608,16 +608,16 @@ fn fresh(json: &str) -> SessionSummary {
     serde_json::from_str(json).expect("test peer JSON must parse")
 }
 
-/// Shared setup for the right-click tests: one tab + one "alpha" peer, then
+/// Shared setup for the right-click tests: one tab + one "zeta" peer, then
 /// a real render so `last_rendered` carries the badge's click targets. The
 /// resulting line indices follow `clicking_a_session_line_emits_switch_session`'s
-/// bookkeeping — 0/1 header, 2 own "work" line (click-inert), 3 peer "alpha"
-/// line, 4 the badge's blank separator, 5 the tab header.
+/// bookkeeping — 0/1 header, 2 own "work" line (click-inert), 3 peer "zeta"
+/// line (it sorts after "work"), 4 the badge's blank separator, 5 the tab header.
 fn render_with_badge(rt: &mut PluginRuntime, peer: SessionSummary) {
     rt.tabs_changed(vec![tab(0, "team", false)]);
     rt.global_attention_changed(vec![peer]);
     let ansi = rt.render(100, 80);
-    assert!(ansi.contains("alpha"), "setup: the peer's badge line must actually render");
+    assert!(ansi.contains("zeta"), "setup: the peer's badge line must actually render");
 }
 
 #[test]
@@ -742,7 +742,7 @@ fn a_global_attention_peer_click_focuses_its_waiting_pane() {
     rt.config.session_tree = true;
     rt.tabs_changed(vec![tab(0, "team", false)]);
     let peer = crate::attention::PeerSession {
-        name: "alpha".into(),
+        name: "zeta".into(),
         items: vec![crate::attention::PeerItem {
             pane_id: 7,
             tab_id: 3,
@@ -759,7 +759,7 @@ fn a_global_attention_peer_click_focuses_its_waiting_pane() {
     rt.render(100, 80);
     assert_eq!(
         rt.mouse_click(4, 0).effects,
-        vec![Effect::SwitchSession { name: "alpha".into(), tab_position: None, pane_id: Some(7) }]
+        vec![Effect::SwitchSession { name: "zeta".into(), tab_position: None, pane_id: Some(7) }]
     );
 }
 
@@ -767,7 +767,27 @@ fn a_global_attention_peer_click_focuses_its_waiting_pane() {
 fn session_tree_moves_peer_lines_below_the_local_cards() {
     // Same bookkeeping as `clicking_a_session_line_emits_switch_session`, tree
     // on: line 0 = title, 1 = rule, 2 = own "work" heading, 3 = local tab,
-    // 4 = peer "alpha" heading (clickable).
+    // 4 = peer "zeta" heading (clickable).
+    let mut rt = runtime_with_granted_permission();
+    rt.config.session_tree = true;
+    rt.tabs_changed(vec![tab(0, "team", false)]);
+    rt.global_attention_changed(vec![fresh(
+        r#"{"session_name":"zeta","running":0,"attention":1,"attention_tab_position":2}"#,
+    )]);
+    rt.render(100, 80);
+
+    assert_eq!(rt.mouse_click(2, 0), Outcome::default(), "own heading is click-inert");
+    let peer_click = rt.mouse_click(4, 0);
+    assert_eq!(
+        peer_click.effects,
+        vec![Effect::SwitchSession { name: "zeta".into(), tab_position: Some(2), pane_id: None }]
+    );
+}
+
+#[test]
+fn session_tree_puts_a_peer_sorting_first_above_the_own_heading() {
+    // Name order: "alpha" < "work". Line 0 = title, 1 = rule, 2 = peer
+    // "alpha" heading (clickable), 3 = own "work" heading, 4 = local tab.
     let mut rt = runtime_with_granted_permission();
     rt.config.session_tree = true;
     rt.tabs_changed(vec![tab(0, "team", false)]);
@@ -776,32 +796,54 @@ fn session_tree_moves_peer_lines_below_the_local_cards() {
     )]);
     rt.render(100, 80);
 
-    assert_eq!(rt.mouse_click(2, 0), Outcome::default(), "own heading is click-inert");
-    let peer_click = rt.mouse_click(4, 0);
     assert_eq!(
-        peer_click.effects,
+        rt.mouse_click(2, 0).effects,
         vec![Effect::SwitchSession { name: "alpha".into(), tab_position: Some(2), pane_id: None }]
+    );
+    assert_eq!(rt.mouse_click(3, 0), Outcome::default(), "own heading is click-inert");
+}
+
+#[test]
+fn session_tree_off_keeps_the_current_line_in_its_name_place() {
+    // Tree off (the default): one compact block, in name order. Line 0 =
+    // title, 1 = rule, 2 = "alpha", 3 = own "work" (click-inert), 4 = "zeta".
+    let mut rt = runtime_with_granted_permission(); // own session name "work"
+    rt.tabs_changed(vec![tab(0, "team", false)]);
+    rt.global_attention_changed(vec![
+        fresh(r#"{"session_name":"zeta","running":0,"attention":1,"attention_tab_position":2}"#),
+        fresh(r#"{"session_name":"alpha","running":1,"attention":0}"#),
+    ]);
+    rt.render(100, 80);
+
+    assert_eq!(
+        rt.mouse_click(2, 0).effects,
+        vec![Effect::SwitchSession { name: "alpha".into(), tab_position: None, pane_id: None }]
+    );
+    assert_eq!(rt.mouse_click(3, 0), Outcome::default(), "own line is click-inert");
+    assert_eq!(
+        rt.mouse_click(4, 0).effects,
+        vec![Effect::SwitchSession { name: "zeta".into(), tab_position: Some(2), pane_id: None }]
     );
 }
 
 #[test]
 fn clicking_a_session_line_emits_switch_session() {
-    // Two live sessions (own "work" + peer "alpha") put two badge lines
+    // Two live sessions (own "work" + peer "zeta") put two badge lines
     // between the header and the first tab card (`render::render_session_badge`,
     // wired into the body in Task 7). Mirrors
     // `render_records_targets_and_mouse_click_returns_host_effect`'s line-index
     // bookkeeping: Compact density + header:true is a 2-line header (title,
     // rule — "line 2 = tab header" there), so with the badge inserted here:
     // line 0 = title, 1 = rule, 2 = own "work" badge line (click-inert, no
-    // cross-session target), 3 = peer "alpha" badge line (clickable).
+    // cross-session target), 3 = peer "zeta" badge line (clickable).
     let mut rt = runtime_with_granted_permission(); // own session name "work"
     rt.tabs_changed(vec![tab(0, "team", false)]);
     rt.global_attention_changed(vec![fresh(
-        r#"{"session_name":"alpha","running":0,"attention":1,"attention_tab_position":2}"#,
+        r#"{"session_name":"zeta","running":0,"attention":1,"attention_tab_position":2}"#,
     )]);
 
     let ansi = rt.render(100, 80);
-    assert!(ansi.contains("alpha"), "setup: the peer's badge line must actually render");
+    assert!(ansi.contains("zeta"), "setup: the peer's badge line must actually render");
 
     let own_click = rt.mouse_click(2, 0);
     assert_eq!(own_click, Outcome::default(), "the own-session badge line has no click target, got {:?}", own_click);
@@ -809,7 +851,7 @@ fn clicking_a_session_line_emits_switch_session() {
     let peer_click = rt.mouse_click(3, 0);
     assert_eq!(
         peer_click.effects,
-        vec![Effect::SwitchSession { name: "alpha".into(), tab_position: Some(2), pane_id: None }]
+        vec![Effect::SwitchSession { name: "zeta".into(), tab_position: Some(2), pane_id: None }]
     );
 }
 
@@ -832,18 +874,18 @@ fn raced_away_acknowledge_glyph_consumes_the_click_instead_of_showing_the_pane()
 #[test]
 fn right_click_on_peer_session_line_is_inert() {
     let mut rt = runtime_with_granted_permission();
-    render_with_badge(&mut rt, fresh(r#"{"session_name":"alpha","running":0,"attention":1}"#));
+    render_with_badge(&mut rt, fresh(r#"{"session_name":"zeta","running":0,"attention":1}"#));
 
     let out = rt.mouse_right_click(3, 0);
 
     assert_eq!(out, Outcome::default());
-    assert!(rt.sessions.badge().iter().any(|b| b.name == "alpha"), "fresh peer must remain on the badge");
+    assert!(rt.sessions.badge().iter().any(|b| b.name == "zeta"), "fresh peer must remain on the badge");
 }
 
 #[test]
 fn right_click_on_own_session_line_is_inert() {
     let mut rt = runtime_with_granted_permission();
-    render_with_badge(&mut rt, fresh(r#"{"session_name":"alpha","running":0,"attention":1}"#));
+    render_with_badge(&mut rt, fresh(r#"{"session_name":"zeta","running":0,"attention":1}"#));
 
     assert_eq!(rt.mouse_right_click(2, 0), Outcome::default());
 }
@@ -851,7 +893,7 @@ fn right_click_on_own_session_line_is_inert() {
 #[test]
 fn right_click_on_tab_line_is_inert() {
     let mut rt = runtime_with_granted_permission();
-    render_with_badge(&mut rt, fresh(r#"{"session_name":"alpha","running":0,"attention":1}"#));
+    render_with_badge(&mut rt, fresh(r#"{"session_name":"zeta","running":0,"attention":1}"#));
 
     assert_eq!(rt.mouse_right_click(5, 0), Outcome::default());
 }
@@ -859,7 +901,7 @@ fn right_click_on_tab_line_is_inert() {
 #[test]
 fn right_click_on_empty_line_is_inert() {
     let mut rt = runtime_with_granted_permission();
-    render_with_badge(&mut rt, fresh(r#"{"session_name":"alpha","running":0,"attention":1}"#));
+    render_with_badge(&mut rt, fresh(r#"{"session_name":"zeta","running":0,"attention":1}"#));
 
     assert_eq!(rt.mouse_right_click(99, 0), Outcome::default());
 }
@@ -867,11 +909,11 @@ fn right_click_on_empty_line_is_inert() {
 #[test]
 fn right_click_without_permission_is_inert_on_a_session_line() {
     let mut rt = runtime_with_granted_permission();
-    render_with_badge(&mut rt, fresh(r#"{"session_name":"alpha","running":0,"attention":1}"#));
+    render_with_badge(&mut rt, fresh(r#"{"session_name":"zeta","running":0,"attention":1}"#));
     rt.permission = PermissionState::default();
 
     assert_eq!(rt.mouse_right_click(3, 0), Outcome::default());
-    assert!(rt.sessions.badge().iter().any(|b| b.name == "alpha"), "ungranted right-click must not mutate the badge");
+    assert!(rt.sessions.badge().iter().any(|b| b.name == "zeta"), "ungranted right-click must not mutate the badge");
 }
 
 // ── Right-click: pending-pane acknowledge (issue #5) ───────────────────────

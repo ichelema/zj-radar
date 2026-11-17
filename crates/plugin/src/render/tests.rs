@@ -3896,6 +3896,93 @@ fn peers_never_head_the_local_cards_before_the_own_session_is_known() {
 }
 
 #[test]
+fn session_tree_keeps_the_name_order_around_the_local_cards() {
+    // Badge order is by name: alpha, work (current), zeta. The current
+    // heading heads the local cards in its place, so alpha (and its tree)
+    // renders above it and zeta below the cards.
+    let rows = vec![tab(1, "local", display(Status::Running, 0, 1, Some(pd("localjob", Status::Running))))];
+    let badge =
+        vec![peer_with_tree("alpha", 1, 1), badge_entry("work", true, 1, 0, None, false), peer_with_tree("zeta", 1, 1)];
+    let opts =
+        RenderOpts { height: 20, density: crate::config::Density::Cards, badge, session_tree: true, ..ro(32, 0) };
+    let rail = render_rail(&rows, &[], &opts);
+    let text = super::test_util::grid(&rail.ansi, 32);
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} missing:\n{text}"));
+    assert!(at("alpha") < at("work") && at("work") < at("localjob") && at("localjob") < at("zeta"), "{text}");
+    insta::assert_snapshot!("session_tree_current_in_the_middle_grid", text);
+}
+
+#[test]
+fn peer_trees_above_the_current_session_never_squeeze_local_tabs() {
+    // The current session sorts last, so both large peer trees render ABOVE
+    // the local cards. They still draw only from the leftover child budget:
+    // every local card, the footer, and the rail height must survive.
+    let rows: Vec<TabRow> = (1..=4)
+        .map(|n| {
+            tab(n, format!("local{n}"), display(Status::Running, 0, 1, Some(pd(format!("job{n}"), Status::Running))))
+        })
+        .collect();
+    let badge = vec![
+        peer_with_tree("alpha", 10, 3),
+        peer_with_tree("beta", 10, 3),
+        badge_entry("work", true, 4, 0, None, false),
+    ];
+    let opts =
+        RenderOpts { height: 30, density: crate::config::Density::Cards, badge, session_tree: true, ..ro(32, 0) };
+    let rail = render_rail(&rows, &[], &opts);
+    let text = super::test_util::grid(&rail.ansi, 32);
+    for n in 1..=4 {
+        assert!(text.contains(&format!("job{n}")), "local tab {n} must keep its card:\n{text}");
+    }
+    assert!(!text.contains("idle ▾"), "no local tab may fold into the idle strip:\n{text}");
+    assert!(text.contains("working"), "the footer tally must survive:\n{text}");
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} missing:\n{text}"));
+    assert!(at("alpha") < at("beta") && at("beta") < at("work"), "both headings render above `work`:\n{text}");
+    assert!(!text.contains("a9.2"), "the peer trees are clipped, not the local content:\n{text}");
+    assert_eq!(rail.line_count(), 30);
+}
+
+#[test]
+fn the_current_line_survives_more_earlier_sessions_than_the_rail_has_rows() {
+    // Eight sessions sort before `work` and one after it. On a rail shorter
+    // than the badge, the earliest headings give way so `• work` stays on
+    // screen, in every density, tree on and off, and stays click-inert.
+    use crate::config::Density;
+    let rows: Vec<TabRow> = (1..=3).map(|n| tab(n, format!("local{n}"), display(Status::Idle, 0, 0, None))).collect();
+    let mut badge: Vec<BadgeEntry> = (0..8).map(|n| peer_with_tree(&format!("pa{n}"), 1, 1)).collect();
+    badge.push(badge_entry("work", true, 0, 0, None, false));
+    badge.push(peer_with_tree("zz", 1, 1));
+    for density in [Density::Cards, Density::Comfortable, Density::Compact] {
+        for session_tree in [false, true] {
+            for height in 3..=14 {
+                let opts = RenderOpts {
+                    height,
+                    density,
+                    badge: badge.clone(),
+                    session_tree,
+                    ..ro_full(32, 0, density, GlyphSet::Plain)
+                };
+                let rail = render_rail(&rows, &[], &opts);
+                let text = super::test_util::grid(&rail.ansi, 32);
+                let case = format!("{density:?} tree={session_tree} height={height}");
+                assert!(rail.line_count() <= height, "{case}:\n{text}");
+                let row = text.lines().position(|l| l.contains("• work"));
+                let row = row.unwrap_or_else(|| panic!("{case}: the current line fell off the rail:\n{text}"));
+                assert!(rail.targets[row].is_none(), "{case}: the current line stays click-inert:\n{text}");
+                // Only the earliest headings give way, and only as many as
+                // needed: either none is hidden, or `• work` sits on the last row.
+                let shown: Vec<usize> = (0..8).filter(|n| text.contains(&format!("pa{n}"))).collect();
+                assert!(
+                    shown.iter().copied().eq(8 - shown.len()..8),
+                    "{case}: the earliest headings give way:\n{text}"
+                );
+                assert!(shown.len() == 8 || row == height - 1, "{case}: no more headings hidden than needed:\n{text}");
+            }
+        }
+    }
+}
+
+#[test]
 fn idle_strip_sits_under_the_local_cards_not_the_peer_tree() {
     // Enough idle local tabs on a short rail to fold into the strip.
     let rows: Vec<TabRow> = (1..=20).map(|n| tab(n, format!("idle{n}"), display(Status::Idle, 0, 0, None))).collect();
@@ -3913,11 +4000,12 @@ fn session_tree_off_keeps_the_compact_badge_above_the_cards() {
     // Default: the badge is one line per session above the cards — the peer
     // the summary may carry a tree (a peer with the option on), but it's ignored.
     let rows = vec![tab(1, "local", display(Status::Running, 0, 1, Some(pd("localjob", Status::Running))))];
-    let badge = vec![badge_entry("work", true, 1, 0, None, false), peer_with_tree("peer", 2, 2)];
+    // Badge order is by name ("peer" < "work"), the current line in its place.
+    let badge = vec![peer_with_tree("peer", 2, 2), badge_entry("work", true, 1, 0, None, false)];
     let opts = RenderOpts { height: 40, density: crate::config::Density::Cards, badge, ..ro(32, 0) };
     let text = super::test_util::grid(&render_rail(&rows, &[], &opts).ansi, 32);
     let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("{needle} missing:\n{text}"));
-    assert!(at("work") < at("peer") && at("peer") < at("localjob"), "both headings precede the cards:\n{text}");
+    assert!(at("peer") < at("work") && at("work") < at("localjob"), "both headings precede the cards:\n{text}");
     assert!(!text.contains("t0") && !text.contains("a0.0"), "no peer children with the tree off:\n{text}");
 }
 

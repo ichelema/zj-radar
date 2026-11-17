@@ -1,0 +1,24 @@
+---
+source: crates/plugin/src/render/tests.rs
+expression: text
+---
+ RADAR                        ·1
+  alpha 1⠋
+  └ ⠋ t0
+    └ ⠋ ✳ a0.0
+• work 1⠋
+ ⠋ 1 local
+ └ ⠋ ✳ localjob
+
+  zeta 1⠋
+  └ ⠋ t0
+    └ ⠋ ✳ a0.0
+
+
+
+
+
+
+────────────────────────────────
+1 working
+alt-[n] jump

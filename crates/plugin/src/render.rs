@@ -177,8 +177,8 @@ pub struct RenderOpts {
     /// truly delivers the chord may claim it; everything else omits the hint
     /// line rather than promising a chord that does nothing.
     pub jump_hint: bool,
-    /// The cross-session badge, current-first once the own session name is
-    /// known (`Sessions::badge()`'s contract). Its headings come from
+    /// The cross-session badge, every session by name with the current one
+    /// in its place (`Sessions::badge()`'s contract). Its headings come from
     /// [`render_session_badge`] and, with `session_tree` on, each peer's tab
     /// tree from [`render_peer_children`]; `render_body` places both. Zero
     /// lines whenever `len() <= 1` (only this session, or no other session
@@ -188,9 +188,10 @@ pub struct RenderOpts {
     /// `task_lines` config: full `┊` task lines, only the compact `+N` count,
     /// or nothing.
     pub task_lines: crate::config::TaskLines,
-    /// `session_tree` config: expand the badge into a session tree — the
-    /// current session's heading above its cards, each peer's heading and
-    /// read-only tab/agent tree below them. Off (the default) keeps the
+    /// `session_tree` config: expand the badge into a session tree in badge
+    /// order — peers sorting before the current session above its heading,
+    /// the current heading above its cards, later peers below them, each
+    /// peer with its read-only tab/agent tree. Off (the default) keeps the
     /// compact badge block above the cards.
     pub session_tree: bool,
     /// The Zellij input mode the footer shows flush right on the tally line
@@ -1634,8 +1635,8 @@ fn header_rule(width: usize, now_tick: u64, working: bool, accent: &str) -> Stri
 }
 
 /// The cross-session badge: one line per session `Sessions::badge()` tracks
-/// (current-first, per its ordering contract — this function trusts that
-/// order and does not re-sort) — the headings only; with `session_tree` on,
+/// (by name, per its ordering contract — this function trusts that order
+/// and does not re-sort) — the headings only; with `session_tree` on,
 /// [`render_peer_children`] draws each peer's tree and `render_body` splits
 /// the headings around the local cards (see the separator note below).
 /// Renders ZERO lines when `entries.len() <= 1` — only the current
@@ -1677,8 +1678,11 @@ fn header_rule(width: usize, now_tick: u64, working: bool, accent: &str) -> Stri
 /// per-entry lines use): one line per entry in `entries` order, then the
 /// separator. `render_body` relies on that shape to split the lines — the
 /// whole block above the cards by default, or with `session_tree` the
-/// current heading above them and the peer headings plus separator below —
-/// and reserves all of them (`badge_heading_lines`) out of the body budget.
+/// earlier peer headings and the current heading above them and the later
+/// peer headings plus separator below —
+/// and reserves every heading it keeps (`badge_heading_lines`) out of the
+/// body budget; headings sorting before the current one may be dropped so the
+/// current line stays on the rail.
 fn render_session_badge(entries: &[BadgeEntry], opts: &RenderOpts) -> Vec<Line> {
     if entries.len() <= 1 {
         return vec![];
@@ -1828,34 +1832,51 @@ fn render_body(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) -> Vec
     // `flat.truncate(opts.height)` in `render_rail` would silently eat into
     // the footer/last row rather than the folding math accounting for it.
     //
-    // The session tree splits the badge around the local cards: the CURRENT
-    // session's heading sits above them (it heads its own cards), and every
-    // peer heading — plus the trailing separator — follows them. The current
-    // heading is found by `is_current`, never by position: until the own
-    // session name is known, the badge can hold only peers, and none of them
-    // may head the local cards. Headings (one line per entry, then the
-    // separator, in `entries` order) are always reserved; peer *children* are
+    // The session tree splits the badge around the local cards, keeping the
+    // badge's name order: peers sorting before the CURRENT session render
+    // above its heading, the current heading sits right above the cards (it
+    // heads its own cards), and the peers after it — plus the trailing
+    // separator — follow them. The current heading is found by `is_current`,
+    // never by position: until the own session name is known, the badge can
+    // hold only peers, none of them may head the local cards, and all of
+    // them follow the cards. Headings (one line per entry, then the
+    // separator, in `entries` order) are reserved once kept — only those
+    // sorting before the current one can be dropped (below); peer *children* are
     // not — they take only what's left once the cards and bottom region have
     // theirs (below).
     //
     // With `session_tree` off the badge stays one compact block — every
     // heading, then the separator — above the cards, and no peer children.
     let mut top_badge: Vec<Line> = Vec::new();
+    let mut peers_above: Vec<(Line, &BadgeEntry)> = Vec::new();
     let mut peer_headings: Vec<(Line, &BadgeEntry)> = Vec::new();
-    let mut headings = render_session_badge(&opts.badge, opts).into_iter();
-    for entry in &opts.badge {
+    let current = opts.badge.iter().position(|e| e.is_current);
+    let mut past_current = current.is_none();
+    // Headings sit right under the header and the final truncation cuts from
+    // the bottom, so when more headings sort before the current one than fit
+    // under the header, drop the earliest of them: the `•` line then lands
+    // on the last row instead of falling off the rail. Each heading drops
+    // with its own target, so lockstep holds.
+    let room = opts.height.saturating_sub(header_lines(opts.header, opts.density, has_content));
+    let skip = current.filter(|&i| room > 0 && i >= room).map_or(0, |i| i + 1 - room);
+    let mut headings = render_session_badge(&opts.badge, opts).into_iter().skip(skip);
+    for entry in opts.badge.iter().skip(skip) {
         let Some(line) = headings.next() else { break };
         if entry.is_current || !opts.session_tree {
+            past_current |= entry.is_current;
             top_badge.push(line);
-        } else {
+        } else if past_current {
             peer_headings.push((line, entry));
+        } else {
+            peers_above.push((line, entry));
         }
     }
     let mut badge_spacer = headings.next();
     if !opts.session_tree {
         top_badge.extend(badge_spacer.take());
     }
-    let badge_heading_lines = top_badge.len() + peer_headings.len() + usize::from(badge_spacer.is_some());
+    let badge_heading_lines =
+        peers_above.len() + top_badge.len() + peer_headings.len() + usize::from(badge_spacer.is_some());
 
     let (mut blocks, metas): (Vec<Vec<Line>>, Vec<RowMeta>) = rows
         .iter()
@@ -1903,9 +1924,22 @@ fn render_body(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) -> Vec
         flat.push(paint_if_cards(line, cards, width, &rail));
     }
 
-    // Tree on: the current session heads its own live tab cards, and peer
-    // sessions with their child tabs come after those cards, keeping the tree
-    // grouped. Tree off: the whole compact badge block, as before the tree.
+    // Peer sessions (in badge order: by name), each heading followed by as
+    // much of its tab tree as the leftover `child_budget` allows — earlier
+    // peers fill first, and every kept heading renders.
+    let mut peer_block = |(heading, entry): (Line, &BadgeEntry)| {
+        let children = render_peer_children(entry, child_budget, opts);
+        child_budget -= children.len();
+        std::iter::once(heading)
+            .chain(children)
+            .map(|line| paint_if_cards(line, cards, width, &rail))
+            .collect::<Vec<_>>()
+    };
+
+    // Tree on: the peers sorting before the current session, then the
+    // current session heading its own live tab cards, then the peers after
+    // it (below). Tree off: the whole compact badge block, as before the tree.
+    flat.extend(peers_above.into_iter().flat_map(&mut peer_block));
     for line in top_badge {
         flat.push(paint_if_cards(line, cards, width, &rail));
     }
@@ -1964,17 +1998,7 @@ fn render_body(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) -> Vec
         flat.push(paint_if_cards(line, cards, width, &rail));
     }
 
-    // Peer sessions (in badge order: attention first), each heading followed
-    // by as much of its tab tree as the leftover `child_budget` allows —
-    // earlier peers fill first, and headings always render.
-    for (heading, entry) in peer_headings {
-        flat.push(paint_if_cards(heading, cards, width, &rail));
-        let children = render_peer_children(entry, child_budget, opts);
-        child_budget -= children.len();
-        for line in children {
-            flat.push(paint_if_cards(line, cards, width, &rail));
-        }
-    }
+    flat.extend(peer_headings.into_iter().flat_map(&mut peer_block));
     if let Some(line) = badge_spacer {
         flat.push(paint_if_cards(line, cards, width, &rail));
     }
