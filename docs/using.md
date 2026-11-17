@@ -176,8 +176,10 @@ Zellij does not report it as working to the others. With a single session the ba
   a peer pane row to switch there and focus that pane; a peer tab row focuses
   its first listed pane. Peer rows only use the height left after your local
   tabs, the ledger, and the footer, so a short rail shows fewer of them (or
-  none); session lines always remain visible. `session_tree` controls whether
-  *your* rail draws peers' trees.
+  none); session lines stay visible. When there are more session lines than
+  the rail has rows, the ones sorting before yours give way first, so your own
+  line stays on screen. `session_tree` controls whether *your* rail draws
+  peers' trees.
 - **`session-next` / `session-prev`** move a highlight through the same order.
   The switch happens about a second after your last tap; landing back on your
   own session cancels.

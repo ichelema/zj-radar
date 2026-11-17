@@ -1847,9 +1847,17 @@ fn render_body(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) -> Vec
     let mut top_badge: Vec<Line> = Vec::new();
     let mut peers_above: Vec<(Line, &BadgeEntry)> = Vec::new();
     let mut peer_headings: Vec<(Line, &BadgeEntry)> = Vec::new();
-    let mut past_current = !opts.badge.iter().any(|e| e.is_current);
-    let mut headings = render_session_badge(&opts.badge, opts).into_iter();
-    for entry in &opts.badge {
+    let current = opts.badge.iter().position(|e| e.is_current);
+    let mut past_current = current.is_none();
+    // Headings sit right under the header and the final truncation cuts from
+    // the bottom, so when more headings sort before the current one than fit
+    // under the header, drop the earliest of them: the `•` line then lands
+    // on the last row instead of falling off the rail. Each heading drops
+    // with its own target, so lockstep holds.
+    let room = opts.height.saturating_sub(header_lines(opts.header, opts.density, has_content));
+    let skip = current.filter(|&i| room > 0 && i >= room).map_or(0, |i| i + 1 - room);
+    let mut headings = render_session_badge(&opts.badge, opts).into_iter().skip(skip);
+    for entry in opts.badge.iter().skip(skip) {
         let Some(line) = headings.next() else { break };
         if entry.is_current || !opts.session_tree {
             past_current |= entry.is_current;

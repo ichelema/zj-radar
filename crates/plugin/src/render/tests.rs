@@ -3943,6 +3943,38 @@ fn peer_trees_above_the_current_session_never_squeeze_local_tabs() {
 }
 
 #[test]
+fn the_current_line_survives_more_earlier_sessions_than_the_rail_has_rows() {
+    // Eight sessions sort before `work` and one after it. On a rail shorter
+    // than the badge, the earliest headings give way so `• work` stays on
+    // screen, in every density, tree on and off, and stays click-inert.
+    use crate::config::Density;
+    let rows: Vec<TabRow> = (1..=3).map(|n| tab(n, format!("local{n}"), display(Status::Idle, 0, 0, None))).collect();
+    let mut badge: Vec<BadgeEntry> = (0..8).map(|n| peer_with_tree(&format!("pa{n}"), 1, 1)).collect();
+    badge.push(badge_entry("work", true, 0, 0, None, false));
+    badge.push(peer_with_tree("zz", 1, 1));
+    for density in [Density::Cards, Density::Comfortable, Density::Compact] {
+        for session_tree in [false, true] {
+            for height in 3..=14 {
+                let opts = RenderOpts {
+                    height,
+                    density,
+                    badge: badge.clone(),
+                    session_tree,
+                    ..ro_full(32, 0, density, GlyphSet::Plain)
+                };
+                let rail = render_rail(&rows, &[], &opts);
+                let text = super::test_util::grid(&rail.ansi, 32);
+                let case = format!("{density:?} tree={session_tree} height={height}");
+                assert!(rail.line_count() <= height, "{case}:\n{text}");
+                let row = text.lines().position(|l| l.contains("• work"));
+                let row = row.unwrap_or_else(|| panic!("{case}: the current line fell off the rail:\n{text}"));
+                assert!(rail.targets[row].is_none(), "{case}: the current line stays click-inert:\n{text}");
+            }
+        }
+    }
+}
+
+#[test]
 fn idle_strip_sits_under_the_local_cards_not_the_peer_tree() {
     // Enough idle local tabs on a short rail to fold into the strip.
     let rows: Vec<TabRow> = (1..=20).map(|n| tab(n, format!("idle{n}"), display(Status::Idle, 0, 0, None))).collect();
