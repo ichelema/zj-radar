@@ -3984,36 +3984,72 @@ fn the_current_line_survives_more_earlier_sessions_than_the_rail_has_rows() {
 
 #[test]
 fn a_pending_selection_among_hidden_headings_stays_on_the_rail_with_the_current_line() {
-    // `work` sorts after eight peers; on a short rail the earliest headings
-    // give way, but the pending cycle selection must stay visible (and
-    // clickable) next to `• work`, however early it sorts.
+    // `work` sits among nine other sessions, last or one before the end. On a
+    // short rail headings give way, but the pending cycle selection stays
+    // visible and clickable next to `• work`, wherever it sorts. Nothing else
+    // moves: exactly as many headings as rows show, and a selection that was
+    // visible anyway leaves the rail as it was.
     use crate::config::Density;
     let rows: Vec<TabRow> = (1..=3).map(|n| tab(n, format!("local{n}"), display(Status::Idle, 0, 0, None))).collect();
     for density in [Density::Cards, Density::Comfortable, Density::Compact] {
         for session_tree in [false, true] {
-            for selected in 0..8 {
-                let mut badge: Vec<BadgeEntry> = (0..8).map(|n| peer_with_tree(&format!("pa{n}"), 1, 1)).collect();
-                badge[selected].selected = true;
-                badge.push(badge_entry("work", true, 0, 0, None, false));
-                badge.push(peer_with_tree("zz", 1, 1));
-                let header = header_lines(true, density, true);
-                for height in header + 2..=14 {
+            for with_tail in [false, true] {
+                let mut names: Vec<String> = (0..8).map(|n| format!("pa{n}")).collect();
+                names.push("work".to_string());
+                if with_tail {
+                    names.push("zz".to_string());
+                }
+                let current = 8;
+                let badge = |selected: Option<usize>| -> Vec<BadgeEntry> {
+                    names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| match i == current {
+                            true => badge_entry(name, true, 0, 0, None, false),
+                            false => BadgeEntry { selected: selected == Some(i), ..peer_with_tree(name, 1, 1) },
+                        })
+                        .collect()
+                };
+                let render = |height: usize, selected: Option<usize>| {
                     let opts = RenderOpts {
                         height,
                         density,
-                        badge: badge.clone(),
+                        badge: badge(selected),
                         session_tree,
                         ..ro_full(32, 0, density, GlyphSet::Plain)
                     };
                     let rail = render_rail(&rows, &[], &opts);
                     let text = super::test_util::grid(&rail.ansi, 32);
-                    let case = format!("{density:?} tree={session_tree} selected=pa{selected} height={height}");
-                    assert!(rail.line_count() <= height, "{case}:\n{text}");
-                    assert!(text.contains("• work"), "{case}: the current line fell off the rail:\n{text}");
-                    let row = text.lines().position(|l| l.contains(&format!("pa{selected}")));
-                    let row = row.unwrap_or_else(|| panic!("{case}: the selection is hidden:\n{text}"));
-                    let target = rail.targets[row].as_ref().unwrap_or_else(|| panic!("{case}: not clickable"));
-                    assert_eq!(target.session.as_deref(), Some(format!("pa{selected}").as_str()), "{case}");
+                    (rail, text)
+                };
+                // A heading starts with its name (peers may carry counts after it).
+                let is_heading = |line: &str, name: &str| line.split_whitespace().next() == Some(name);
+                let header = header_lines(true, density, true);
+                for height in header + 1..=14 {
+                    let room = height - header;
+                    let (_, plain) = render(height, None);
+                    for selected in (0..names.len()).filter(|&i| i != current) {
+                        let (rail, text) = render(height, Some(selected));
+                        let case =
+                            format!("{density:?} tree={session_tree} tail={with_tail} sel={selected} h={height}");
+                        assert!(rail.line_count() <= height, "{case}:\n{text}");
+                        assert!(text.contains("• work"), "{case}: the current line fell off the rail:\n{text}");
+                        let headings = text
+                            .lines()
+                            .filter(|l| l.trim() == "• work" || names.iter().any(|n| is_heading(l, n)))
+                            .count();
+                        assert_eq!(headings, room.min(names.len()), "{case}: one heading per row:\n{text}");
+                        let name = &names[selected];
+                        if room >= 2 {
+                            let row = text.lines().position(|l| is_heading(l, name));
+                            let row = row.unwrap_or_else(|| panic!("{case}: the selection is hidden:\n{text}"));
+                            let target = rail.targets[row].as_ref().unwrap_or_else(|| panic!("{case}: not clickable"));
+                            assert_eq!(target.session.as_deref(), Some(name.as_str()), "{case}");
+                        }
+                        if plain.lines().any(|l| is_heading(l, name)) {
+                            assert_eq!(text, plain, "{case}: a visible selection must not move the rail");
+                        }
+                    }
                 }
             }
         }

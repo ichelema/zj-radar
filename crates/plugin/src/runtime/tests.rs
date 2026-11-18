@@ -711,6 +711,26 @@ fn first_session_tap_on_a_short_rail_shows_the_selected_line() {
 }
 
 #[test]
+fn first_session_tap_shows_a_selected_line_that_sorts_after_the_current_one() {
+    // Nine peers sort before `work` and `zz` after it: the first tap selects
+    // `zz`, which would fall below the 8-row rail.
+    let mut rt = runtime_with_granted_permission();
+    rt.tabs_changed(vec![tab(0, "team", false)]);
+    let peers = (0..9)
+        .map(|n| format!("pa{n}"))
+        .chain(["zz".to_string()])
+        .map(|name| fresh(&format!(r#"{{"session_name":"{name}","running":0,"attention":0}}"#)))
+        .collect();
+    rt.global_attention_changed(peers);
+    assert!(!rt.render(8, 40).contains("zz"), "setup: zz is hidden before the tap");
+
+    rt.control_pipe("session-next");
+    let ansi = rt.render(8, 40);
+    assert!(ansi.contains("zz"), "the selected line must be in the frame:\n{ansi}");
+    assert!(ansi.contains('•'), "the current line must stay too:\n{ansi}");
+}
+
+#[test]
 fn session_cycle_is_inert_without_permission() {
     let mut rt = PluginRuntime::default();
     rt.session_name_changed(Some("work".into()));

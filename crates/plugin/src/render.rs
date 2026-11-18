@@ -1682,8 +1682,9 @@ fn header_rule(width: usize, now_tick: u64, working: bool, accent: &str) -> Stri
 /// peer headings plus separator below —
 /// and reserves every heading it keeps (`badge_heading_lines`) out of the
 /// body budget; headings sorting before the current one may be dropped so the
-/// current line stays on the rail, except the pending cycle selection, which
-/// takes the first row instead.
+/// current line stays on the rail, and a pending cycle selection the overflow
+/// would hide takes the first row (sorting before the current one) or the
+/// last (sorting after it).
 fn render_session_badge(entries: &[BadgeEntry], opts: &RenderOpts) -> Vec<Line> {
     if entries.len() <= 1 {
         return vec![];
@@ -1860,11 +1861,23 @@ fn render_body(rows: &[TabRow], ledger: &[LedgerLine], opts: &RenderOpts) -> Vec
     // with its own target, so lockstep holds.
     let room = opts.height.saturating_sub(header_lines(opts.header, opts.density, has_content));
     let mut skip = current.filter(|&i| room > 0 && i >= room).map_or(0, |i| i + 1 - room);
-    // A pending cycle selection among the hidden headings takes the first row
-    // and the window gives up one more (needs two rows: with one, `•` wins).
-    let pinned = opts.badge.iter().position(|e| e.selected).filter(|&s| room >= 2 && s < skip);
-    skip += usize::from(pinned.is_some());
-    let kept = |i: &usize| *i >= skip || Some(*i) == pinned;
+    // A pending cycle selection the overflow would hide (needs two rows: with
+    // one, `•` wins) keeps its row: above the current line it takes the first
+    // row and the window gives up one heading; below it, the window shrinks
+    // by one and the selection takes the last row, the headings in between
+    // giving way.
+    let selected = opts.badge.iter().position(|e| e.selected).filter(|_| room >= 2);
+    let above = selected.filter(|&s| s < skip);
+    let below = selected.zip(current).filter(|&(s, c)| s > c && s >= skip + room);
+    let mut end = usize::MAX;
+    if above.is_some() {
+        skip += 1;
+    } else if let Some((_, c)) = below {
+        skip = (c + 2).saturating_sub(room);
+        end = skip + room - 1;
+    }
+    let pinned = above.or(below.map(|(s, _)| s));
+    let kept = |i: &usize| (*i >= skip && *i < end) || Some(*i) == pinned;
     let mut headings =
         render_session_badge(&opts.badge, opts).into_iter().enumerate().filter(|(i, _)| kept(i)).map(|(_, line)| line);
     for entry in opts.badge.iter().enumerate().filter(|(i, _)| kept(i)).map(|(_, e)| e) {
