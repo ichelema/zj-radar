@@ -678,6 +678,31 @@ impl ZellijSession {
         );
     }
 
+    /// Like [`run_action`], but kill the CLI if it has not exited within
+    /// `timeout` and return `None`: a `pipe` waits for every plugin instance,
+    /// and one parked at its permission prompt never releases it.
+    pub fn action_within(&self, args: &[&str], timeout: Duration) -> Option<std::process::Output> {
+        let mut child = self
+            .isolated
+            .command("zellij")
+            .args(["--session", &self.name, "action"])
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("zellij action failed to spawn");
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Ok(Some(_)) = child.try_wait() {
+                return child.wait_with_output().ok();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        None
+    }
+
     /// Poll [`tab_names`] until `cond` holds, returning a timeline of every
     /// distinct snapshot seen (one entry per change, timestamped from the
     /// start). The bool says whether `cond` was met before `timeout`. Built
@@ -1108,8 +1133,21 @@ pub fn two_sidebar_tabs_layout(plugin_wasm: &Path) -> String {
 /// tabs opened later (`new_tab_template` names their terminal: Zellij drops a
 /// nested `children` from the template it would derive, zellij#3247).
 pub fn mini_rail_tabs_layout(plugin_wasm: &Path) -> String {
+    mini_rail_layout(plugin_wasm, &["one", "two"])
+}
+
+/// [`mini_rail_tabs_layout`] with one tab per name, the first one focused.
+pub fn mini_rail_layout(plugin_wasm: &Path, tabs: &[&str]) -> String {
     let wasm_abs = plugin_wasm.canonicalize().unwrap_or_else(|_| plugin_wasm.to_path_buf());
     let w = wasm_abs.display();
+    let tabs: String = tabs
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let focus = if i == 0 { " focus=true" } else { "" };
+            format!("    tab name=\"{name}\"{focus} {{\n        pane focus=true cwd=\"/tmp\"\n    }}\n")
+        })
+        .collect();
     format!(
         r#"layout {{
     default_tab_template {{
@@ -1138,13 +1176,7 @@ pub fn mini_rail_tabs_layout(plugin_wasm: &Path) -> String {
             pane focus=true cwd="/tmp"
         }}
     }}
-    tab name="one" focus=true {{
-        pane focus=true cwd="/tmp"
-    }}
-    tab name="two" {{
-        pane focus=true cwd="/tmp"
-    }}
-}}"#
+{tabs}}}"#
     )
 }
 

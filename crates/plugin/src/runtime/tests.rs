@@ -2185,6 +2185,47 @@ fn the_mini_rail_loads_collapsed_and_the_full_rail_does_not() {
     assert_eq!(collapses(&full.load(config())), Vec::<bool>::new());
 }
 
+/// ICH-522: a mini that asked at load, before any grant was cached, waited on
+/// a prompt in a collapsed pane nobody could answer, and Zellij held every CLI
+/// pipe for it. It asks only on `grant-ready`, which a granted full rail
+/// sends, so Zellij answers it from its cache.
+#[test]
+fn a_mini_asks_for_its_grant_only_on_grant_ready() {
+    let mut mini = runtime_with_config(mini_config());
+    let load = mini.load(mini_config());
+    assert!(!load.effects.contains(&Effect::RequestPermission), "no request at load: {:?}", load.effects);
+    assert!(!load.effects.iter().any(|e| matches!(e, Effect::SetTimeout(_))), "no tick while it waits");
+    assert_eq!(mini.permission, PermissionState::Unprompted);
+    assert_eq!(mini.control_pipe("grant-ready").effects, vec![Effect::RequestPermission]);
+    assert!(mini.permission.is_requesting());
+    assert_eq!(mini.control_pipe("grant-ready"), Outcome::default(), "it asks once");
+    mini.permission_result(true);
+    assert_eq!(mini.control_pipe("grant-ready"), Outcome::default(), "a granted mini ignores it");
+    let mut full = runtime_with_config(config());
+    full.load(config());
+    assert_eq!(full.control_pipe("grant-ready"), Outcome::default(), "a full rail asked at load");
+}
+
+/// A granted full rail sends `grant-ready` from its first manifest with
+/// another rail in its tab, ready or not: another client's mini instance may
+/// have named that pane while this client's still waits.
+#[test]
+fn a_granted_full_rail_sends_grant_ready_once_when_its_tab_has_a_mini() {
+    let signals = |o: &Outcome| o.effects.iter().filter(|e| **e == Effect::BroadcastGrantReady).count();
+    let mut full = granted_runtime();
+    assert_eq!(signals(&full.pair_changed(mini_is(true))), 1, "a ready mini");
+    assert_eq!(signals(&full.pair_changed(mini_is(true))), 0, "once per instance");
+    let mut unready = granted_runtime();
+    assert_eq!(signals(&unready.pair_changed(Pair::default())), 1, "a mini that has not named its pane");
+    let mut alone = granted_runtime();
+    assert_eq!(signals(&alone.pair_changed(Pair { alone: true, ..Pair::default() })), 0, "a layout without the mini");
+    let mut asking = runtime_with_config(config());
+    asking.load(config());
+    assert_eq!(signals(&asking.pair_changed(mini_is(true))), 0, "never before its own grant");
+    let mut mini = loaded_mini();
+    assert_eq!(signals(&mini.pair_changed(mini_row(true, false))), 0, "a mini never sends it");
+}
+
 /// The mini names its pane when it settles, not at its grant: the name is
 /// what tells the full rail it is ready.
 #[test]
@@ -2378,7 +2419,11 @@ fn a_toggle_on_a_full_rail_without_its_mini_looks_two_ticks_later() {
     };
     assert_eq!(collapses(&toggled().session_pair_changed(mini_is(false))), vec![true], "the mini came up");
     assert_eq!(collapses(&toggled().session_pair_changed(mini_is(true))), Vec::<bool>::new(), "the mini is down");
-    assert_eq!(toggled().session_pair_changed(Pair::default()), Outcome::default(), "no ready mini");
+    assert_eq!(
+        toggled().session_pair_changed(Pair::default()),
+        Outcome { render: false, effects: vec![Effect::BroadcastGrantReady] },
+        "no ready mini: nothing moves, and the first manifest tells the minis the grant is cached"
+    );
     // Its pane was collapsed by another client's instance, which knew the mini.
     let mut second_client = toggled();
     let row = second_client.session_pair_changed(Pair { collapsed: true, ..mini_is(false) });

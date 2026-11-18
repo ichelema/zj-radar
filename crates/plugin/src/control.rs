@@ -16,6 +16,9 @@ pub(crate) enum Verb {
     SessionNext,
     SessionPrev,
     SidebarToggle,
+    /// Internal: a full rail that holds the grant sends it so the minis ask
+    /// for theirs (`Effect::BroadcastGrantReady`). Not a keybind verb.
+    GrantReady,
 }
 
 /// Parse a bare verb string. Trims surrounding whitespace; case-sensitive
@@ -27,6 +30,7 @@ pub(crate) fn parse(s: &str) -> Option<Verb> {
         "session-next" => Some(Verb::SessionNext),
         "session-prev" => Some(Verb::SessionPrev),
         "sidebar-toggle" => Some(Verb::SidebarToggle),
+        "grant-ready" => Some(Verb::GrantReady),
         _ => None,
     }
 }
@@ -57,6 +61,11 @@ mod tests {
     #[test]
     fn sidebar_toggle_verb_parses() {
         assert_eq!(parse("sidebar-toggle"), Some(Verb::SidebarToggle));
+    }
+
+    #[test]
+    fn grant_ready_verb_parses() {
+        assert_eq!(parse("grant-ready"), Some(Verb::GrantReady));
     }
 
     /// docs/configuration.md is where users copy their `MessagePlugin`

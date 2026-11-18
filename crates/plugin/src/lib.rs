@@ -243,6 +243,10 @@ impl State {
                     &["zellij", "pipe", "--name", CMD_PIPE, "--", "sidebar-toggle"],
                     BTreeMap::from([("zj_radar".to_string(), "sidebar-toggle".to_string())]),
                 ),
+                Effect::BroadcastGrantReady => run_command(
+                    &["zellij", "pipe", "--name", CMD_PIPE, "--", "grant-ready"],
+                    BTreeMap::from([("zj_radar".to_string(), "grant-ready".to_string())]),
+                ),
                 Effect::WatchSession { selectable } => {
                     subscribe(&[EventType::SessionUpdate]);
                     set_selectable(selectable);

@@ -1529,6 +1529,37 @@ fn sidebar_toggle_swaps_the_full_and_mini_rail_in_every_tab() {
     eprintln!("[e2e] PASS: sidebar-toggle and » swap the rails in every tab");
 }
 
+/// ICH-522: with no cached grant the user answers the prompt on the full rail
+/// only; the collapsed mini shows none. A mini that asked at load stayed
+/// parked at its unanswerable prompt, and Zellij held every CLI pipe for it.
+/// The mini asks once its full rail holds the grant (`grant-ready`), so Zellij
+/// answers it from its cache: pipes return and the toggle reaches the mini.
+/// One tab: an unvisited tab's full rail would be parked at its own prompt.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn a_grant_answered_on_the_full_rail_reaches_the_mini() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+    // Ungranted: `start` answers the full rail's prompt the way a user would.
+    let s = ZellijSession::start(
+        &format!("zjr_mini_grant_{}", std::process::id()),
+        &mini_rail_layout(&wasm, &["one"]),
+        &wasm,
+        isolated_temp_home(),
+    );
+    let wait = Duration::from_secs(10);
+
+    let pipe = s.action_within(&["pipe", "--name", "zj_radar.cmd.v1", "--", "attention-next"], Duration::from_secs(5));
+    assert!(pipe.is_some_and(|out| out.status.success()), "a CLI pipe must return after a grant on the full rail");
+    assert!(s.wait_until(wait, |s| ready_minis(s) == 1), "the mini never got its grant: {:?}", s.panes());
+    toggle_sidebar(&s);
+    assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(4)), "toggle → mini: {:?}", s.panes());
+    eprintln!("[e2e] PASS: a grant on the full rail reaches the mini");
+}
+
 /// ICH-494: Zellij gives every client its own instance of each rail, and a
 /// new mini instance collapses its pane at load, before it can know the
 /// session shows its minis. A client that attaches or detaches must leave

@@ -99,12 +99,15 @@ const STALE_FIRE_ELAPSED_S: f64 = 5.0;
 /// moves a client that is typing at the moment someone else presses less often.
 const KEYBIND_INPUT_WINDOW_MS: u64 = 100;
 
-/// Our permission request: every instance requests at `load`, and Zellij
+/// Our permission request: a full rail requests at `load`, and Zellij
 /// answers `Granted` from its cache when `zj-radar setup` pre-wrote the grant
-/// (`setup/preseed.rs`), so only an ungranted first run shows a prompt.
+/// (`setup/preseed.rs`), so only an ungranted first run shows a prompt. A mini
+/// requests on its full rail's `grant-ready`, once the grant is cached
+/// (`PluginRuntime::grant_ready`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum PermissionState {
-    /// Before `load`: not granted, not requesting.
+    /// Not granted, not requesting: before `load`, and a mini until
+    /// `grant-ready`.
     #[default]
     Unprompted,
     /// Our request is in flight; the pane is selectable and each tick
@@ -196,6 +199,10 @@ pub(crate) enum Effect {
     /// only the clicked instance; every instance, this one included, toggles
     /// when the broadcast comes back.
     BroadcastSidebarToggle,
+    /// Broadcast `grant-ready` on `zj_radar.cmd.v1` the same way: this full
+    /// rail holds the grant, so every mini that has not asked yet asks now
+    /// and Zellij answers it from its cache.
+    BroadcastGrantReady,
     /// Ask for one `SessionUpdate`: the session's manifest, and the only one
     /// that reaches a rail whose tab is in the background. The glue
     /// subscribes, re-declares `selectable` (Zellij answers every such
@@ -458,6 +465,8 @@ pub(crate) struct PluginRuntime {
     /// Full rail: the latest manifest shows no other rail pane in its tab, so
     /// there is no mini to look for.
     alone: bool,
+    /// Full rail: it has broadcast `grant-ready` (`Effect::BroadcastGrantReady`).
+    grant_ready_sent: bool,
     /// Mini only: it has taken its place from a manifest (see
     /// [`settle`](Self::settle)).
     settled: bool,
@@ -538,8 +547,14 @@ impl PluginRuntime {
         // Load's single clock capture, stored eagerly (and reused by the arm
         // below, keeping one "now" per event).
         self.last_now_epoch_s = crate::clock::now_epoch_s();
-        self.permission = PermissionState::Requesting;
-        let mut effects = vec![Effect::RequestPermission];
+        // A mini waits for `grant-ready`: asked now, before any grant is
+        // cached, its prompt would sit in a collapsed pane nobody can answer,
+        // and Zellij would hold every CLI pipe for it (ICH-522).
+        let mut effects = Vec::new();
+        if !self.config.mini {
+            self.permission = PermissionState::Requesting;
+            effects.push(Effect::RequestPermission);
+        }
         // Pre-grant Zellij withholds the state events that would otherwise
         // trigger a paint (they need ReadApplicationState), so this timer is
         // the only thing that gets the needs_permission screen onto the rail.
@@ -548,8 +563,7 @@ impl PluginRuntime {
         // manifest it can only be *selectable*: going passive here is what
         // closed a rail-only tab (`desired_selectable`).
         self.sync_selectable(&mut effects);
-        // The mini rail starts collapsed, granted or not: until it is, Zellij's
-        // permission prompt would be squeezed into 4 columns. Blind, since no
+        // The mini rail starts collapsed, granted or not. Blind, since no
         // state reaches a plugin before its grant: `settle` brings it back up
         // where the session shows its minis.
         if self.config.mini {
@@ -866,6 +880,8 @@ impl PluginRuntime {
         let dir = match verb {
             // Session-wide, so none of the gates below apply (see `sidebar_toggle`).
             Verb::SidebarToggle => return self.sidebar_toggle(),
+            // Reaches a mini before its grant, so no gate applies either.
+            Verb::GrantReady => return self.grant_ready(),
             Verb::AttentionNext | Verb::SessionNext => Direction::Next,
             Verb::AttentionPrev | Verb::SessionPrev => Direction::Prev,
         };
@@ -922,6 +938,17 @@ impl PluginRuntime {
         Outcome::with_effects(false, effects)
     }
 
+    /// `grant-ready`: a full rail holds the grant, so Zellij has it cached
+    /// and answers this mini's request at once, with no prompt. Only a mini
+    /// that has not asked yet asks (see `load`); any other instance ignores it.
+    fn grant_ready(&mut self) -> Outcome {
+        if !self.config.mini || self.permission != PermissionState::Unprompted {
+            return Outcome::none();
+        }
+        self.permission = PermissionState::Requesting;
+        Outcome::with_effects(false, vec![Effect::RequestPermission])
+    }
+
     /// A manifest's word on this rail's pair (see [`Pair`]).
     ///
     /// Each rail follows the other into mini mode only, on the edge: the mini
@@ -948,12 +975,21 @@ impl PluginRuntime {
         } else if pair.sibling.is_none() && self.collapsed {
             self.set_collapsed(false, &mut effects); // never a tab with no rail
         }
-        if was.is_some() != pair.sibling.is_some() && !self.collapsed {
+        let mut outcome = if was.is_some() != pair.sibling.is_some() && !self.collapsed {
             // The header's `«` comes or goes: repaint past the rows-diff gate.
             let change = RadarChange { render: true, force_render: true, ..RadarChange::default() };
-            return self.project(effects, change, self.last_now_epoch_s);
+            self.project(effects, change, self.last_now_epoch_s)
+        } else {
+            self.collapse_outcome(effects)
+        };
+        // Once per instance, whether or not the mini looks ready: another
+        // client's instance may have named the pane, while this client's mini
+        // instance still waits.
+        if self.permission.granted() && !pair.alone && !self.grant_ready_sent {
+            self.grant_ready_sent = true;
+            outcome.effects.push(Effect::BroadcastGrantReady);
         }
-        self.collapse_outcome(effects)
+        outcome
     }
 
     /// A mini takes its place from its first manifest, once: shown while its
