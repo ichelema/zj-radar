@@ -203,6 +203,9 @@ pub(crate) enum Effect {
     /// rail holds the grant, so every mini that has not asked yet asks now
     /// and Zellij answers it from its cache.
     BroadcastGrantReady,
+    /// One `set_timeout` of this many milliseconds: a mini's wait between
+    /// `grant-ready` and its request (`PluginRuntime::grant_ready`).
+    ArmGrantWait(u64),
     /// Ask for one `SessionUpdate`: the session's manifest, and the only one
     /// that reaches a rail whose tab is in the background. The glue
     /// subscribes, re-declares `selectable` (Zellij answers every such
@@ -428,6 +431,9 @@ pub(crate) struct PluginRuntime {
     /// asked only by [`control`](Self::control), once per verb that passed
     /// every cheaper gate. Unset (host tests), or a failed read, is unknown.
     pub(crate) client_tab: Option<fn() -> Option<usize>>,
+    /// This pane's plugin id (`get_plugin_ids`), set by the wasm glue at
+    /// load: a mini's slot in the `grant-ready` wait ([`grant_wait_ms`]).
+    pub(crate) plugin_id: u32,
     /// The tab position the latest manifest located this plugin's own pane
     /// in (`None` until one has). Refreshed by `own_plugin_tab_changed` on
     /// every `PaneUpdate`, so — unlike `RadarState`'s naming ownership, which
@@ -465,8 +471,13 @@ pub(crate) struct PluginRuntime {
     /// Full rail: the latest manifest shows no other rail pane in its tab, so
     /// there is no mini to look for.
     alone: bool,
+    /// Full rail: a manifest has shown another rail pane in its tab.
+    rail_in_tab: bool,
     /// Full rail: it has broadcast `grant-ready` (`Effect::BroadcastGrantReady`).
     grant_ready_sent: bool,
+    /// Mini only: `grant-ready` came and its wait is armed
+    /// (`Effect::ArmGrantWait`); the next fire asks for the grant.
+    grant_wait: bool,
     /// Mini only: it has taken its place from a manifest (see
     /// [`settle`](Self::settle)).
     settled: bool,
@@ -481,6 +492,19 @@ pub(crate) struct PluginRuntime {
 /// How many ticks a toggle's look waits ([`PluginRuntime::look_in`]): two, so
 /// at least one whole second passes and the manifest shows every rail's flip.
 const LOOK_TICKS: u8 = 2;
+
+/// How long a mini waits after `grant-ready` before it asks for its grant,
+/// spread by plugin id. Zellij rewrites `permissions.kdl` on every grant,
+/// truncating it first, and a request that reads it in that instant finds no
+/// grant, so the mini parks at a prompt nobody sees (ICH-522). Asking all at
+/// once, minis hit that while the session's other grants are being written;
+/// the base lets that burst pass and the slots keep minis from asking
+/// together. 17 slots, a prime: plugin ids step by a fixed amount per tab,
+/// so 17 consecutive tabs never share one.
+/// ponytail: rarer collisions, not none (Zellij's write is not atomic); upgrade when Zellij writes the cache atomically.
+fn grant_wait_ms(plugin_id: u32) -> u64 {
+    500 + u64::from(plugin_id % 17) * 100
+}
 
 /// A rail's pair as a manifest has it (see [`PluginRuntime::pair_changed`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -667,6 +691,12 @@ impl PluginRuntime {
     /// the wall-clock-keyed gates in here move in lockstep with simulated
     /// fires without any clock to mock.
     pub(crate) fn timer(&mut self, elapsed_s: f64, now_epoch_s: u64) -> Outcome {
+        // A waiting mini's one fire is its `grant-ready` wait: no cadence arms
+        // before the grant, so the chain has nothing in flight to retire.
+        if std::mem::take(&mut self.grant_wait) {
+            self.permission = PermissionState::Requesting;
+            return Outcome::with_effects(false, vec![Effect::RequestPermission]);
+        }
         // Retire one in-flight fire; a stale one (see `TimerChain::on_fire`)
         // is swallowed whole.
         if let Fire::Stale = self.timer_chain.on_fire(elapsed_s) {
@@ -939,14 +969,26 @@ impl PluginRuntime {
     }
 
     /// `grant-ready`: a full rail holds the grant, so Zellij has it cached
-    /// and answers this mini's request at once, with no prompt. Only a mini
-    /// that has not asked yet asks (see `load`); any other instance ignores it.
+    /// and answers this mini's request with no prompt. Only a mini that has
+    /// not asked yet arms its wait (see `load`, [`grant_wait_ms`]); the fire
+    /// asks (`timer`). Any other instance ignores it.
     fn grant_ready(&mut self) -> Outcome {
-        if !self.config.mini || self.permission != PermissionState::Unprompted {
+        if !self.config.mini || self.permission != PermissionState::Unprompted || self.grant_wait {
             return Outcome::none();
         }
-        self.permission = PermissionState::Requesting;
-        Outcome::with_effects(false, vec![Effect::RequestPermission])
+        self.grant_wait = true;
+        Outcome::with_effects(false, vec![Effect::ArmGrantWait(grant_wait_ms(self.plugin_id))])
+    }
+
+    /// A granted full rail tells the minis once that the grant is cached,
+    /// from whichever comes last of its grant and a manifest with another
+    /// rail in its tab: Zellij can deliver a manifest before the grant's own
+    /// event, and a quiet tab may send no other.
+    fn send_grant_ready(&mut self, effects: &mut Vec<Effect>) {
+        if !self.config.mini && self.permission.granted() && self.rail_in_tab && !self.grant_ready_sent {
+            self.grant_ready_sent = true;
+            effects.push(Effect::BroadcastGrantReady);
+        }
     }
 
     /// A manifest's word on this rail's pair (see [`Pair`]).
@@ -982,13 +1024,10 @@ impl PluginRuntime {
         } else {
             self.collapse_outcome(effects)
         };
-        // Once per instance, whether or not the mini looks ready: another
-        // client's instance may have named the pane, while this client's mini
-        // instance still waits.
-        if self.permission.granted() && !pair.alone && !self.grant_ready_sent {
-            self.grant_ready_sent = true;
-            outcome.effects.push(Effect::BroadcastGrantReady);
-        }
+        // Whether or not the mini looks ready: another client's instance may
+        // have named the pane, while this client's mini instance still waits.
+        self.rail_in_tab |= !pair.alone;
+        self.send_grant_ready(&mut outcome.effects);
         outcome
     }
 
@@ -1226,6 +1265,7 @@ impl PluginRuntime {
         if granted && self.own_tab_position.is_none() {
             self.watch_session(&mut effects);
         }
+        self.send_grant_ready(&mut effects);
         Outcome::with_effects(true, effects)
     }
 

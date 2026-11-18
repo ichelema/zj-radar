@@ -2196,7 +2196,10 @@ fn a_mini_asks_for_its_grant_only_on_grant_ready() {
     assert!(!load.effects.contains(&Effect::RequestPermission), "no request at load: {:?}", load.effects);
     assert!(!load.effects.iter().any(|e| matches!(e, Effect::SetTimeout(_))), "no tick while it waits");
     assert_eq!(mini.permission, PermissionState::Unprompted);
-    assert_eq!(mini.control_pipe("grant-ready").effects, vec![Effect::RequestPermission]);
+    mini.plugin_id = 4;
+    assert_eq!(mini.control_pipe("grant-ready").effects, vec![Effect::ArmGrantWait(900)], "it waits its slot");
+    assert_eq!(mini.control_pipe("grant-ready"), Outcome::default(), "one wait");
+    assert_eq!(mini.timer(0.9, 0).effects, vec![Effect::RequestPermission], "the fire asks");
     assert!(mini.permission.is_requesting());
     assert_eq!(mini.control_pipe("grant-ready"), Outcome::default(), "it asks once");
     mini.permission_result(true);
@@ -2222,8 +2225,29 @@ fn a_granted_full_rail_sends_grant_ready_once_when_its_tab_has_a_mini() {
     let mut asking = runtime_with_config(config());
     asking.load(config());
     assert_eq!(signals(&asking.pair_changed(mini_is(true))), 0, "never before its own grant");
+    // Zellij can deliver a manifest before the grant's own event.
+    assert_eq!(signals(&asking.permission_result(true)), 1, "the grant sends it");
+    assert_eq!(signals(&asking.pair_changed(mini_is(true))), 0, "and only it");
+    let mut no_manifest = runtime_with_config(config());
+    no_manifest.load(config());
+    assert_eq!(signals(&no_manifest.permission_result(true)), 0, "no manifest yet: no mini known");
+    let mut alone_first = runtime_with_config(config());
+    alone_first.load(config());
+    alone_first.pair_changed(Pair { alone: true, ..Pair::default() });
+    assert_eq!(signals(&alone_first.permission_result(true)), 0, "a layout without the mini, granted late");
     let mut mini = loaded_mini();
     assert_eq!(signals(&mini.pair_changed(mini_row(true, false))), 0, "a mini never sends it");
+}
+
+/// The minis of one layout wait 0.5 to 2.1 s, each in its own 100 ms slot:
+/// plugin ids step by a fixed amount per tab, and 17 is prime.
+#[test]
+fn the_grant_wait_gives_each_of_17_tabs_its_own_slot() {
+    for step in [1, 2, 3, 4, 6, 8] {
+        let waits: std::collections::BTreeSet<u64> = (0..17).map(|tab| grant_wait_ms(13 + tab * step)).collect();
+        assert_eq!(waits.len(), 17, "plugin ids stepping by {step}");
+        assert!(waits.iter().all(|ms| (500..=2100).contains(ms)), "{waits:?}");
+    }
 }
 
 /// The mini names its pane when it settles, not at its grant: the name is

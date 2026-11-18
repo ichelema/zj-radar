@@ -1560,6 +1560,75 @@ fn a_grant_answered_on_the_full_rail_reaches_the_mini() {
     eprintln!("[e2e] PASS: a grant on the full rail reaches the mini");
 }
 
+/// `(names, every_tab)` for the many-tab grant tests: twelve tab names, and
+/// whether every tab's terminal starts at column `x`.
+fn twelve_tabs() -> (Vec<String>, impl Fn(&ZellijSession, u64) -> bool) {
+    ((1..=12).map(|i| format!("t{i}")).collect(), |s: &ZellijSession, x: u64| {
+        (0..12).all(|tab| terminal_x(s, tab) == Some(x))
+    })
+}
+
+/// ICH-522 review: with the grant cached, every mini asks after
+/// `grant-ready`. Zellij truncates `permissions.kdl` before it writes each
+/// grant, so minis that asked together sometimes read it empty and parked at
+/// a prompt nobody sees, holding every CLI pipe. Each now waits its own slot.
+/// One run cannot show the race is gone; a parked mini fails it.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn the_minis_of_twelve_tabs_get_their_cached_grant() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+    let (names, _) = twelve_tabs();
+    let tabs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let s = ZellijSession::start(
+        &format!("zjr_mini12_{}", std::process::id()),
+        &mini_rail_layout(&wasm, &tabs),
+        &wasm,
+        pre_grant_permissions(&wasm),
+    );
+
+    assert!(s.wait_until(Duration::from_secs(30), |s| ready_minis(s) == 12), "a mini parked: {:?}", s.panes());
+    let pipe = s.action_within(&["pipe", "--name", "zj_radar.cmd.v1", "--", "attention-next"], Duration::from_secs(5));
+    assert!(pipe.is_some_and(|out| out.status.success()), "a parked mini holds every CLI pipe");
+    eprintln!("[e2e] PASS: the minis of twelve tabs got their cached grant");
+}
+
+/// The same race on attach: a second client brings its own instance of every
+/// rail, and its twelve minis ask after `grant-ready`. Every tab must stay on
+/// the mini rail, and CLI pipes must keep returning.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn a_client_attaching_to_twelve_mini_tabs_keeps_every_mini() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+    let (names, every_tab) = twelve_tabs();
+    let tabs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let s = ZellijSession::start(
+        &format!("zjr_mini12c_{}", std::process::id()),
+        &mini_rail_layout(&wasm, &tabs),
+        &wasm,
+        pre_grant_permissions(&wasm),
+    );
+    let wait = Duration::from_secs(30);
+
+    assert!(s.wait_until(wait, |s| ready_minis(s) == 12), "a mini parked: {:?}", s.panes());
+    toggle_sidebar(&s);
+    assert!(s.wait_until(wait, |s| every_tab(s, 4)), "toggle → mini in every tab: {:?}", s.panes());
+
+    let _other = s.attach_client();
+    std::thread::sleep(Duration::from_secs(5)); // past the last mini's wait (2.1 s)
+    let pipe = s.action_within(&["pipe", "--name", "zj_radar.cmd.v1", "--", "attention-next"], Duration::from_secs(5));
+    assert!(pipe.is_some_and(|out| out.status.success()), "a parked mini of the second client holds every CLI pipe");
+    assert!(s.wait_until(wait, |s| every_tab(s, 4)), "a tab lost its mini rail: {:?}", s.panes());
+    eprintln!("[e2e] PASS: a second client kept every mini of twelve tabs");
+}
+
 /// ICH-494: Zellij gives every client its own instance of each rail, and a
 /// new mini instance collapses its pane at load, before it can know the
 /// session shows its minis. A client that attaches or detaches must leave

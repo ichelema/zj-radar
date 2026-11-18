@@ -247,6 +247,7 @@ impl State {
                     &["zellij", "pipe", "--name", CMD_PIPE, "--", "grant-ready"],
                     BTreeMap::from([("zj_radar".to_string(), "grant-ready".to_string())]),
                 ),
+                Effect::ArmGrantWait(ms) => set_timeout(ms as f64 / 1000.0),
                 Effect::WatchSession { selectable } => {
                     subscribe(&[EventType::SessionUpdate]);
                     set_selectable(selectable);
@@ -419,6 +420,7 @@ impl ZellijPlugin for State {
         ]);
         let ids = get_plugin_ids();
         self.plugin_id = Some(ids.plugin_id);
+        self.runtime.plugin_id = ids.plugin_id;
         self.mini_title = format!("{} {}", runtime::MINI_PANE_TITLE, ids.zellij_pid);
         self.runtime.client_tab = Some(client_tab);
         let outcome = self.runtime.load(config::Config::from_map(&config));
