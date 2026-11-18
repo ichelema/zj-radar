@@ -313,6 +313,7 @@ impl State {
             named: own.title == self.mini_title,
             sibling: rails().find(|p| ready_mini(p) != is_mini).map(|p| p.is_collapsed),
             alone: rails().next().is_none(),
+            other_rail: rails().next().map(|p| p.id),
             peer_mini_shown: manifest
                 .panes
                 .iter()

@@ -329,6 +329,12 @@ impl TimerChain {
         Fire::Live
     }
 
+    /// No fire in flight: a timer armed now outside the chain (a mini's
+    /// `grant-ready` wait) is the only one that can fire.
+    fn idle(&self) -> bool {
+        self.pending_fires == 0
+    }
+
     /// The currently armed cadence (`None` = fully disarmed). Read-only —
     /// the battery-property tests assert arm/disarm through this.
     #[cfg(test)]
@@ -480,6 +486,8 @@ pub(crate) struct PluginRuntime {
     /// Full rail: the latest manifest shows every other tab's ready mini
     /// (`Pair::peers_ready`).
     peers_ready: bool,
+    /// Full rail: the pane id of its mini, last seen (`Pair::other_rail`).
+    other_rail: Option<u32>,
     /// Full rail: it has broadcast `grant-ready` (`Effect::BroadcastGrantReady`).
     grant_ready_sent: bool,
     /// Mini only: `grant-ready` came and its wait is armed
@@ -532,6 +540,9 @@ pub(crate) struct Pair {
     /// Every other tab shows its ready mini (see
     /// [`PluginRuntime::send_grant_ready`]).
     pub peers_ready: bool,
+    /// The pane id of the tab's other rail pane, ready or not: a full rail's
+    /// mini.
+    pub other_rail: Option<u32>,
 }
 
 /// See [`PluginRuntime::last_render_key`].
@@ -702,8 +713,9 @@ impl PluginRuntime {
     /// the wall-clock-keyed gates in here move in lockstep with simulated
     /// fires without any clock to mock.
     pub(crate) fn timer(&mut self, elapsed_s: f64, now_epoch_s: u64) -> Outcome {
-        // A waiting mini's one fire is its `grant-ready` wait: no cadence arms
-        // before the grant, so the chain has nothing in flight to retire.
+        // A waiting mini's fire is its `grant-ready` wait: the wait is armed
+        // only with no chain fire in flight, and no cadence arms while it is
+        // out (`grant_ready`, `desired_cadence`).
         if std::mem::take(&mut self.grant_wait) {
             self.permission = PermissionState::Requesting;
             return Outcome::with_effects(false, vec![Effect::RequestPermission]);
@@ -989,7 +1001,8 @@ impl PluginRuntime {
         if !self.config.mini || self.permission != PermissionState::Unprompted || self.grant_wait {
             return Outcome::none();
         }
-        if now {
+        // With a chain fire in flight, a wait's fire could not be told from it.
+        if now || !self.timer_chain.idle() {
             self.permission = PermissionState::Requesting;
             return Outcome::with_effects(false, vec![Effect::RequestPermission]);
         }
@@ -1050,6 +1063,14 @@ impl PluginRuntime {
         // have named the pane, while this client's mini instance still waits.
         self.rail_in_tab |= !pair.alone;
         self.peers_ready = pair.peers_ready;
+        // A mini pane opened again has a new id, and an instance that never
+        // asked: tell it too. A reloaded mini keeps its id and is not seen.
+        if let Some(id) = pair.other_rail {
+            if self.other_rail.is_some_and(|seen| seen != id) {
+                self.grant_ready_sent = false;
+            }
+            self.other_rail = Some(id);
+        }
         self.send_grant_ready(&mut outcome.effects);
         outcome
     }
@@ -1441,7 +1462,9 @@ impl PluginRuntime {
     /// `now_epoch_s` is the event's single clock capture, so one event never
     /// sees two different "now"s.
     fn desired_cadence(&self, now_epoch_s: u64) -> Option<Cadence> {
-        if self.permission.denied() {
+        // A mini's `grant-ready` wait is a timer the chain does not count:
+        // while it is out, no arm, so its fire is the only one (`timer`).
+        if self.permission.denied() || self.grant_wait {
             return None;
         }
         if self.permission.is_requesting()

@@ -2264,6 +2264,44 @@ fn only_a_tab_opened_at_rest_tells_its_mini_to_ask_now() {
     assert_eq!(waiting.control_pipe("grant-ready-now"), Outcome::default(), "a waiting mini keeps its slot");
 }
 
+/// The `grant-ready` wait is a timer the chain does not count. It is armed
+/// only with no chain fire in flight, and nothing arms while it is out, so
+/// the next fire is the wait's. Otherwise a chain fire could be taken for it,
+/// and the chain would end up with a fire it does not count.
+#[test]
+fn the_grant_wait_never_shares_a_fire_with_the_timer_chain() {
+    let mut waiting = runtime_with_config(mini_config());
+    waiting.load(mini_config());
+    waiting.control_pipe("grant-ready");
+    waiting.look_in = LOOK_TICKS; // anything that would want Fast ticks
+    let mut effects = Vec::new();
+    waiting.arm_timer_if_needed(0, &mut effects);
+    assert_eq!(effects, Vec::new(), "no arm while the wait is out");
+    assert_eq!(waiting.timer(0.9, 0).effects, vec![Effect::RequestPermission], "the fire is the wait's");
+
+    let mut busy = runtime_with_config(mini_config());
+    busy.load(mini_config());
+    busy.look_in = LOOK_TICKS;
+    let mut effects = Vec::new();
+    busy.arm_timer_if_needed(0, &mut effects);
+    assert_eq!(effects, vec![Effect::SetTimeout(Cadence::Fast)], "a chain fire in flight");
+    assert_eq!(busy.control_pipe("grant-ready").effects, vec![Effect::RequestPermission], "it asks at once");
+}
+
+/// A mini pane opened again is a new pane, with an instance that never asked:
+/// its full rail tells it too. The same pane in a later manifest is not told
+/// twice.
+#[test]
+fn a_mini_pane_opened_again_is_told_the_grant_is_ready() {
+    let signals = |o: &Outcome| o.effects.iter().filter(|e| matches!(e, Effect::BroadcastGrantReady { .. })).count();
+    let with = |id| Pair { other_rail: Some(id), ..Pair::default() };
+    let mut full = granted_runtime();
+    assert_eq!(signals(&full.pair_changed(with(5))), 1);
+    assert_eq!(signals(&full.pair_changed(with(5))), 0, "the same mini");
+    assert_eq!(signals(&full.pair_changed(Pair { alone: true, ..Pair::default() })), 0, "the mini closed");
+    assert_eq!(signals(&full.pair_changed(with(9))), 1, "a mini opened again");
+}
+
 /// The minis of one layout wait 0.5 to 2.1 s, each in its own 100 ms slot:
 /// plugin ids step by a fixed amount per tab, and 17 is prime.
 #[test]
