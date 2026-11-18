@@ -167,7 +167,11 @@ exception: a working Opencode pane counts only in its own session, because
 Zellij does not report it as working to the others. With a single session the badge is invisible.
 Your own line always stays on screen: when the session lines do not fit under
 the header, just enough of the sessions sorting before yours are hidden to keep
-it on the last row, and lines past the bottom of the rail are cut.
+it on the last row, and lines past the bottom of the rail are cut. A session
+you are cycling to with `session-next` or `session-prev` stays on screen too,
+next to your own line, as long as the lines have room for two: if it would be
+hidden, it takes the first row when it sorts before yours and the last row when
+it sorts after.
 
 - **Click a line** to switch to that session, landing on a pane that needs
   you if it has one.
