@@ -678,10 +678,21 @@ impl ZellijSession {
         );
     }
 
-    /// Like [`run_action`], but kill the CLI if it has not exited within
-    /// `timeout` and return `None`: a `pipe` waits for every plugin instance,
-    /// and one parked at its permission prompt never releases it.
-    pub fn action_within(&self, args: &[&str], timeout: Duration) -> Option<std::process::Output> {
+    /// Like [`run_action_checked`], but kill the CLI if it has not exited
+    /// within `timeout`: a `pipe` waits for every plugin instance, and one
+    /// parked at its permission prompt never releases it. The `Err` names
+    /// the failure with what the CLI printed. Its output is drained as it
+    /// comes, so a chatty CLI cannot block on a full pipe.
+    pub fn action_within(&self, args: &[&str], timeout: Duration) -> Result<(), String> {
+        fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<String> {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = pipe.read_to_end(&mut buf);
+                }
+                String::from_utf8_lossy(&buf).into_owned()
+            })
+        }
         let mut child = self
             .isolated
             .command("zellij")
@@ -691,16 +702,28 @@ impl ZellijSession {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("zellij action failed to spawn");
+        let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
         let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if let Ok(Some(_)) = child.try_wait() {
-                return child.wait_with_output().ok();
+        let status = loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
             }
             std::thread::sleep(Duration::from_millis(50));
+        };
+        let (stdout, stderr) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
+        let action = args.join(" ");
+        match status {
+            Some(status) if status.success() => Ok(()),
+            Some(status) => Err(format!("`zellij action {action}` failed ({status}): {stderr}")),
+            None => Err(format!(
+                "`zellij action {action}` still running after {timeout:?}; stdout: {stdout:?}; stderr: {stderr:?}"
+            )),
         }
-        let _ = child.kill();
-        let _ = child.wait();
-        None
     }
 
     /// Poll [`tab_names`] until `cond` holds, returning a timeline of every

@@ -1553,7 +1553,9 @@ fn a_grant_answered_on_the_full_rail_reaches_the_mini() {
     let wait = Duration::from_secs(10);
 
     let pipe = s.action_within(&["pipe", "--name", "zj_radar.cmd.v1", "--", "attention-next"], Duration::from_secs(5));
-    assert!(pipe.is_some_and(|out| out.status.success()), "a CLI pipe must return after a grant on the full rail");
+    if let Err(e) = pipe {
+        panic!("a CLI pipe must return after a grant on the full rail: {e}");
+    }
     assert!(s.wait_until(wait, |s| ready_minis(s) == 1), "the mini never got its grant: {:?}", s.panes());
     toggle_sidebar(&s);
     assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(4)), "toggle → mini: {:?}", s.panes());
@@ -1592,7 +1594,9 @@ fn the_minis_of_twelve_tabs_get_their_cached_grant() {
 
     assert!(s.wait_until(Duration::from_secs(30), |s| ready_minis(s) == 12), "a mini parked: {:?}", s.panes());
     let pipe = s.action_within(&["pipe", "--name", "zj_radar.cmd.v1", "--", "attention-next"], Duration::from_secs(5));
-    assert!(pipe.is_some_and(|out| out.status.success()), "a parked mini holds every CLI pipe");
+    if let Err(e) = pipe {
+        panic!("a parked mini holds every CLI pipe: {e}");
+    }
     eprintln!("[e2e] PASS: the minis of twelve tabs got their cached grant");
 }
 
@@ -1624,7 +1628,9 @@ fn a_client_attaching_to_twelve_mini_tabs_keeps_every_mini() {
     let _other = s.attach_client();
     std::thread::sleep(Duration::from_secs(5)); // past the last mini's wait (2.1 s)
     let pipe = s.action_within(&["pipe", "--name", "zj_radar.cmd.v1", "--", "attention-next"], Duration::from_secs(5));
-    assert!(pipe.is_some_and(|out| out.status.success()), "a parked mini of the second client holds every CLI pipe");
+    if let Err(e) = pipe {
+        panic!("a parked mini of the second client holds every CLI pipe: {e}");
+    }
     assert!(s.wait_until(wait, |s| every_tab(s, 4)), "a tab lost its mini rail: {:?}", s.panes());
     eprintln!("[e2e] PASS: a second client kept every mini of twelve tabs");
 }
