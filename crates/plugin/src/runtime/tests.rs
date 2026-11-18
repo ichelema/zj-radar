@@ -2214,7 +2214,7 @@ fn a_mini_asks_for_its_grant_only_on_grant_ready() {
 /// have named that pane while this client's still waits.
 #[test]
 fn a_granted_full_rail_sends_grant_ready_once_when_its_tab_has_a_mini() {
-    let signals = |o: &Outcome| o.effects.iter().filter(|e| **e == Effect::BroadcastGrantReady).count();
+    let signals = |o: &Outcome| o.effects.iter().filter(|e| matches!(e, Effect::BroadcastGrantReady { .. })).count();
     let mut full = granted_runtime();
     assert_eq!(signals(&full.pair_changed(mini_is(true))), 1, "a ready mini");
     assert_eq!(signals(&full.pair_changed(mini_is(true))), 0, "once per instance");
@@ -2237,6 +2237,31 @@ fn a_granted_full_rail_sends_grant_ready_once_when_its_tab_has_a_mini() {
     assert_eq!(signals(&alone_first.permission_result(true)), 0, "a layout without the mini, granted late");
     let mut mini = loaded_mini();
     assert_eq!(signals(&mini.pair_changed(mini_row(true, false))), 0, "a mini never sends it");
+}
+
+/// A tab opened in a session at rest needs no wait: every other tab shows its
+/// ready mini and this tab's is not ready, so only its mini asks. At startup
+/// the other minis are not ready; on attach this tab's is (another client's
+/// instance named it).
+#[test]
+fn only_a_tab_opened_at_rest_tells_its_mini_to_ask_now() {
+    let sent = |pair: Pair| {
+        let mut full = granted_runtime();
+        full.pair_changed(pair).effects.into_iter().find(|e| matches!(e, Effect::BroadcastGrantReady { .. }))
+    };
+    let at_rest = Pair { peers_ready: true, ..Pair::default() };
+    assert_eq!(sent(at_rest), Some(Effect::BroadcastGrantReady { now: true }), "a new tab");
+    assert_eq!(sent(Pair::default()), Some(Effect::BroadcastGrantReady { now: false }), "startup");
+    let attach = Pair { peers_ready: true, ..mini_is(true) };
+    assert_eq!(sent(attach), Some(Effect::BroadcastGrantReady { now: false }), "attach");
+
+    let mut mini = runtime_with_config(mini_config());
+    mini.load(mini_config());
+    assert_eq!(mini.control_pipe("grant-ready-now").effects, vec![Effect::RequestPermission], "no wait");
+    let mut waiting = runtime_with_config(mini_config());
+    waiting.load(mini_config());
+    waiting.control_pipe("grant-ready");
+    assert_eq!(waiting.control_pipe("grant-ready-now"), Outcome::default(), "a waiting mini keeps its slot");
 }
 
 /// The minis of one layout wait 0.5 to 2.1 s, each in its own 100 ms slot:
@@ -2445,7 +2470,7 @@ fn a_toggle_on_a_full_rail_without_its_mini_looks_two_ticks_later() {
     assert_eq!(collapses(&toggled().session_pair_changed(mini_is(true))), Vec::<bool>::new(), "the mini is down");
     assert_eq!(
         toggled().session_pair_changed(Pair::default()),
-        Outcome { render: false, effects: vec![Effect::BroadcastGrantReady] },
+        Outcome { render: false, effects: vec![Effect::BroadcastGrantReady { now: false }] },
         "no ready mini: nothing moves, and the first manifest tells the minis the grant is cached"
     );
     // Its pane was collapsed by another client's instance, which knew the mini.

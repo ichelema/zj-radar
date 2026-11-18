@@ -1695,10 +1695,17 @@ fn a_tab_opened_in_mini_mode_comes_up_mini() {
 
     assert!(s.wait_until(wait, |s| ready_minis(s) == 2), "the mini rails never named their panes: {:?}", s.panes());
     toggle_sidebar(&s);
-    assert!(s.wait_until(wait, |s| terminal_x(s, 0) == Some(4)), "toggle → mini: {:?}", s.panes());
+    // Tab two, never visited, follows the toggle a second or two late.
+    let both = |s: &ZellijSession| (0..2).all(|tab| terminal_x(s, tab) == Some(4));
+    assert!(s.wait_until(wait, both), "toggle → mini: {:?}", s.panes());
 
     s.run_action_checked(&["new-tab"]);
-    assert!(s.wait_until(wait, |s| every_tab(s, 4)), "a tab opened in mini mode: {:?}", s.panes());
+    let opened = std::time::Instant::now();
+    assert!(s.wait_until(wait, |s| terminal_x(s, 2) == Some(4)), "a tab opened in mini mode: {:?}", s.panes());
+    // ICH-522: its mini asks on `grant-ready-now`, not after a grant slot
+    // (500 ms at least); measured ~190 ms, as on main.
+    let took = opened.elapsed().as_millis();
+    assert!(took < 500, "the new tab's mini waited a grant slot: {took} ms on the full rail");
     toggle_sidebar(&s);
     assert!(s.wait_until(wait, |s| every_tab(s, 32)), "toggle → full in all three tabs: {:?}", s.panes());
     eprintln!("[e2e] PASS: a tab opened in mini mode came up on the mini rail");

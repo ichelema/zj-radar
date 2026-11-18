@@ -243,10 +243,13 @@ impl State {
                     &["zellij", "pipe", "--name", CMD_PIPE, "--", "sidebar-toggle"],
                     BTreeMap::from([("zj_radar".to_string(), "sidebar-toggle".to_string())]),
                 ),
-                Effect::BroadcastGrantReady => run_command(
-                    &["zellij", "pipe", "--name", CMD_PIPE, "--", "grant-ready"],
-                    BTreeMap::from([("zj_radar".to_string(), "grant-ready".to_string())]),
-                ),
+                Effect::BroadcastGrantReady { now } => {
+                    let verb = if now { "grant-ready-now" } else { "grant-ready" };
+                    run_command(
+                        &["zellij", "pipe", "--name", CMD_PIPE, "--", verb],
+                        BTreeMap::from([("zj_radar".to_string(), verb.to_string())]),
+                    )
+                }
                 Effect::ArmGrantWait(ms) => set_timeout(ms as f64 / 1000.0),
                 Effect::WatchSession { selectable } => {
                     subscribe(&[EventType::SessionUpdate]);
@@ -316,6 +319,11 @@ impl State {
                 .filter(|(tab, _)| *tab != own_tab)
                 .flat_map(|(_, panes)| panes)
                 .any(|p| ready_mini(&p) && !p.is_collapsed),
+            peers_ready: manifest
+                .panes
+                .iter()
+                .filter(|(tab, _)| *tab != own_tab)
+                .all(|(_, panes)| panes.iter().any(|p| ready_mini(&p))),
         };
         let outcome = if session { self.runtime.session_pair_changed(pair) } else { self.runtime.pair_changed(pair) };
         self.handle_outcome(outcome)

@@ -200,9 +200,13 @@ pub(crate) enum Effect {
     /// when the broadcast comes back.
     BroadcastSidebarToggle,
     /// Broadcast `grant-ready` on `zj_radar.cmd.v1` the same way: this full
-    /// rail holds the grant, so every mini that has not asked yet asks now
-    /// and Zellij answers it from its cache.
-    BroadcastGrantReady,
+    /// rail holds the grant, so every mini that has not asked yet asks and
+    /// Zellij answers it from its cache. `now`: every other tab shows its
+    /// ready mini, so the verb is `grant-ready-now` and the mini skips its
+    /// wait (`PluginRuntime::grant_ready`).
+    BroadcastGrantReady {
+        now: bool,
+    },
     /// One `set_timeout` of this many milliseconds: a mini's wait between
     /// `grant-ready` and its request (`PluginRuntime::grant_ready`).
     ArmGrantWait(u64),
@@ -473,6 +477,9 @@ pub(crate) struct PluginRuntime {
     alone: bool,
     /// Full rail: a manifest has shown another rail pane in its tab.
     rail_in_tab: bool,
+    /// Full rail: the latest manifest shows every other tab's ready mini
+    /// (`Pair::peers_ready`).
+    peers_ready: bool,
     /// Full rail: it has broadcast `grant-ready` (`Effect::BroadcastGrantReady`).
     grant_ready_sent: bool,
     /// Mini only: `grant-ready` came and its wait is armed
@@ -500,7 +507,8 @@ const LOOK_TICKS: u8 = 2;
 /// once, minis hit that while the session's other grants are being written;
 /// the base lets that burst pass and the slots keep minis from asking
 /// together. 17 slots, a prime: plugin ids step by a fixed amount per tab,
-/// so 17 consecutive tabs never share one.
+/// so 17 consecutive tabs never share one. A session at rest has no burst:
+/// there `grant-ready-now` skips the wait (`Pair::peers_ready`).
 /// ponytail: rarer collisions, not none (Zellij's write is not atomic); upgrade when Zellij writes the cache atomically.
 fn grant_wait_ms(plugin_id: u32) -> u64 {
     500 + u64::from(plugin_id % 17) * 100
@@ -521,6 +529,9 @@ pub(crate) struct Pair {
     pub alone: bool,
     /// Another tab shows its ready mini: the session is in mini mode.
     pub peer_mini_shown: bool,
+    /// Every other tab shows its ready mini (see
+    /// [`PluginRuntime::send_grant_ready`]).
+    pub peers_ready: bool,
 }
 
 /// See [`PluginRuntime::last_render_key`].
@@ -911,7 +922,8 @@ impl PluginRuntime {
             // Session-wide, so none of the gates below apply (see `sidebar_toggle`).
             Verb::SidebarToggle => return self.sidebar_toggle(),
             // Reaches a mini before its grant, so no gate applies either.
-            Verb::GrantReady => return self.grant_ready(),
+            Verb::GrantReady => return self.grant_ready(false),
+            Verb::GrantReadyNow => return self.grant_ready(true),
             Verb::AttentionNext | Verb::SessionNext => Direction::Next,
             Verb::AttentionPrev | Verb::SessionPrev => Direction::Prev,
         };
@@ -970,11 +982,16 @@ impl PluginRuntime {
 
     /// `grant-ready`: a full rail holds the grant, so Zellij has it cached
     /// and answers this mini's request with no prompt. Only a mini that has
-    /// not asked yet arms its wait (see `load`, [`grant_wait_ms`]); the fire
-    /// asks (`timer`). Any other instance ignores it.
-    fn grant_ready(&mut self) -> Outcome {
+    /// not asked yet acts (see `load`): it arms its wait ([`grant_wait_ms`])
+    /// and the fire asks (`timer`), or on `grant-ready-now` (`now`) it asks at
+    /// once. A mini already waiting keeps its slot. Any other instance ignores it.
+    fn grant_ready(&mut self, now: bool) -> Outcome {
         if !self.config.mini || self.permission != PermissionState::Unprompted || self.grant_wait {
             return Outcome::none();
+        }
+        if now {
+            self.permission = PermissionState::Requesting;
+            return Outcome::with_effects(false, vec![Effect::RequestPermission]);
         }
         self.grant_wait = true;
         Outcome::with_effects(false, vec![Effect::ArmGrantWait(grant_wait_ms(self.plugin_id))])
@@ -984,10 +1001,15 @@ impl PluginRuntime {
     /// from whichever comes last of its grant and a manifest with another
     /// rail in its tab: Zellij can deliver a manifest before the grant's own
     /// event, and a quiet tab may send no other.
+    ///
+    /// `now` when every other tab shows its ready mini and this tab's is not
+    /// ready: a tab opened in a session at rest, where only its mini asks and
+    /// no burst of grants is being written, so it need not wait its slot. At
+    /// startup the other minis are not ready; on attach this tab's is.
     fn send_grant_ready(&mut self, effects: &mut Vec<Effect>) {
         if !self.config.mini && self.permission.granted() && self.rail_in_tab && !self.grant_ready_sent {
             self.grant_ready_sent = true;
-            effects.push(Effect::BroadcastGrantReady);
+            effects.push(Effect::BroadcastGrantReady { now: self.peers_ready && self.sibling.is_none() });
         }
     }
 
@@ -1027,6 +1049,7 @@ impl PluginRuntime {
         // Whether or not the mini looks ready: another client's instance may
         // have named the pane, while this client's mini instance still waits.
         self.rail_in_tab |= !pair.alone;
+        self.peers_ready = pair.peers_ready;
         self.send_grant_ready(&mut outcome.effects);
         outcome
     }
