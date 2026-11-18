@@ -245,13 +245,20 @@ that asked, and holds a waiting instance's events and every CLI pipe sent to
 it. A mini rail that asked at load, before any grant was cached, waited on a
 prompt in its collapsed pane that nobody could answer, and every `zellij pipe`
 in the session hung (ICH-522). So a mini's `load()` does not ask. A granted
-full rail broadcasts the internal `cmd.v1` verb `grant-ready` once, from its
-first manifest with another rail in its tab (`Effect::BroadcastGrantReady`,
-`zellij pipe` through `run_command`). A mini that has not asked yet asks then,
-and Zellij answers from its cache with no prompt. The pipe reaches a plugin
-that never asked: `ReadCliPipes` gates only pipe commands such as
-`block_cli_pipe_input`. A full rail parked at its own prompt in a tab not yet
-visited still holds every CLI pipe until it is answered.
+full rail broadcasts the internal `cmd.v1` verb `grant-ready` once, from
+whichever comes last of its grant and a manifest with another rail in its tab
+(`Effect::BroadcastGrantReady`). It runs `zellij pipe` through `run_command`,
+so `zellij` must be on the `PATH` of the Zellij server. The pipe reaches a
+plugin that never asked: `ReadCliPipes` gates only pipe commands such as
+`block_cli_pipe_input`. A mini that has not asked yet waits 0.5 to 2.1 s, in a
+100 ms slot set by its plugin id, then asks, and Zellij answers from its cache.
+
+The wait is there because Zellij rewrites `permissions.kdl` on every grant,
+truncating it first: a request that reads it in that instant finds no grant
+and parks at the prompt. Minis that asked all at once hit that in some
+sessions with six or more tabs. Spread out, they hit it more rarely, not
+never. A full rail parked at its own prompt in a tab not yet visited still
+holds every CLI pipe until it is answered.
 
 **Selectability.** One level rule, `PluginRuntime::desired_selectable`: the
 rail pane is selectable while its own permission request is in flight
@@ -483,7 +490,8 @@ With 12 tabs, 24 rails subscribed from `load` got their grant after 3.7–8.7 s
 - A client that attaches to a session showing its mini rails sees them
   disappear and come back: its new instances collapse at load and settle on
   their first manifest. That took 13–132 ms with 5 tabs, and up to about 2 s
-  with 12.
+  with 12, measured before a mini waited for its grant slot (*Permissions*,
+  up to 2.1 s more; not measured again).
 - A tab whose rail did not know its pair follows a toggle one to two seconds
   late (2 s in a quiet session, where the toggle arms the ticks): a tab
   nobody visited, on the first toggle of a session. Showing the tab pairs

@@ -181,9 +181,11 @@ descriptors.
 **Fix:** grant the prompt so no instance stays wedged
 ([above](#sidebar-shows-needs-permission-or-looks-blank)). A session started
 without the grant shows the prompt on the full rail of each tab: answer it in
-every tab. The mini rail never parks: it asks only once its full rail holds
-the grant. Give scripted `zellij pipe` sends a deadline (for example
-`timeout 5 zellij pipe …`).
+every tab. The mini rail asks only once its full rail holds the grant, so it
+does not wait for an answer nobody can give. In rare cases, with many tabs
+starting together, a mini can still park
+([why](design.md#5-plugin--zellij-wiring)); restart the session. Give scripted
+`zellij pipe` sends a deadline (for example `timeout 5 zellij pipe …`).
 
 ## Cards look flat (no colored row backgrounds)
 
