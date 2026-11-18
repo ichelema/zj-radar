@@ -166,5 +166,8 @@ the tab `attention-next` or `attention-prev` sends you to, you can land one
 attention tab further.
 
 Unknown verbs are ignored. Both pipes are inert until the sidebar has been
-granted permissions. The `✓` mouse gesture is described in
+granted permissions, except the internal verb `grant-ready`: a full rail sends
+it once it holds the grant, and each mini rail then asks for its own (see
+[design](design.md#5-plugin--zellij-wiring)). Do not bind it. The `✓` mouse
+gesture is described in
 [`using.md`](using.md#mouse).

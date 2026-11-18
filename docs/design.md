@@ -220,7 +220,8 @@ name.
 
 ## 5. Plugin ↔ Zellij wiring
 
-**Permissions.** `load()` requests them directly:
+**Permissions.** A full rail's `load()` requests them directly (a mini rail
+asks later, below):
 
 - `ReadApplicationState`: every state event.
 - `ReadCliPipes`: the `cmd.v1` and `config.v1` pipes.
@@ -238,6 +239,19 @@ the grant, each tab's rail shows Zellij's prompt. The CLI's
 `REQUIRED_PLUGIN_PERMISSIONS` must equal the plugin's request list; a text-pin
 test in `lib.rs` keeps them together, because a partial grant re-prompts
 illegibly inside the rail.
+
+**The mini rail asks last.** Zellij takes a prompt's answer only in the pane
+that asked, and holds a waiting instance's events and every CLI pipe sent to
+it. A mini rail that asked at load, before any grant was cached, waited on a
+prompt in its collapsed pane that nobody could answer, and every `zellij pipe`
+in the session hung (ICH-522). So a mini's `load()` does not ask. A granted
+full rail broadcasts the internal `cmd.v1` verb `grant-ready` once, from its
+first manifest with another rail in its tab (`Effect::BroadcastGrantReady`,
+`zellij pipe` through `run_command`). A mini that has not asked yet asks then,
+and Zellij answers from its cache with no prompt. The pipe reaches a plugin
+that never asked: `ReadCliPipes` gates only pipe commands such as
+`block_cli_pipe_input`. A full rail parked at its own prompt in a tab not yet
+visited still holds every CLI pipe until it is answered.
 
 **Selectability.** One level rule, `PluginRuntime::desired_selectable`: the
 rail pane is selectable while its own permission request is in flight
@@ -437,8 +451,8 @@ plugin options, and the pid sets aside the name a resurrected layout carries
 over from the server that saved it.
 
 - **At load** a mini instance collapses its pane. It does so blind, before
-  any event: Zellij holds them all back until the grant, and an ungranted
-  mini would squeeze the permission prompt into 4 columns.
+  any event: Zellij sends no state to a plugin without the grant, which a
+  mini asks for only on `grant-ready` (*Permissions* above).
 - **Its first manifest** settles a mini (`PluginRuntime::settle`). It comes
   back up when its full rail is collapsed, or when its pane has no name yet
   and another tab shows its mini (a tab opened in mini mode). Then it names

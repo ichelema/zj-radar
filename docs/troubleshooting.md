@@ -179,8 +179,11 @@ so each broadcast leaves one blocked client pinning two server file
 descriptors.
 
 **Fix:** grant the prompt so no instance stays wedged
-([above](#sidebar-shows-needs-permission-or-looks-blank)), and give scripted
-`zellij pipe` sends a deadline (for example `timeout 5 zellij pipe …`).
+([above](#sidebar-shows-needs-permission-or-looks-blank)). A session started
+without the grant shows the prompt on the full rail of each tab: answer it in
+every tab. The mini rail never parks: it asks only once its full rail holds
+the grant. Give scripted `zellij pipe` sends a deadline (for example
+`timeout 5 zellij pipe …`).
 
 ## Cards look flat (no colored row backgrounds)
 
