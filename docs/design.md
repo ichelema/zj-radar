@@ -220,7 +220,8 @@ name.
 
 ## 5. Plugin ↔ Zellij wiring
 
-**Permissions.** `load()` requests them directly:
+**Permissions.** A full rail's `load()` requests them directly (a mini rail
+asks later, below):
 
 - `ReadApplicationState`: every state event.
 - `ReadCliPipes`: the `cmd.v1` and `config.v1` pipes.
@@ -238,6 +239,31 @@ the grant, each tab's rail shows Zellij's prompt. The CLI's
 `REQUIRED_PLUGIN_PERMISSIONS` must equal the plugin's request list; a text-pin
 test in `lib.rs` keeps them together, because a partial grant re-prompts
 illegibly inside the rail.
+
+**The mini rail asks last.** Zellij takes a prompt's answer only in the pane
+that asked, and holds a waiting instance's events and every CLI pipe sent to
+it. A mini rail that asked at load, before any grant was cached, waited on a
+prompt in its collapsed pane that nobody could answer, and every `zellij pipe`
+in the session hung (ICH-522). So a mini's `load()` does not ask. A granted
+full rail broadcasts the internal `cmd.v1` verb `grant-ready` once, from
+whichever comes last of its grant and a manifest with another rail in its tab
+(`Effect::BroadcastGrantReady`). It runs `zellij pipe` through `run_command`,
+so `zellij` must be on the `PATH` of the Zellij server. The pipe reaches a
+plugin that never asked: `ReadCliPipes` gates only pipe commands such as
+`block_cli_pipe_input`. A mini that has not asked yet waits 0.5 to 2.1 s, in a
+100 ms slot set by its plugin id, then asks, and Zellij answers from its cache.
+
+The wait is there because Zellij rewrites `permissions.kdl` on every grant,
+truncating it first: a request that reads it in that instant finds no grant
+and parks at the prompt. Minis that asked all at once hit that in some
+sessions with six or more tabs. Spread out, they hit it more rarely, not
+never. A tab opened in a session at rest needs no wait: when every other tab
+shows its ready mini and its own mini is not ready, the full rail sends
+`grant-ready-now` instead and the mini asks at once. Only that mini asks, and
+no burst of grants is being written. On attach the full rail's own mini is
+already named by another client's instance, so it sends `grant-ready`. A full
+rail parked at its own prompt in a tab not yet visited still holds every CLI
+pipe until it is answered.
 
 **Selectability.** One level rule, `PluginRuntime::desired_selectable`: the
 rail pane is selectable while its own permission request is in flight
@@ -437,8 +463,8 @@ plugin options, and the pid sets aside the name a resurrected layout carries
 over from the server that saved it.
 
 - **At load** a mini instance collapses its pane. It does so blind, before
-  any event: Zellij holds them all back until the grant, and an ungranted
-  mini would squeeze the permission prompt into 4 columns.
+  any event: Zellij sends no state to a plugin without the grant, which a
+  mini asks for only on `grant-ready` (*Permissions* above).
 - **Its first manifest** settles a mini (`PluginRuntime::settle`). It comes
   back up when its full rail is collapsed, or when its pane has no name yet
   and another tab shows its mini (a tab opened in mini mode). Then it names
@@ -469,7 +495,8 @@ With 12 tabs, 24 rails subscribed from `load` got their grant after 3.7–8.7 s
 - A client that attaches to a session showing its mini rails sees them
   disappear and come back: its new instances collapse at load and settle on
   their first manifest. That took 13–132 ms with 5 tabs, and up to about 2 s
-  with 12.
+  with 12, measured before a mini waited for its grant slot (*Permissions*,
+  up to 2.1 s more; not measured again).
 - A tab whose rail did not know its pair follows a toggle one to two seconds
   late (2 s in a quiet session, where the toggle arms the ticks): a tab
   nobody visited, on the first toggle of a session. Showing the tab pairs

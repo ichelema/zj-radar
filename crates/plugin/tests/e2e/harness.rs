@@ -678,6 +678,54 @@ impl ZellijSession {
         );
     }
 
+    /// Like [`run_action_checked`], but kill the CLI if it has not exited
+    /// within `timeout`: a `pipe` waits for every plugin instance, and one
+    /// parked at its permission prompt never releases it. The `Err` names
+    /// the failure with what the CLI printed. Its output is drained as it
+    /// comes, so a chatty CLI cannot block on a full pipe.
+    pub fn action_within(&self, args: &[&str], timeout: Duration) -> Result<(), String> {
+        fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<String> {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = pipe.read_to_end(&mut buf);
+                }
+                String::from_utf8_lossy(&buf).into_owned()
+            })
+        }
+        let mut child = self
+            .isolated
+            .command("zellij")
+            .args(["--session", &self.name, "action"])
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("zellij action failed to spawn");
+        let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let (stdout, stderr) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
+        let action = args.join(" ");
+        match status {
+            Some(status) if status.success() => Ok(()),
+            Some(status) => Err(format!("`zellij action {action}` failed ({status}): {stderr}")),
+            None => Err(format!(
+                "`zellij action {action}` still running after {timeout:?}; stdout: {stdout:?}; stderr: {stderr:?}"
+            )),
+        }
+    }
+
     /// Poll [`tab_names`] until `cond` holds, returning a timeline of every
     /// distinct snapshot seen (one entry per change, timestamped from the
     /// start). The bool says whether `cond` was met before `timeout`. Built
@@ -1108,8 +1156,21 @@ pub fn two_sidebar_tabs_layout(plugin_wasm: &Path) -> String {
 /// tabs opened later (`new_tab_template` names their terminal: Zellij drops a
 /// nested `children` from the template it would derive, zellij#3247).
 pub fn mini_rail_tabs_layout(plugin_wasm: &Path) -> String {
+    mini_rail_layout(plugin_wasm, &["one", "two"])
+}
+
+/// [`mini_rail_tabs_layout`] with one tab per name, the first one focused.
+pub fn mini_rail_layout(plugin_wasm: &Path, tabs: &[&str]) -> String {
     let wasm_abs = plugin_wasm.canonicalize().unwrap_or_else(|_| plugin_wasm.to_path_buf());
     let w = wasm_abs.display();
+    let tabs: String = tabs
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let focus = if i == 0 { " focus=true" } else { "" };
+            format!("    tab name=\"{name}\"{focus} {{\n        pane focus=true cwd=\"/tmp\"\n    }}\n")
+        })
+        .collect();
     format!(
         r#"layout {{
     default_tab_template {{
@@ -1138,13 +1199,7 @@ pub fn mini_rail_tabs_layout(plugin_wasm: &Path) -> String {
             pane focus=true cwd="/tmp"
         }}
     }}
-    tab name="one" focus=true {{
-        pane focus=true cwd="/tmp"
-    }}
-    tab name="two" {{
-        pane focus=true cwd="/tmp"
-    }}
-}}"#
+{tabs}}}"#
     )
 }
 

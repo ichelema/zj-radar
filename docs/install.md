@@ -215,6 +215,9 @@ new_tab_template {
 The second pane in each template is the mini rail: 4 columns, right after the
 full rail. It starts collapsed, and `sidebar-toggle` switches between the two
 (see [configuration](configuration.md)). Only one of them takes space at a time.
+The full rail wakes the mini rails by running `zellij pipe`, so the `zellij`
+binary must be on the `PATH` of the Zellij server. Without it no mini rail
+comes up, and `sidebar-toggle` does nothing.
 
 Both templates are required. Zellij derives `new_tab_template` from
 `default_tab_template` when you omit it and drops a `children` nested inside a

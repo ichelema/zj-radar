@@ -243,6 +243,14 @@ impl State {
                     &["zellij", "pipe", "--name", CMD_PIPE, "--", "sidebar-toggle"],
                     BTreeMap::from([("zj_radar".to_string(), "sidebar-toggle".to_string())]),
                 ),
+                Effect::BroadcastGrantReady { now } => {
+                    let verb = if now { "grant-ready-now" } else { "grant-ready" };
+                    run_command(
+                        &["zellij", "pipe", "--name", CMD_PIPE, "--", verb],
+                        BTreeMap::from([("zj_radar".to_string(), verb.to_string())]),
+                    )
+                }
+                Effect::ArmGrantWait(ms) => set_timeout(ms as f64 / 1000.0),
                 Effect::WatchSession { selectable } => {
                     subscribe(&[EventType::SessionUpdate]);
                     set_selectable(selectable);
@@ -305,12 +313,18 @@ impl State {
             named: own.title == self.mini_title,
             sibling: rails().find(|p| ready_mini(p) != is_mini).map(|p| p.is_collapsed),
             alone: rails().next().is_none(),
+            other_rail: rails().next().map(|p| p.id),
             peer_mini_shown: manifest
                 .panes
                 .iter()
                 .filter(|(tab, _)| *tab != own_tab)
                 .flat_map(|(_, panes)| panes)
                 .any(|p| ready_mini(&p) && !p.is_collapsed),
+            peers_ready: manifest
+                .panes
+                .iter()
+                .filter(|(tab, _)| *tab != own_tab)
+                .all(|(_, panes)| panes.iter().any(|p| ready_mini(&p))),
         };
         let outcome = if session { self.runtime.session_pair_changed(pair) } else { self.runtime.pair_changed(pair) };
         self.handle_outcome(outcome)
@@ -415,6 +429,7 @@ impl ZellijPlugin for State {
         ]);
         let ids = get_plugin_ids();
         self.plugin_id = Some(ids.plugin_id);
+        self.runtime.plugin_id = ids.plugin_id;
         self.mini_title = format!("{} {}", runtime::MINI_PANE_TITLE, ids.zellij_pid);
         self.runtime.client_tab = Some(client_tab);
         let outcome = self.runtime.load(config::Config::from_map(&config));
