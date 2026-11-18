@@ -257,8 +257,13 @@ The wait is there because Zellij rewrites `permissions.kdl` on every grant,
 truncating it first: a request that reads it in that instant finds no grant
 and parks at the prompt. Minis that asked all at once hit that in some
 sessions with six or more tabs. Spread out, they hit it more rarely, not
-never. A full rail parked at its own prompt in a tab not yet visited still
-holds every CLI pipe until it is answered.
+never. A tab opened in a session at rest needs no wait: when every other tab
+shows its ready mini and its own mini is not ready, the full rail sends
+`grant-ready-now` instead and the mini asks at once. Only that mini asks, and
+no burst of grants is being written. On attach the full rail's own mini is
+already named by another client's instance, so it sends `grant-ready`. A full
+rail parked at its own prompt in a tab not yet visited still holds every CLI
+pipe until it is answered.
 
 **Selectability.** One level rule, `PluginRuntime::desired_selectable`: the
 rail pane is selectable while its own permission request is in flight
