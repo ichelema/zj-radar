@@ -381,17 +381,41 @@ pub(crate) fn add_mini(layout: &str) -> Option<String> {
         Other,
     }
 
+    fn plugin_mini_enabled(plugin: &kdl::KdlNode) -> bool {
+        // Zellij 0.46 processes properties first, then child nodes in order.
+        // Match the plugin's `config::parse_bool` on the resulting value.
+        let truthy = |value: &str| matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on");
+        if let Some(mini) =
+            plugin.children().and_then(|children| children.nodes().iter().rfind(|node| node.name().value() == "mini"))
+        {
+            let value = mini.entries().first().map(|entry| entry.value());
+            return match value {
+                Some(kdl::KdlValue::Bool(enabled)) => *enabled,
+                Some(kdl::KdlValue::Integer(number)) => *number == 1,
+                Some(kdl::KdlValue::String(text)) => truthy(text),
+                _ => mini.children().is_some_and(|children| truthy(&children.to_string())),
+            };
+        }
+        // Properties use KDL v1's value Display, which retains string quotes
+        // and integer radix (unlike Zellij's scalar conversion for children).
+        plugin
+            .entries()
+            .iter()
+            .rfind(|entry| entry.name().is_some_and(|key| key.repr().unwrap_or(key.value()) == "mini"))
+            .is_some_and(|entry| {
+                entry.value().as_bool() == Some(true)
+                    || (entry.value().as_integer() == Some(1)
+                        && !entry.format().is_some_and(|format| format.value_repr.contains(['x', 'o', 'b'])))
+            })
+    }
+
     fn is_mini(node: &kdl::KdlNode) -> bool {
         node.name().value() == "pane"
             && node.children().is_some_and(|children| {
                 children.nodes().iter().any(|plugin| {
                     plugin.name().value() == "plugin"
                         && plugin.get("location").and_then(|e| e.as_string()) == Some("radar")
-                        && plugin.children().is_some_and(|children| {
-                            children.nodes().iter().any(|mini| {
-                                mini.name().value() == "mini" && mini.get(0).and_then(|e| e.as_bool()) == Some(true)
-                            })
-                        })
+                        && plugin_mini_enabled(plugin)
                 })
             })
     }
@@ -1166,6 +1190,9 @@ layout {
         );
         let pair = format!("{full}{mini}");
         assert!(fresh.contains(&pair));
+        let pane_with_plugin = |plugin: &str| {
+            format!("            pane size=4 borderless=true {{\n                {plugin}\n            }}\n")
+        };
         let disabled = mini.replacen("pane", "/- pane", 1);
         let unrelated = disabled.replacen("location=\"radar\"", "location=\"other\"", 1);
         let variants = [
@@ -1182,6 +1209,19 @@ layout {
             ("disabled mini", format!("{full}{disabled}")),
             ("disabled mini before full", format!("{disabled}{full}")),
             ("disabled unrelated pane before active mini", format!("{full}{unrelated}{mini}")),
+            ("string mini", format!("{full}{}", mini.replace("mini true", r#"mini "true""#))),
+            ("integer mini", format!("{full}{}", mini.replace("mini true", "mini 1"))),
+            ("integer mini property", format!("{full}{}", pane_with_plugin(r#"plugin location="radar" mini=1"#))),
+            ("trimmed boolean alias", format!("{full}{}", mini.replace("mini true", r#"mini " YeS ""#))),
+            ("mini property", format!("{full}{}", pane_with_plugin(r#"plugin location="radar" mini=true"#))),
+            (
+                "inline mini property",
+                format!("{full}            pane size=4 borderless=true {{ plugin location=\"radar\" mini=true; }}\n"),
+            ),
+            (
+                "child overrides false property",
+                format!("{full}{}", pane_with_plugin(r#"plugin location="radar" mini=false { mini "on"; }"#)),
+            ),
         ];
         let mut rewritten = Vec::new();
         for (name, replacement) in variants {
@@ -1199,6 +1239,18 @@ layout {
         );
         let layout = fresh.replacen(&pair, &format!("{full}{other}"), 1);
         assert_eq!(add_mini(&layout), Some(fresh.replacen(&pair, &format!("{full}{mini}{other}"), 1)));
+
+        for plugin in [
+            r#"plugin location="radar" { mini false; }"#,
+            r#"plugin location="radar" mini=true { mini false; }"#,
+            r#"plugin location="radar" { mini true; mini false; }"#,
+            r#"plugin location="radar" mini="true""#,
+            r#"plugin location="radar" mini=0x1"#,
+        ] {
+            let other = pane_with_plugin(plugin);
+            let layout = fresh.replacen(&pair, &format!("{full}{other}"), 1);
+            assert_eq!(add_mini(&layout), Some(fresh.replacen(&pair, &format!("{pair}{other}"), 1)), "{plugin}");
+        }
     }
 
     /// Whole-file uninstall must still recognise what the pre-mini setup wrote.
