@@ -365,12 +365,11 @@ pub(crate) fn inject(layout: &str, facts: &LayoutFacts) -> Result<String, Refusa
 }
 
 use std::collections::BTreeMap;
-use std::ops::Range;
 
 /// A rail pane as the sibling walk sees it. `Full` is the canonical pre-mini
-/// form `add_mini` upgrades in place; `Edited` is a rail inside a zj-radar
-/// region the user changed (its `size`, a trailing comment, its own plugin
-/// block), which only a manual edit can pair with a mini.
+/// form `add_mini` upgrades in place; `Edited` is any other rail pane (a
+/// different `size`, a trailing comment, its own plugin block, a hand-pasted
+/// rail), which only a manual edit can pair with a mini.
 #[derive(Clone, Copy)]
 enum Sibling {
     Full(usize),
@@ -390,21 +389,20 @@ impl Sibling {
 struct Unpaired {
     /// Canonical rails, by the start offset `add_mini` inserts at.
     upgrade: Vec<usize>,
-    /// Rails the user edited: reported, never rewritten.
+    /// Rails `add_mini` must not rewrite: reported only.
     edited: usize,
 }
 
-/// Where `add_mini` may touch: the zj-radar marker regions (or the whole file,
-/// when `setup` wrote the layout whole) and the canonical pre-mini rail panes
-/// inside them, `start` offset → (insertion offset, indentation).
-struct RailScan<'a> {
-    regions: Vec<Range<usize>>,
-    canonical: BTreeMap<usize, (usize, &'a str)>,
-    whole: bool,
-}
-
 fn is_radar_plugin(plugin: &kdl::KdlNode) -> bool {
-    plugin.name().value() == "plugin" && plugin.get("location").and_then(|e| e.as_string()) == Some("radar")
+    if plugin.name().value() != "plugin" {
+        return false;
+    }
+    // The alias, or the wasm itself: a rail pane can name the plugin file
+    // instead of going through `plugins { radar location="file:…" }`.
+    plugin
+        .get("location")
+        .and_then(|entry| entry.as_string())
+        .is_some_and(|location| location == "radar" || location.ends_with("zj_radar.wasm"))
 }
 
 fn plugin_mini_enabled(plugin: &kdl::KdlNode) -> bool {
@@ -459,7 +457,7 @@ fn collect_disabled_minis(gap: &str, siblings: &mut Vec<Sibling>) {
     }
 }
 
-fn collect_unpaired(doc: &kdl::KdlDocument, scan: &RailScan, result: &mut Unpaired) {
+fn collect_unpaired(doc: &kdl::KdlDocument, canonical: &BTreeMap<usize, (usize, &str)>, result: &mut Unpaired) {
     let mut siblings = Vec::new();
     if let Some(format) = doc.format() {
         collect_disabled_minis(&format.leading, &mut siblings);
@@ -469,17 +467,17 @@ fn collect_unpaired(doc: &kdl::KdlDocument, scan: &RailScan, result: &mut Unpair
             collect_disabled_minis(&format.leading, &mut siblings);
         }
         let offset = node.name().span().offset();
-        siblings.push(if scan.canonical.contains_key(&offset) {
+        siblings.push(if canonical.contains_key(&offset) {
             Sibling::Full(offset)
         } else if is_mini(node) {
             Sibling::Mini
-        } else if is_rail(node) && scan.in_region(offset) {
+        } else if is_rail(node) {
             Sibling::Edited
         } else {
             Sibling::Other
         });
         if let Some(children) = node.children() {
-            collect_unpaired(children, scan, result);
+            collect_unpaired(children, canonical, result);
         }
         if let Some(format) = node.format() {
             collect_disabled_minis(&format.trailing, &mut siblings);
@@ -506,56 +504,38 @@ fn collect_unpaired(doc: &kdl::KdlDocument, scan: &RailScan, result: &mut Unpair
     }
 }
 
-impl<'a> RailScan<'a> {
-    /// Scan the layout's lines: the marker regions, and the canonical rail
-    /// panes (`pane size=32 borderless=true {` / `plugin location="radar"` /
-    /// `}`) inside them. The insertion points stay byte-preserving.
-    fn of(layout: &'a str) -> Self {
-        let whole = setup_authored_layouts().iter().any(|l| l == layout);
-        let lines: Vec<&str> = layout.split_inclusive('\n').collect();
-        let mut scan = RailScan { regions: Vec::new(), canonical: BTreeMap::new(), whole };
-        let mut open = None;
-        let mut offset = 0;
-        for (i, line) in lines.iter().enumerate() {
-            let t = line.trim();
-            // `contains`: an inline `children` anchor puts the marker mid-line.
-            if t.contains(WRAP_BEGIN) || t.contains(BLOCK_BEGIN) {
-                open.get_or_insert(offset);
-            } else if !whole && (t.contains(WRAP_END) || t.contains(BLOCK_END)) {
-                if let Some(start) = open.take() {
-                    scan.regions.push(start..offset + line.len());
-                }
-            }
-            // Keep the existing conservative, byte-preserving insertion points.
-            if (whole || open.is_some())
-                && t == "}"
-                && i >= 2
-                && lines[i - 1].trim() == "plugin location=\"radar\""
-                && lines[i - 2].trim() == "pane size=32 borderless=true {"
-            {
-                let start = offset - lines[i - 1].len() - lines[i - 2].trim_start().len();
-                let indent = &line[..line.len() - line.trim_start().len()];
-                scan.canonical.insert(start, (offset + line.len(), indent));
-            }
-            offset += line.len();
+/// The canonical pre-mini rail panes `add_mini` may rewrite: `start` offset →
+/// (insertion offset, indentation). Found line by line so the insertion points
+/// stay byte-preserving, and only where zj-radar may touch: inside a marker
+/// region, or anywhere in a layout `setup` wrote whole.
+fn canonical_rails(layout: &str) -> BTreeMap<usize, (usize, &str)> {
+    let whole = setup_authored_layouts().iter().any(|l| l == layout);
+    let lines: Vec<&str> = layout.split_inclusive('\n').collect();
+    let mut canonical = BTreeMap::new();
+    let mut in_region = whole;
+    let mut offset = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        // `contains`: an inline `children` anchor puts the marker mid-line.
+        if t.contains(WRAP_BEGIN) || t.contains(BLOCK_BEGIN) {
+            in_region = true;
+        } else if !whole && (t.contains(WRAP_END) || t.contains(BLOCK_END)) {
+            in_region = false;
         }
-        // An unterminated region (a stale or half-deleted marker) still counts:
-        // reporting on it is safer than claiming the file is fully upgraded.
-        if let Some(start) = open {
-            scan.regions.push(start..layout.len());
+        // Keep the existing conservative, byte-preserving insertion points.
+        if in_region
+            && t == "}"
+            && i >= 2
+            && lines[i - 1].trim() == "plugin location=\"radar\""
+            && lines[i - 2].trim() == "pane size=32 borderless=true {"
+        {
+            let start = offset - lines[i - 1].len() - lines[i - 2].trim_start().len();
+            let indent = &line[..line.len() - line.trim_start().len()];
+            canonical.insert(start, (offset + line.len(), indent));
         }
-        scan
+        offset += line.len();
     }
-
-    fn in_region(&self, offset: usize) -> bool {
-        self.whole || self.regions.iter().any(|region| region.contains(&offset))
-    }
-
-    fn unpaired(&self, doc: &kdl::KdlDocument) -> Unpaired {
-        let mut unpaired = Unpaired::default();
-        collect_unpaired(doc, self, &mut unpaired);
-        unpaired
-    }
+    canonical
 }
 
 /// Upgrade a layout written before the mini rail: insert the mini pane right
@@ -566,20 +546,21 @@ impl<'a> RailScan<'a> {
 /// when there is nothing to add: checking each pair, not the file, is what
 /// makes re-injection idempotent and finishes a partial upgrade.
 pub(crate) fn add_mini(layout: &str) -> Option<String> {
-    let scan = RailScan::of(layout);
-    if scan.canonical.is_empty() {
+    let canonical = canonical_rails(layout);
+    if canonical.is_empty() {
         return None;
     }
     let doc = layout.parse::<kdl::KdlDocument>().ok()?;
-    let mut unpaired = scan.unpaired(&doc).upgrade;
-    if unpaired.is_empty() {
+    let mut unpaired = Unpaired::default();
+    collect_unpaired(&doc, &canonical, &mut unpaired);
+    if unpaired.upgrade.is_empty() {
         return None;
     }
-    unpaired.sort_unstable();
+    unpaired.upgrade.sort_unstable();
     let mut out = String::with_capacity(layout.len() + 256);
     let mut cursor = 0;
-    for start in unpaired {
-        let (insert_at, indent) = scan.canonical[&start];
+    for start in unpaired.upgrade {
+        let (insert_at, indent) = canonical[&start];
         out.push_str(&layout[cursor..insert_at]);
         for mini in MINI_PANE {
             out.push_str(&format!("{indent}{mini}\n"));
@@ -590,15 +571,16 @@ pub(crate) fn add_mini(layout: &str) -> Option<String> {
     Some(out)
 }
 
-/// Rails inside a zj-radar region that still have no mini rail: the edited
-/// ones `add_mini` cannot rewrite, plus any canonical one left over. The CLI
-/// reports the count instead of claiming success, so a tab where
-/// `sidebar-toggle` does nothing has a reason on screen.
+/// Rail panes that still have no mini rail, so `sidebar-toggle` has nothing to
+/// switch to in those tabs: an edited rail `add_mini` must not rewrite, a rail
+/// pasted by hand, or a canonical one a declined write left behind. The CLI
+/// reports the count instead of claiming the layout is fully upgraded.
 pub(crate) fn rails_without_mini(layout: &str) -> usize {
     let Ok(doc) = layout.parse::<kdl::KdlDocument>() else {
         return 0;
     };
-    let unpaired = RailScan::of(layout).unpaired(&doc);
+    let mut unpaired = Unpaired::default();
+    collect_unpaired(&doc, &canonical_rails(layout), &mut unpaired);
     unpaired.upgrade.len() + unpaired.edited
 }
 
@@ -1217,10 +1199,10 @@ layout {
         assert!(analyze(&manual).has_rail && add_mini(&manual).is_none());
     }
 
-    /// The count the CLI reports: every injected rail left unpaired, edited or
-    /// not, and nothing that belongs to the user or already has its mini.
+    /// The count the CLI reports: every rail left unpaired, wherever it is and
+    /// whoever wrote it, and nothing that already has its mini.
     #[test]
-    fn rails_without_mini_counts_only_unpaired_injected_rails() {
+    fn rails_without_mini_counts_every_rail_without_a_mini() {
         let fresh = inject(USER_LAYOUT, &analyze(USER_LAYOUT)).unwrap();
         let pre_mini = strip_mini(&fresh);
         assert_eq!(rails_without_mini(&fresh), 0, "an upgraded layout has every mini");
@@ -1228,12 +1210,23 @@ layout {
         assert_eq!(rails_without_mini(&strip_mini(&full_layout())), 3, "setup-authored layouts count too");
         assert_eq!(rails_without_mini(USER_LAYOUT), 0, "no rail, nothing to report");
         assert_eq!(rails_without_mini("layout {\n  pane\n"), 0, "unparseable input claims nothing");
-        // Outside our regions the rails are the user's, even setup's own shape.
-        let manual = format!("// my own layout\n{}", strip_mini(&full_layout()));
-        assert_eq!(rails_without_mini(&manual), 0);
+        // Any edit to a layout setup wrote whole drops it out of
+        // `setup_authored_layouts`: the rails are still ours to report on, so a
+        // change as small as one rail's `size` must not hide them.
+        let edited_whole =
+            strip_mini(&full_layout()).replacen("pane size=32 borderless=true {", "pane size=40 borderless=true {", 1);
+        assert!(!setup_authored_layouts().contains(&edited_whole));
+        assert_eq!(rails_without_mini(&edited_whole), 3);
+        // A rail the user pasted by hand, outside any marker region.
+        let manual = format!("// my own layout\n{pre_mini}");
+        assert_eq!(rails_without_mini(&manual), 3);
         // A rail that already has its mini is paired wherever the mini is.
         let paired = fresh.replacen("pane size=32 borderless=true {", "pane size=40 borderless=true {", 1);
         assert_eq!(rails_without_mini(&paired), 0, "{paired}");
+        // A rail panes that names the wasm instead of the alias is a rail too.
+        let by_path = pre_mini
+            .replace("plugin location=\"radar\"", "plugin location=\"file:~/.config/zellij/plugins/zj_radar.wasm\"");
+        assert_eq!(rails_without_mini(&by_path), 3, "{by_path}");
     }
 
     /// `add_mini` still upgrades the canonical rails around an edited one and
@@ -1381,6 +1374,38 @@ layout {
             let layout = fresh.replacen(&pair, &format!("{full}{other}"), 1);
             assert_eq!(add_mini(&layout), Some(fresh.replacen(&pair, &format!("{pair}{other}"), 1)), "{plugin}");
         }
+    }
+
+    /// The pairing rule looks at the rail before a mini whether that rail is
+    /// canonical or edited: with `[edited, mini, full]` the free mini belongs to
+    /// the edited rail, so the full one after it still gets its own.
+    #[test]
+    fn add_mini_pairs_a_free_mini_with_an_edited_rail() {
+        let layout = concat!(
+            "layout {\n",
+            "    default_tab_template {\n",
+            "        // zj-radar:wrap begin\n",
+            "        pane split_direction=\"vertical\" {\n",
+            "            pane size=40 borderless=true {\n",
+            "                plugin location=\"radar\"\n",
+            "            }\n",
+            "            pane size=4 borderless=true {\n",
+            "                plugin location=\"radar\" {\n",
+            "                    mini true\n",
+            "                }\n",
+            "            }\n",
+            "            pane size=32 borderless=true {\n",
+            "                plugin location=\"radar\"\n",
+            "            }\n",
+            "            children\n",
+            "        }\n",
+            "        // zj-radar:wrap end\n",
+            "    }\n",
+            "}\n",
+        );
+        let upgraded = add_mini(layout).expect("the bare rail after the mini still upgrades");
+        assert_eq!(upgraded.matches("mini true").count(), 2, "{upgraded}");
+        assert!(add_mini(&upgraded).is_none(), "re-running must be a no-op");
     }
 
     /// Whole-file uninstall must still recognise what the pre-mini setup wrote.

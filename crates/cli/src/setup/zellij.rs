@@ -715,14 +715,13 @@ fn run_layout_inject(layout_path: &Path, inject_flag: bool, yes: bool, dry_run: 
                 }
                 InjectMode::Snippet => false,
             };
-            if consent {
-                do_add_mini(layout_path, &new_text, dry_run);
-                report_rails_without_mini(&new_text);
-            } else {
+            if !consent {
                 println!(
                     "zellij: layout has the rail but not the mini rail ({}) — re-run with --inject to add it",
                     layout_path.display()
                 );
+            } else if do_add_mini(layout_path, &new_text, dry_run) {
+                report_rails_without_mini(&new_text);
             }
             return;
         }
@@ -751,21 +750,21 @@ fn run_layout_inject(layout_path: &Path, inject_flag: bool, yes: bool, dry_run: 
     }
 }
 
-/// Say how many injected rail panes still have no mini rail. `add_mini` only
-/// rewrites the exact pane it wrote, so a rail the user edited (its `size`, a
-/// trailing comment, an own plugin block) keeps working without a mini and
-/// `sidebar-toggle` looks broken in those tabs; that needs a manual edit, not
-/// a claim of success.
+/// Say how many rail panes still have no mini rail. `add_mini` only rewrites
+/// the exact pane it wrote, so a rail the user edited (its `size`, a trailing
+/// comment, an own plugin block) or pasted by hand keeps working without a
+/// mini and `sidebar-toggle` looks broken in those tabs; that needs a manual
+/// edit, not a claim of success.
 fn report_rails_without_mini(layout: &str) {
     match crate::layout::rails_without_mini(layout) {
         0 => {}
         1 => println!(
-            "zellij: 1 injected rail still has no mini rail (edited by hand) — add a `mini` pane \
-             there for `sidebar-toggle`; see docs/install.md"
+            "zellij: 1 rail still has no mini rail — add a `mini` pane next to it for `sidebar-toggle`; \
+             see docs/install.md"
         ),
         count => println!(
-            "zellij: {count} injected rails still have no mini rail (edited by hand) — add a `mini` \
-             pane to each for `sidebar-toggle`; see docs/install.md"
+            "zellij: {count} rails still have no mini rail — add a `mini` pane next to each for \
+             `sidebar-toggle`; see docs/install.md"
         ),
     }
 }
@@ -804,21 +803,29 @@ fn print_missing_layout_fallback(layout_path: &Path) {
 }
 
 /// Write the upgraded layout (`layout::add_mini`): backup, then atomic write.
-fn do_add_mini(layout_path: &Path, new_text: &str, dry_run: bool) {
+/// `false` when the write failed — the caller must not report on a layout that
+/// never reached the disk.
+fn do_add_mini(layout_path: &Path, new_text: &str, dry_run: bool) -> bool {
     if dry_run {
         println!(
             "zellij: would add the mini rail to {} (dry-run)\n--- layout (dry-run) ---\n{new_text}",
             layout_path.display()
         );
-        return;
+        return true;
     }
     match backup_then_write(layout_path, new_text) {
-        Ok(()) => println!(
-            "zellij: added the mini rail to {} (backup: {})",
-            layout_path.display(),
-            path_with_suffix(layout_path, BACKUP_SUFFIX).display()
-        ),
-        Err(e) => crate::exit::fail_report("zellij", format!("write failed — {e}")),
+        Ok(()) => {
+            println!(
+                "zellij: added the mini rail to {} (backup: {})",
+                layout_path.display(),
+                path_with_suffix(layout_path, BACKUP_SUFFIX).display()
+            );
+            true
+        }
+        Err(e) => {
+            crate::exit::fail_report("zellij", format!("write failed — {e}"));
+            false
+        }
     }
 }
 
