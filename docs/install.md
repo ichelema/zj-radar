@@ -374,7 +374,14 @@ zj-radar update --check    # report only; exit 1 when an update is available
 
 A layout injected by an earlier version has no mini rail yet:
 `zj-radar setup zellij --inject` adds it next to each injected rail pane and
-leaves the rest of the layout as it was.
+leaves the rest of the layout as it was. It only rewrites the pane it wrote
+itself. A rail you changed (a different `size`, a trailing comment, your own
+`plugin` block) or added by hand stays as it is. Once you edit a layout that
+`setup` created whole, `--inject` adds no mini to it. `--inject` reports how
+many rails are left without one. Add the missing pane by hand, in the shape
+shown above: a `pane size=4 borderless=true` in the same tab, holding
+`plugin location="radar" { mini true }`. Until then `sidebar-toggle` has
+nothing to switch to in those tabs.
 
 Restart Zellij, or open a new session, to load the new sidebar. A running
 session keeps the old plugin.
