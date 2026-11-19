@@ -152,7 +152,10 @@ pub(crate) fn analyze(layout: &str) -> LayoutFacts {
         has_top_bar: layout.contains("zellij:tab-bar") || layout.contains("zellij:compact-bar"),
         has_rail: layout.contains(WRAP_BEGIN)
             || layout.contains(BLOCK_BEGIN)
-            || layout.contains("plugin location=\"radar\""),
+            || layout
+                .split("plugin location=\"")
+                .skip(1)
+                .any(|rest| rest.split('"').next().is_some_and(is_radar_location)),
         has_children_anchor: layout.split_whitespace().any(|tok| tok == "children" || tok.starts_with("children;")),
     }
 }
@@ -366,43 +369,24 @@ pub(crate) fn inject(layout: &str, facts: &LayoutFacts) -> Result<String, Refusa
 
 use std::collections::BTreeMap;
 
-/// A rail pane as the sibling walk sees it. `Full` is the canonical pre-mini
-/// form `add_mini` upgrades in place; `Edited` is any other rail pane (a
-/// different `size`, a trailing comment, its own plugin block, a hand-pasted
-/// rail), which only a manual edit can pair with a mini.
+/// A sibling as `add_mini`'s pairing walk sees it.
 #[derive(Clone, Copy)]
 enum Sibling {
     Full(usize),
-    Edited,
     Mini,
     Other,
 }
 
-impl Sibling {
-    fn is_rail(self) -> bool {
-        matches!(self, Sibling::Full(_) | Sibling::Edited)
-    }
-}
-
-/// Rail panes that still have no mini next to them.
-#[derive(Default)]
-struct Unpaired {
-    /// Canonical rails, by the start offset `add_mini` inserts at.
-    upgrade: Vec<usize>,
-    /// Rails `add_mini` must not rewrite: reported only.
-    edited: usize,
+/// A plugin `location` that loads zj-radar: the alias, or the wasm itself (a
+/// rail pane can name the file instead of going through
+/// `plugins { radar location="file:…" }`).
+fn is_radar_location(location: &str) -> bool {
+    location == "radar" || location.ends_with(crate::WASM_FILE_NAME)
 }
 
 fn is_radar_plugin(plugin: &kdl::KdlNode) -> bool {
-    if plugin.name().value() != "plugin" {
-        return false;
-    }
-    // The alias, or the wasm itself: a rail pane can name the plugin file
-    // instead of going through `plugins { radar location="file:…" }`.
-    plugin
-        .get("location")
-        .and_then(|entry| entry.as_string())
-        .is_some_and(|location| location == "radar" || location.ends_with("zj_radar.wasm"))
+    plugin.name().value() == "plugin"
+        && plugin.get("location").and_then(|entry| entry.as_string()).is_some_and(is_radar_location)
 }
 
 fn plugin_mini_enabled(plugin: &kdl::KdlNode) -> bool {
@@ -457,7 +441,7 @@ fn collect_disabled_minis(gap: &str, siblings: &mut Vec<Sibling>) {
     }
 }
 
-fn collect_unpaired(doc: &kdl::KdlDocument, canonical: &BTreeMap<usize, (usize, &str)>, result: &mut Unpaired) {
+fn collect_unpaired(doc: &kdl::KdlDocument, canonical: &BTreeMap<usize, (usize, &str)>, result: &mut Vec<usize>) {
     let mut siblings = Vec::new();
     if let Some(format) = doc.format() {
         collect_disabled_minis(&format.leading, &mut siblings);
@@ -471,8 +455,6 @@ fn collect_unpaired(doc: &kdl::KdlDocument, canonical: &BTreeMap<usize, (usize, 
             Sibling::Full(offset)
         } else if is_mini(node) {
             Sibling::Mini
-        } else if is_rail(node) {
-            Sibling::Edited
         } else {
             Sibling::Other
         });
@@ -487,19 +469,14 @@ fn collect_unpaired(doc: &kdl::KdlDocument, canonical: &BTreeMap<usize, (usize, 
         collect_disabled_minis(&format.trailing, &mut siblings);
     }
     for (i, sibling) in siblings.iter().enumerate() {
-        if !sibling.is_rail() {
-            continue;
-        }
+        let Sibling::Full(offset) = *sibling else { continue };
         let next_is_mini = matches!(siblings.get(i + 1), Some(Sibling::Mini));
         // In full/mini/full, keep the canonical forward pair.
-        let prev_is_free_mini =
-            i > 0 && matches!(siblings[i - 1], Sibling::Mini) && !(i > 1 && siblings[i - 2].is_rail());
-        if next_is_mini || prev_is_free_mini {
-            continue;
-        }
-        match *sibling {
-            Sibling::Full(offset) => result.upgrade.push(offset),
-            _ => result.edited += 1,
+        let prev_is_free_mini = i > 0
+            && matches!(siblings[i - 1], Sibling::Mini)
+            && !(i > 1 && matches!(siblings[i - 2], Sibling::Full(_)));
+        if !next_is_mini && !prev_is_free_mini {
+            result.push(offset);
         }
     }
 }
@@ -551,15 +528,15 @@ pub(crate) fn add_mini(layout: &str) -> Option<String> {
         return None;
     }
     let doc = layout.parse::<kdl::KdlDocument>().ok()?;
-    let mut unpaired = Unpaired::default();
+    let mut unpaired = Vec::new();
     collect_unpaired(&doc, &canonical, &mut unpaired);
-    if unpaired.upgrade.is_empty() {
+    if unpaired.is_empty() {
         return None;
     }
-    unpaired.upgrade.sort_unstable();
+    unpaired.sort_unstable();
     let mut out = String::with_capacity(layout.len() + 256);
     let mut cursor = 0;
-    for start in unpaired.upgrade {
+    for start in unpaired {
         let (insert_at, indent) = canonical[&start];
         out.push_str(&layout[cursor..insert_at]);
         for mini in MINI_PANE {
@@ -571,17 +548,47 @@ pub(crate) fn add_mini(layout: &str) -> Option<String> {
     Some(out)
 }
 
-/// Rail panes that still have no mini rail, so `sidebar-toggle` has nothing to
-/// switch to in those tabs: an edited rail `add_mini` must not rewrite, a rail
-/// pasted by hand, or a canonical one a declined write left behind. The CLI
-/// reports the count instead of claiming the layout is fully upgraded.
+/// Nodes that become a tab, or the panes of one. The plugin pairs a rail with
+/// any tiled mini of its own tab, not with a neighbour (`pair_changed`), so
+/// the count works per tab.
+const TAB_SCOPES: [&str; 4] = ["tab", "default_tab_template", "new_tab_template", "tab_template"];
+
+/// Rails in this tab scope with no mini to switch to, plus those of the
+/// scopes nested in it. Disabled (`/-`) panes are not in the tree, so they
+/// count as absent, as they are to Zellij; floating panes are not rails.
+fn scope_rails_without_mini(scope: &kdl::KdlDocument) -> usize {
+    fn tally(doc: &kdl::KdlDocument, rails: &mut usize, minis: &mut usize, nested: &mut usize) {
+        for node in doc.nodes() {
+            let name = node.name().value();
+            if name == "floating_panes" {
+                continue;
+            }
+            if TAB_SCOPES.contains(&name) {
+                *nested += node.children().map_or(0, scope_rails_without_mini);
+                continue;
+            }
+            if is_mini(node) {
+                *minis += 1;
+            } else if is_rail(node) {
+                *rails += 1;
+            }
+            if let Some(children) = node.children() {
+                tally(children, rails, minis, nested);
+            }
+        }
+    }
+    let (mut rails, mut minis, mut nested) = (0, 0, 0);
+    tally(scope, &mut rails, &mut minis, &mut nested);
+    nested + if minis == 0 { rails } else { 0 }
+}
+
+/// Rail panes whose tab has no mini rail, so `sidebar-toggle` has nothing to
+/// switch to there: a rail the user edited (`add_mini` rewrites only the pane
+/// it wrote), one pasted by hand, or one in a layout `setup` wrote whole and
+/// the user then changed. The CLI reports the count instead of claiming the
+/// layout is fully upgraded.
 pub(crate) fn rails_without_mini(layout: &str) -> usize {
-    let Ok(doc) = layout.parse::<kdl::KdlDocument>() else {
-        return 0;
-    };
-    let mut unpaired = Unpaired::default();
-    collect_unpaired(&doc, &canonical_rails(layout), &mut unpaired);
-    unpaired.upgrade.len() + unpaired.edited
+    layout.parse::<kdl::KdlDocument>().map_or(0, |doc| scope_rails_without_mini(&doc))
 }
 
 /// Reverse `inject`: a true inverse, not a blunt strip. Two marker kinds are
@@ -1223,10 +1230,46 @@ layout {
         // A rail that already has its mini is paired wherever the mini is.
         let paired = fresh.replacen("pane size=32 borderless=true {", "pane size=40 borderless=true {", 1);
         assert_eq!(rails_without_mini(&paired), 0, "{paired}");
-        // A rail panes that names the wasm instead of the alias is a rail too.
+        // A rail pane that names the wasm instead of the alias is a rail too,
+        // and `analyze` sees it: `--inject` must not add a second rail.
         let by_path = pre_mini
             .replace("plugin location=\"radar\"", "plugin location=\"file:~/.config/zellij/plugins/zj_radar.wasm\"");
         assert_eq!(rails_without_mini(&by_path), 3, "{by_path}");
+        let only_by_path = "layout {\n    pane size=32 borderless=true {\n        plugin location=\"file:/opt/zj_radar.wasm\"\n    }\n    pane\n}\n";
+        assert!(analyze(only_by_path).has_rail);
+        assert_eq!(rails_without_mini(only_by_path), 1);
+        // ...and a mini that names the wasm pairs a canonical rail.
+        let mini_by_path = fresh.replace(
+            "                plugin location=\"radar\" {\n",
+            "                plugin location=\"file:~/.config/zellij/plugins/zj_radar.wasm\" {\n",
+        );
+        assert_ne!(mini_by_path, fresh);
+        assert!(add_mini(&mini_by_path).is_none() && rails_without_mini(&mini_by_path) == 0, "{mini_by_path}");
+    }
+
+    /// The plugin pairs a rail with any tiled mini of its tab (`pair_changed`),
+    /// so the count follows the tab, not the neighbour, and leaves out what
+    /// Zellij never loads: floating panes, disabled (`/-`) panes.
+    #[test]
+    fn rails_without_mini_pairs_per_tab_like_the_plugin() {
+        let tab = |body: &str| format!("layout {{\n    default_tab_template {{\n{body}    }}\n}}\n");
+        let rail = "        pane size=32 borderless=true {\n            plugin location=\"radar\"\n        }\n";
+        let mini = "        pane size=4 borderless=true {\n            plugin location=\"radar\" {\n                mini true\n            }\n        }\n";
+        // Not adjacent, same tab: paired.
+        assert_eq!(rails_without_mini(&tab(&format!("{rail}        children\n{mini}"))), 0);
+        // Two rails share the tab's one mini, as at runtime.
+        assert_eq!(rails_without_mini(&tab(&format!("{rail}{mini}{rail}"))), 0);
+        // A mini in another tab does not count.
+        let split = format!(
+            "layout {{\n    default_tab_template {{\n{rail}    }}\n    new_tab_template {{\n{mini}    }}\n}}\n"
+        );
+        assert_eq!(rails_without_mini(&split), 1);
+        // A floating radar pane is not a rail, even in a tab with no mini.
+        let floating = format!("        floating_panes {{\n    {rail}        }}\n        children\n");
+        assert_eq!(rails_without_mini(&tab(&floating)), 0, "{}", tab(&floating));
+        // A disabled mini is no mini: Zellij never loads it.
+        let disabled = format!("{rail}{}", mini.replacen("pane", "/-pane", 1));
+        assert_eq!(rails_without_mini(&tab(&disabled)), 1, "{}", tab(&disabled));
     }
 
     /// `add_mini` still upgrades the canonical rails around an edited one and
@@ -1376,11 +1419,10 @@ layout {
         }
     }
 
-    /// The pairing rule looks at the rail before a mini whether that rail is
-    /// canonical or edited: with `[edited, mini, full]` the free mini belongs to
-    /// the edited rail, so the full one after it still gets its own.
+    /// `[edited, mini, full]` in one tab: the plugin pairs both rails with the
+    /// one mini, so `add_mini` adds nothing and nothing is reported.
     #[test]
-    fn add_mini_pairs_a_free_mini_with_an_edited_rail() {
+    fn one_mini_serves_every_rail_of_its_tab() {
         let layout = concat!(
             "layout {\n",
             "    default_tab_template {\n",
@@ -1403,9 +1445,8 @@ layout {
             "    }\n",
             "}\n",
         );
-        let upgraded = add_mini(layout).expect("the bare rail after the mini still upgrades");
-        assert_eq!(upgraded.matches("mini true").count(), 2, "{upgraded}");
-        assert!(add_mini(&upgraded).is_none(), "re-running must be a no-op");
+        assert!(add_mini(layout).is_none());
+        assert_eq!(rails_without_mini(layout), 0);
     }
 
     /// Whole-file uninstall must still recognise what the pre-mini setup wrote.

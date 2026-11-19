@@ -601,21 +601,21 @@ fn setup_zellij_inject_reports_a_modified_whole_layout() {
 
 /// The count describes the file on disk: when the write fails there is nothing
 /// to report on, only the error.
-#[cfg(unix)]
 #[test]
 fn setup_zellij_inject_reports_nothing_after_a_failed_write() {
-    use std::os::unix::fs::PermissionsExt;
-
     let config_dir = isolated_zellij_config(FIXTURE_LAYOUT);
-    let layouts = config_dir.path().join("layouts");
-    let layout_path = layouts.join("default.kdl");
+    let layout_path = config_dir.path().join("layouts/default.kdl");
     setup_zellij(&config_dir, &["--inject"]);
     let current = fs::read_to_string(&layout_path).unwrap();
     let one_edited =
         strip_mini(&current).replacen("pane size=32 borderless=true {", "pane size=40 borderless=true {", 1);
     fs::write(&layout_path, &one_edited).unwrap();
 
-    fs::set_permissions(&layouts, fs::Permissions::from_mode(0o555)).unwrap();
+    // A directory where the backup goes fails the write for any user, root
+    // included (file permissions would not).
+    let bak = config_dir.path().join("layouts/default.kdl.zj-radar.bak");
+    fs::remove_file(&bak).unwrap();
+    fs::create_dir(&bak).unwrap();
     let out = Command::cargo_bin("zj-radar")
         .unwrap()
         .args(["setup", "zellij", "--inject"])
@@ -624,13 +624,42 @@ fn setup_zellij_inject_reports_nothing_after_a_failed_write() {
         .failure()
         .get_output()
         .clone();
-    fs::set_permissions(&layouts, fs::Permissions::from_mode(0o755)).unwrap();
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stderr.contains("write failed"), "{stderr}");
-    assert!(!stdout.contains("still has no mini rail"), "a failed write has no layout to report on: {stdout}");
+    assert!(!stdout.contains("no mini rail"), "a failed write has no layout to report on: {stdout}");
     assert_eq!(fs::read_to_string(&layout_path).unwrap(), one_edited, "the failed write leaves the file alone");
+}
+
+/// `--dry-run` reports on the layout it would write and writes nothing.
+#[test]
+fn setup_zellij_inject_dry_run_reports_on_the_layout_it_would_write() {
+    let config_dir = isolated_zellij_config(FIXTURE_LAYOUT);
+    let layout_path = config_dir.path().join("layouts/default.kdl");
+    setup_zellij(&config_dir, &["--inject"]);
+    let current = fs::read_to_string(&layout_path).unwrap();
+    let one_edited =
+        strip_mini(&current).replacen("pane size=32 borderless=true {", "pane size=40 borderless=true {", 1);
+    fs::write(&layout_path, &one_edited).unwrap();
+
+    let stdout = setup_zellij(&config_dir, &["--inject", "--dry-run"]);
+    assert!(stdout.contains("would add the mini rail"), "{stdout}");
+    assert!(stdout.contains("1 rail still has no mini rail"), "{stdout}");
+    assert_eq!(fs::read_to_string(&layout_path).unwrap(), one_edited, "dry-run writes nothing");
+}
+
+/// A rail that names the wasm instead of the alias is recognised: no second
+/// rail injected next to it, and its missing mini is reported.
+#[test]
+fn setup_zellij_inject_recognises_a_rail_that_names_the_wasm() {
+    let layout = "layout {\n    default_tab_template {\n        pane size=32 borderless=true {\n            \
+                  plugin location=\"file:~/.config/zellij/plugins/zj_radar.wasm\"\n        }\n        children\n    }\n}\n";
+    let config_dir = isolated_zellij_config(layout);
+    let stdout = setup_zellij(&config_dir, &["--inject"]);
+    assert!(stdout.contains("already has the rail"), "{stdout}");
+    assert!(stdout.contains("1 rail still has no mini rail"), "{stdout}");
+    assert_eq!(fs::read_to_string(config_dir.path().join("layouts/default.kdl")).unwrap(), layout);
 }
 
 #[test]
