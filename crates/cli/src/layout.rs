@@ -372,10 +372,111 @@ pub(crate) fn inject(layout: &str, facts: &LayoutFacts) -> Result<String, Refusa
 /// when there is nothing to add: checking each pair, not the file, is what
 /// makes re-injection idempotent and finishes a partial upgrade.
 pub(crate) fn add_mini(layout: &str) -> Option<String> {
+    use std::collections::BTreeMap;
+
+    #[derive(Clone, Copy)]
+    enum Sibling {
+        Full(usize),
+        Mini,
+        Other,
+    }
+
+    fn plugin_mini_enabled(plugin: &kdl::KdlNode) -> bool {
+        // Zellij 0.46 processes properties first, then child nodes in order.
+        // Match the plugin's `config::parse_bool` on the resulting value.
+        let truthy = |value: &str| matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on");
+        if let Some(mini) =
+            plugin.children().and_then(|children| children.nodes().iter().rfind(|node| node.name().value() == "mini"))
+        {
+            let value = mini.entries().first().map(|entry| entry.value());
+            return match value {
+                Some(kdl::KdlValue::Bool(enabled)) => *enabled,
+                Some(kdl::KdlValue::Integer(number)) => *number == 1,
+                Some(kdl::KdlValue::String(text)) => truthy(text),
+                _ => mini.children().is_some_and(|children| truthy(&children.to_string())),
+            };
+        }
+        // Properties use KDL v1's value Display, which retains string quotes
+        // and integer radix (unlike Zellij's scalar conversion for children).
+        plugin
+            .entries()
+            .iter()
+            .rfind(|entry| entry.name().is_some_and(|key| key.repr().unwrap_or(key.value()) == "mini"))
+            .is_some_and(|entry| {
+                entry.value().as_bool() == Some(true)
+                    || (entry.value().as_integer() == Some(1)
+                        && !entry.format().is_some_and(|format| format.value_repr.contains(['x', 'o', 'b'])))
+            })
+    }
+
+    fn is_mini(node: &kdl::KdlNode) -> bool {
+        node.name().value() == "pane"
+            && node.children().is_some_and(|children| {
+                children.nodes().iter().any(|plugin| {
+                    plugin.name().value() == "plugin"
+                        && plugin.get("location").and_then(|e| e.as_string()) == Some("radar")
+                        && plugin_mini_enabled(plugin)
+                })
+            })
+    }
+
+    // Disabled nodes live in formatting, not the AST. Reparse each candidate
+    // in its original comment context so ordinary comments cannot become nodes.
+    fn collect_disabled_minis(gap: &str, siblings: &mut Vec<Sibling>) {
+        for (offset, _) in gap.match_indices("/-") {
+            let mut fragment = gap.to_owned();
+            fragment.replace_range(offset..offset + 2, "  ");
+            if fragment.parse::<kdl::KdlDocument>().is_ok_and(|doc| doc.nodes().iter().any(is_mini)) {
+                siblings.push(Sibling::Mini);
+            }
+        }
+    }
+
+    fn collect_unpaired(doc: &kdl::KdlDocument, full: &BTreeMap<usize, (usize, &str)>, result: &mut Vec<usize>) {
+        let mut siblings = Vec::new();
+        if let Some(format) = doc.format() {
+            collect_disabled_minis(&format.leading, &mut siblings);
+        }
+        for node in doc.nodes() {
+            if let Some(format) = node.format() {
+                collect_disabled_minis(&format.leading, &mut siblings);
+            }
+            let offset = node.name().span().offset();
+            siblings.push(if full.contains_key(&offset) {
+                Sibling::Full(offset)
+            } else if is_mini(node) {
+                Sibling::Mini
+            } else {
+                Sibling::Other
+            });
+            if let Some(children) = node.children() {
+                collect_unpaired(children, full, result);
+            }
+            if let Some(format) = node.format() {
+                collect_disabled_minis(&format.trailing, &mut siblings);
+            }
+        }
+        if let Some(format) = doc.format() {
+            collect_disabled_minis(&format.trailing, &mut siblings);
+        }
+        for (i, sibling) in siblings.iter().enumerate() {
+            let Sibling::Full(offset) = *sibling else { continue };
+            let next_is_mini = matches!(siblings.get(i + 1), Some(Sibling::Mini));
+            // In full/mini/full, keep the canonical forward pair.
+            let prev_is_free_mini = i > 0
+                && matches!(siblings[i - 1], Sibling::Mini)
+                && !(i > 1 && matches!(siblings[i - 2], Sibling::Full(_)));
+            if !next_is_mini && !prev_is_free_mini {
+                result.push(offset);
+            }
+        }
+    }
+
     let whole = setup_authored_layouts().iter().any(|l| l == layout);
     let lines: Vec<&str> = layout.split_inclusive('\n').collect();
-    let mut out = String::with_capacity(layout.len() + 256);
-    let (mut in_region, mut changed) = (whole, false);
+    let mut full = BTreeMap::new();
+    let mut in_region = whole;
+    let mut offset = 0;
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
         // `contains`: an inline `children` anchor puts the marker mid-line.
@@ -384,23 +485,42 @@ pub(crate) fn add_mini(layout: &str) -> Option<String> {
         } else if !whole && (t.contains(WRAP_END) || t.contains(BLOCK_END)) {
             in_region = false;
         }
-        out.push_str(line);
-        let closes_rail = t == "}"
+        // Keep the existing conservative, byte-preserving insertion points.
+        if in_region
+            && t == "}"
             && i >= 2
             && lines[i - 1].trim() == "plugin location=\"radar\""
-            && lines[i - 2].trim() == "pane size=32 borderless=true {";
-        // The rail's next pane, past blank and comment lines a user may add.
-        let next = lines[i + 1..].iter().map(|l| l.trim()).find(|l| !l.is_empty() && !l.starts_with("//"));
-        let has_mini = next == Some(MINI_PANE[0]);
-        if in_region && closes_rail && !has_mini {
+            && lines[i - 2].trim() == "pane size=32 borderless=true {"
+        {
+            let start = offset - lines[i - 1].len() - lines[i - 2].trim_start().len();
             let indent = &line[..line.len() - line.trim_start().len()];
-            for mini in &MINI_PANE {
-                out.push_str(&format!("{indent}{mini}\n"));
-            }
-            changed = true;
+            full.insert(start, (offset + line.len(), indent));
         }
+        offset += line.len();
     }
-    changed.then_some(out)
+    if full.is_empty() {
+        return None;
+    }
+
+    let doc = layout.parse::<kdl::KdlDocument>().ok()?;
+    let mut unpaired = Vec::new();
+    collect_unpaired(&doc, &full, &mut unpaired);
+    if unpaired.is_empty() {
+        return None;
+    }
+    unpaired.sort_unstable();
+    let mut out = String::with_capacity(layout.len() + 256);
+    let mut cursor = 0;
+    for start in unpaired {
+        let (insert_at, indent) = full[&start];
+        out.push_str(&layout[cursor..insert_at]);
+        for mini in MINI_PANE {
+            out.push_str(&format!("{indent}{mini}\n"));
+        }
+        cursor = insert_at;
+    }
+    out.push_str(&layout[cursor..]);
+    Some(out)
 }
 
 /// Reverse `inject`: a true inverse, not a blunt strip. Two marker kinds are
@@ -1054,6 +1174,82 @@ layout {
             );
             assert_ne!(spaced, fresh, "the fixture must hold a rail/mini pair at this indent");
             assert!(add_mini(&spaced).is_none(), "gap {gap:?} must not duplicate the mini");
+        }
+
+        let full = concat!(
+            "            pane size=32 borderless=true {\n",
+            "                plugin location=\"radar\"\n",
+            "            }\n"
+        );
+        let mini = concat!(
+            "            pane size=4 borderless=true {\n",
+            "                plugin location=\"radar\" {\n",
+            "                    mini true\n",
+            "                }\n",
+            "            }\n"
+        );
+        let pair = format!("{full}{mini}");
+        assert!(fresh.contains(&pair));
+        let pane_with_plugin = |plugin: &str| {
+            format!("            pane size=4 borderless=true {{\n                {plugin}\n            }}\n")
+        };
+        let disabled = mini.replacen("pane", "/- pane", 1);
+        let unrelated = disabled.replacen("location=\"radar\"", "location=\"other\"", 1);
+        let variants = [
+            ("block comment", format!("{full}            /* mini rail */\n{mini}")),
+            ("multiline block comment", format!("{full}            /* mini\n               rail */\n{mini}")),
+            ("trailing comment", format!("{full}{}", mini.replacen("{\n", "{ // mini rail\n", 1))),
+            (
+                "inline mini",
+                format!(
+                    "{full}            pane size=4 borderless=true {{ plugin location=\"radar\" {{ mini true; }}; }}\n"
+                ),
+            ),
+            ("mini before full", format!("{mini}{full}")),
+            ("disabled mini", format!("{full}{disabled}")),
+            ("disabled mini before full", format!("{disabled}{full}")),
+            ("disabled unrelated pane before active mini", format!("{full}{unrelated}{mini}")),
+            ("string mini", format!("{full}{}", mini.replace("mini true", r#"mini "true""#))),
+            ("integer mini", format!("{full}{}", mini.replace("mini true", "mini 1"))),
+            ("integer mini property", format!("{full}{}", pane_with_plugin(r#"plugin location="radar" mini=1"#))),
+            ("trimmed boolean alias", format!("{full}{}", mini.replace("mini true", r#"mini " YeS ""#))),
+            ("mini property", format!("{full}{}", pane_with_plugin(r#"plugin location="radar" mini=true"#))),
+            (
+                "inline mini property",
+                format!("{full}            pane size=4 borderless=true {{ plugin location=\"radar\" mini=true; }}\n"),
+            ),
+            (
+                "child overrides false property",
+                format!("{full}{}", pane_with_plugin(r#"plugin location="radar" mini=false { mini "on"; }"#)),
+            ),
+        ];
+        let mut rewritten = Vec::new();
+        for (name, replacement) in variants {
+            let layout = fresh.replacen(&pair, &replacement, 1);
+            assert_ne!(layout, fresh, "fixture: {name}");
+            layout.parse::<kdl::KdlDocument>().unwrap_or_else(|error| panic!("invalid fixture {name}: {error}"));
+            if add_mini(&layout).is_some() {
+                rewritten.push(name);
+            }
+        }
+        assert!(rewritten.is_empty(), "already paired layouts were rewritten: {rewritten:?}");
+
+        let other = format!(
+            "            // /- pane size=4 borderless=true {{ plugin location=\"radar\" {{ mini true; }}; }}\n{unrelated}"
+        );
+        let layout = fresh.replacen(&pair, &format!("{full}{other}"), 1);
+        assert_eq!(add_mini(&layout), Some(fresh.replacen(&pair, &format!("{full}{mini}{other}"), 1)));
+
+        for plugin in [
+            r#"plugin location="radar" { mini false; }"#,
+            r#"plugin location="radar" mini=true { mini false; }"#,
+            r#"plugin location="radar" { mini true; mini false; }"#,
+            r#"plugin location="radar" mini="true""#,
+            r#"plugin location="radar" mini=0x1"#,
+        ] {
+            let other = pane_with_plugin(plugin);
+            let layout = fresh.replacen(&pair, &format!("{full}{other}"), 1);
+            assert_eq!(add_mini(&layout), Some(fresh.replacen(&pair, &format!("{pair}{other}"), 1)), "{plugin}");
         }
     }
 
