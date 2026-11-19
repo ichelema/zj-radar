@@ -538,6 +538,37 @@ fn setup_zellij_inject_adds_the_mini_rail_to_a_pre_mini_injection_and_is_idempot
     assert_eq!(fs::read_to_string(&layout_path).unwrap(), current, "re-inject is byte-identical");
 }
 
+/// `add_mini` only rewrites the exact pane it wrote, so a rail the user edited
+/// keeps no mini. The CLI must say how many are left instead of reporting a
+/// full upgrade: `sidebar-toggle` is dead in those tabs until a manual edit.
+#[test]
+fn setup_zellij_inject_reports_edited_rails_left_without_a_mini() {
+    let config_dir = isolated_zellij_config(FIXTURE_LAYOUT);
+    let layout_path = config_dir.path().join("layouts/default.kdl");
+    setup_zellij(&config_dir, &["--inject"]);
+    let current = fs::read_to_string(&layout_path).unwrap();
+    let resized = |layout: &str| layout.replace("pane size=32 borderless=true {", "pane size=40 borderless=true {");
+
+    // One rail resized by hand: the other two upgrade, the edited one is reported.
+    let one_edited =
+        strip_mini(&current).replacen("pane size=32 borderless=true {", "pane size=40 borderless=true {", 1);
+    fs::write(&layout_path, &one_edited).unwrap();
+    let stdout = setup_zellij(&config_dir, &["--inject"]);
+    assert!(stdout.contains("added the mini rail"), "{stdout}");
+    assert!(stdout.contains("1 injected rail still has no mini rail"), "{stdout}");
+    let upgraded = fs::read_to_string(&layout_path).unwrap();
+    assert_eq!(upgraded.matches("mini true").count(), 2, "{upgraded}");
+    assert!(upgraded.contains("pane size=40 borderless=true {"), "the edited rail stays as written: {upgraded}");
+
+    // Every rail resized: nothing is written, yet the report still names them.
+    let all_resized = resized(&strip_mini(&current));
+    fs::write(&layout_path, &all_resized).unwrap();
+    let stdout = setup_zellij(&config_dir, &["--inject"]);
+    assert!(stdout.contains("already has the rail"), "{stdout}");
+    assert!(stdout.contains("3 injected rails still have no mini rail"), "{stdout}");
+    assert_eq!(fs::read_to_string(&layout_path).unwrap(), all_resized, "nothing to write");
+}
+
 #[test]
 fn setup_zellij_uninstall_removes_both_panes_and_a_pre_mini_injection() {
     for pre_mini in [false, true] {

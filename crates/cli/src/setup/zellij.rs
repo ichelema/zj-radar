@@ -717,6 +717,7 @@ fn run_layout_inject(layout_path: &Path, inject_flag: bool, yes: bool, dry_run: 
             };
             if consent {
                 do_add_mini(layout_path, &new_text, dry_run);
+                report_rails_without_mini(&new_text);
             } else {
                 println!(
                     "zellij: layout has the rail but not the mini rail ({}) — re-run with --inject to add it",
@@ -726,6 +727,7 @@ fn run_layout_inject(layout_path: &Path, inject_flag: bool, yes: bool, dry_run: 
             return;
         }
         println!("zellij: layout already has the rail ({})", layout_path.display());
+        report_rails_without_mini(&text);
         return;
     }
 
@@ -746,6 +748,25 @@ fn run_layout_inject(layout_path: &Path, inject_flag: bool, yes: bool, dry_run: 
         InjectMode::Inject => {
             do_inject(layout_path, &text, &facts, dry_run);
         }
+    }
+}
+
+/// Say how many injected rail panes still have no mini rail. `add_mini` only
+/// rewrites the exact pane it wrote, so a rail the user edited (its `size`, a
+/// trailing comment, an own plugin block) keeps working without a mini and
+/// `sidebar-toggle` looks broken in those tabs; that needs a manual edit, not
+/// a claim of success.
+fn report_rails_without_mini(layout: &str) {
+    match crate::layout::rails_without_mini(layout) {
+        0 => {}
+        1 => println!(
+            "zellij: 1 injected rail still has no mini rail (edited by hand) — add a `mini` pane \
+             there for `sidebar-toggle`; see docs/install.md"
+        ),
+        count => println!(
+            "zellij: {count} injected rails still have no mini rail (edited by hand) — add a `mini` \
+             pane to each for `sidebar-toggle`; see docs/install.md"
+        ),
     }
 }
 
