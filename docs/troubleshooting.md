@@ -183,8 +183,10 @@ descriptors.
 without the grant shows the prompt on the full rail of each tab: answer it in
 every tab. The mini rail asks only once its full rail holds the grant, so it
 does not wait for an answer nobody can give. In rare cases, with many tabs
-starting together, a mini can still park
-([why](design.md#5-plugin--zellij-wiring)); restart the session. Give scripted
+starting together or several clients attached, a mini can still park
+([why](design.md#5-plugin--zellij-wiring)); restart the session. A mini that
+never asked takes its grant from
+`zellij -s <session> pipe --name zj_radar.cmd.v1 -- grant-ready-now`. Give scripted
 `zellij pipe` sends a deadline (for example `timeout 5 zellij pipe …`).
 
 ## Cards look flat (no colored row backgrounds)

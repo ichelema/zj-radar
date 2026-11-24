@@ -2199,7 +2199,11 @@ fn a_mini_asks_for_its_grant_only_on_grant_ready() {
     mini.plugin_id = 4;
     assert_eq!(mini.control_pipe("grant-ready").effects, vec![Effect::ArmGrantWait(900)], "it waits its slot");
     assert_eq!(mini.control_pipe("grant-ready"), Outcome::default(), "one wait");
-    assert_eq!(mini.timer(0.9, 0).effects, vec![Effect::RequestPermission], "the fire asks");
+    assert_eq!(
+        mini.timer(0.9, 0).effects,
+        vec![Effect::RequestPermission, Effect::SetTimeout(Cadence::Fast)],
+        "the fire asks, and ticks while it waits for the answer"
+    );
     assert!(mini.permission.is_requesting());
     assert_eq!(mini.control_pipe("grant-ready"), Outcome::default(), "it asks once");
     mini.permission_result(true);
@@ -2207,6 +2211,56 @@ fn a_mini_asks_for_its_grant_only_on_grant_ready() {
     let mut full = runtime_with_config(config());
     full.load(config());
     assert_eq!(full.control_pipe("grant-ready"), Outcome::default(), "a full rail asked at load");
+}
+
+/// Zellij runs one instance per pane and client, and a new tab, an attach or
+/// a `grant-ready` reaches them all in one instant. Twins that asked together
+/// raced Zellij's rewrite of `permissions.kdl`: one read it empty and parked at
+/// a prompt nobody sees, which froze the pane for every client. Each client
+/// asks at its own offset, and no two (plugin slot, client slot) pairs wait
+/// within 10 ms of each other.
+#[test]
+fn the_instances_of_one_pane_ask_for_their_grant_apart() {
+    let waits: Vec<u64> = (0..17).flat_map(|p| (0..CLIENT_SLOTS).map(move |c| grant_wait_ms(p, c))).collect();
+    for (i, a) in waits.iter().enumerate() {
+        for b in &waits[i + 1..] {
+            assert!(a.abs_diff(*b) >= 10, "waits of {a} and {b} ms are too close");
+        }
+    }
+    let first_effects = |client_id: u32, verb: &str| {
+        let mut mini = runtime_with_config(mini_config());
+        mini.client_id = client_id;
+        mini.plugin_id = 4;
+        mini.load(mini_config());
+        mini.control_pipe(verb).effects
+    };
+    assert_eq!(first_effects(1, "grant-ready"), vec![Effect::ArmGrantWait(937)]);
+    assert_eq!(first_effects(2, "grant-ready"), vec![Effect::ArmGrantWait(974)]);
+    assert_eq!(first_effects(1, "grant-ready-now"), vec![Effect::ArmGrantWait(37)], "a tab opened at rest");
+    assert_eq!(
+        first_effects(8, "grant-ready-now"),
+        vec![Effect::RequestPermission, Effect::SetTimeout(Cadence::Fast)],
+        "client slot 0 asks at once"
+    );
+}
+
+/// A request that live ticks find unanswered was lost: a prompt freezes the
+/// pane for every client, so ticks run again only once another instance's
+/// answer has thawed it. Zellij answers a repeat from its cache. The request
+/// is asked again after 3, 10 and 30 ticks, then never.
+#[test]
+fn an_unanswered_request_is_asked_again_on_live_ticks_three_times() {
+    let asks = |o: &Outcome| o.effects.iter().filter(|e| **e == Effect::RequestPermission).count();
+    let mut rail = runtime_with_config(config());
+    rail.load(config());
+    let at: Vec<u64> = (1..=60).filter(|&tick| asks(&rail.timer(1.0, tick)) > 0).collect();
+    assert_eq!(at, vec![3, 13, 43], "after 3, 10 and 30 ticks, then never");
+    assert!(rail.permission.is_requesting());
+
+    let mut granted = runtime_with_config(config());
+    granted.load(config());
+    granted.permission_result(true);
+    assert!((1..=40).all(|tick| asks(&granted.timer(1.0, tick)) == 0), "a granted rail never asks again");
 }
 
 /// A granted full rail sends `grant-ready` from its first manifest with
@@ -2257,7 +2311,11 @@ fn only_a_tab_opened_at_rest_tells_its_mini_to_ask_now() {
 
     let mut mini = runtime_with_config(mini_config());
     mini.load(mini_config());
-    assert_eq!(mini.control_pipe("grant-ready-now").effects, vec![Effect::RequestPermission], "no wait");
+    assert_eq!(
+        mini.control_pipe("grant-ready-now").effects,
+        vec![Effect::RequestPermission, Effect::SetTimeout(Cadence::Fast)],
+        "no wait for client slot 0"
+    );
     let mut waiting = runtime_with_config(mini_config());
     waiting.load(mini_config());
     waiting.control_pipe("grant-ready");
@@ -2277,7 +2335,11 @@ fn the_grant_wait_never_shares_a_fire_with_the_timer_chain() {
     let mut effects = Vec::new();
     waiting.arm_timer_if_needed(0, &mut effects);
     assert_eq!(effects, Vec::new(), "no arm while the wait is out");
-    assert_eq!(waiting.timer(0.9, 0).effects, vec![Effect::RequestPermission], "the fire is the wait's");
+    assert_eq!(
+        waiting.timer(0.9, 0).effects,
+        vec![Effect::RequestPermission, Effect::SetTimeout(Cadence::Fast)],
+        "the fire is the wait's, and the chain starts after it"
+    );
 
     let mut busy = runtime_with_config(mini_config());
     busy.load(mini_config());
@@ -2302,12 +2364,12 @@ fn a_mini_pane_opened_again_is_told_the_grant_is_ready() {
     assert_eq!(signals(&full.pair_changed(with(9))), 1, "a mini opened again");
 }
 
-/// The minis of one layout wait 0.5 to 2.1 s, each in its own 100 ms slot:
-/// plugin ids step by a fixed amount per tab, and 17 is prime.
+/// The minis of one layout wait 0.5 to 2.1 s for client slot 0, each in its
+/// own 100 ms slot: plugin ids step by a fixed amount per tab, and 17 is prime.
 #[test]
 fn the_grant_wait_gives_each_of_17_tabs_its_own_slot() {
     for step in [1, 2, 3, 4, 6, 8] {
-        let waits: std::collections::BTreeSet<u64> = (0..17).map(|tab| grant_wait_ms(13 + tab * step)).collect();
+        let waits: std::collections::BTreeSet<u64> = (0..17).map(|tab| grant_wait_ms(13 + tab * step, 0)).collect();
         assert_eq!(waits.len(), 17, "plugin ids stepping by {step}");
         assert!(waits.iter().all(|ms| (500..=2100).contains(ms)), "{waits:?}");
     }

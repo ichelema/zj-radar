@@ -1812,3 +1812,42 @@ keybinds {
     }
     eprintln!("[e2e] PASS: attention-next moved one tab per press with two rails per tab");
 }
+
+/// Zellij runs one instance of each rail per client, and one `grant-ready`
+/// reaches every client's mini at once. Twins that asked together raced
+/// Zellij's rewrite of `permissions.kdl`: one parked at a prompt in its
+/// collapsed pane, which froze the pane for every client and held every CLI
+/// pipe. With a second client attached, each new tab's mini must get its grant
+/// and CLI pipes must keep returning. One run cannot show the race is gone; a
+/// parked mini fails it.
+#[test]
+#[ignore = "e2e: requires zellij + built wasm; run via `just test-e2e`"]
+fn tabs_opened_with_two_clients_attached_keep_cli_pipes_returning() {
+    let wasm = plugin_wasm_path();
+    assert!(
+        wasm.exists(),
+        "Plugin wasm not found at {wasm:?}. Build it:\n  cargo build --release --target wasm32-wasip1 -p zj-radar-plugin"
+    );
+    let s = ZellijSession::start(
+        &format!("zjr_twins_{}", std::process::id()),
+        &mini_rail_layout(&wasm, &["t1", "t2", "t3"]),
+        &wasm,
+        pre_grant_permissions(&wasm),
+    );
+    let wait = Duration::from_secs(15);
+    assert!(s.wait_until(wait, |s| ready_minis(s) == 3), "the minis never named their panes: {:?}", s.panes());
+
+    let _other = s.attach_client();
+    std::thread::sleep(Duration::from_secs(4)); // past the second client's grant slots (2.4 s)
+    for tabs in 4..=7 {
+        s.run_action_checked(&["new-tab"]);
+        assert!(s.wait_until(wait, |s| ready_minis(s) == tabs), "tab {tabs}: its mini never named its pane");
+        std::thread::sleep(Duration::from_secs(1)); // past both clients' asks (0.26 s at most)
+        let pipe =
+            s.action_within(&["pipe", "--name", "zj_radar.cmd.v1", "--", "attention-next"], Duration::from_secs(5));
+        if let Err(e) = pipe {
+            panic!("tab {tabs}: a parked mini holds every CLI pipe: {e}");
+        }
+    }
+    eprintln!("[e2e] PASS: four tabs opened with two clients attached kept every CLI pipe returning");
+}

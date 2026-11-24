@@ -444,6 +444,9 @@ pub(crate) struct PluginRuntime {
     /// This pane's plugin id (`get_plugin_ids`), set by the wasm glue at
     /// load: a mini's slot in the `grant-ready` wait ([`grant_wait_ms`]).
     pub(crate) plugin_id: u32,
+    /// This instance's client id (`get_plugin_ids`), set by the wasm glue at
+    /// load: its offset inside a grant slot ([`client_offset_ms`]).
+    pub(crate) client_id: u32,
     /// The tab position the latest manifest located this plugin's own pane
     /// in (`None` until one has). Refreshed by `own_plugin_tab_changed` on
     /// every `PaneUpdate`, so — unlike `RadarState`'s naming ownership, which
@@ -493,6 +496,10 @@ pub(crate) struct PluginRuntime {
     /// Mini only: `grant-ready` came and its wait is armed
     /// (`Effect::ArmGrantWait`); the next fire asks for the grant.
     grant_wait: bool,
+    /// Live ticks spent in `Requesting` since the last ask, and how many asks
+    /// were repeated ([`PERMISSION_RETRY_TICKS`]).
+    requesting_ticks: u32,
+    permission_retries: usize,
     /// Mini only: it has taken its place from a manifest (see
     /// [`settle`](Self::settle)).
     settled: bool,
@@ -516,11 +523,36 @@ const LOOK_TICKS: u8 = 2;
 /// the base lets that burst pass and the slots keep minis from asking
 /// together. 17 slots, a prime: plugin ids step by a fixed amount per tab,
 /// so 17 consecutive tabs never share one. A session at rest has no burst:
-/// there `grant-ready-now` skips the wait (`Pair::peers_ready`).
+/// there `grant-ready-now` skips the wait (`Pair::peers_ready`). Inside the
+/// slot each client takes its own offset ([`client_offset_ms`]).
 /// ponytail: rarer collisions, not none (Zellij's write is not atomic); upgrade when Zellij writes the cache atomically.
-fn grant_wait_ms(plugin_id: u32) -> u64 {
-    500 + u64::from(plugin_id % 17) * 100
+fn grant_wait_ms(plugin_id: u32, client_id: u32) -> u64 {
+    500 + u64::from(plugin_id % 17) * 100 + client_offset_ms(client_id)
 }
+
+/// How far after the instance of client 0 this client's instance of a mini
+/// asks for its grant. Zellij runs one instance per pane and client, and a
+/// `grant-ready` reaches all of them in the same instant: asked together,
+/// one instance's grant rewrites `permissions.kdl` while its twin reads it,
+/// and the twin parks at a prompt nobody sees, which freezes the pane for
+/// every client. Steps of 37 ms never land on a 100 ms plugin slot, so no two
+/// (plugin slot, client slot) pairs coincide. The full rail gets no offset:
+/// it asks at load, ahead of the grants the other plugins of a new client
+/// write, and a delay would move it into them.
+fn client_offset_ms(client_id: u32) -> u64 {
+    u64::from(client_id % CLIENT_SLOTS) * CLIENT_STEP_MS
+}
+
+const CLIENT_SLOTS: u32 = 8;
+const CLIENT_STEP_MS: u64 = 37;
+
+/// Live ticks a request may stay unanswered before it is asked again, one
+/// entry per repeat. A prompt freezes the pane for every client (no ticks),
+/// so a live tick while `Requesting` means another instance's answer thawed
+/// the pane and this instance's own ask was lost; Zellij answers a repeat
+/// from its cache. Bounded: a pane answered "no" re-prompts three times at
+/// most.
+const PERMISSION_RETRY_TICKS: [u32; 3] = [3, 10, 30];
 
 /// A rail's pair as a manifest has it (see [`PluginRuntime::pair_changed`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -598,8 +630,7 @@ impl PluginRuntime {
         // and Zellij would hold every CLI pipe for it (ICH-522).
         let mut effects = Vec::new();
         if !self.config.mini {
-            self.permission = PermissionState::Requesting;
-            effects.push(Effect::RequestPermission);
+            self.ask(&mut effects);
         }
         // Pre-grant Zellij withholds the state events that would otherwise
         // trigger a paint (they need ReadApplicationState), so this timer is
@@ -715,10 +746,13 @@ impl PluginRuntime {
     pub(crate) fn timer(&mut self, elapsed_s: f64, now_epoch_s: u64) -> Outcome {
         // A waiting mini's fire is its `grant-ready` wait: the wait is armed
         // only with no chain fire in flight, and no cadence arms while it is
-        // out (`grant_ready`, `desired_cadence`).
+        // out (`ask_after`, `desired_cadence`). It ticks after asking, for the
+        // repeat (`PERMISSION_RETRY_TICKS`).
         if std::mem::take(&mut self.grant_wait) {
-            self.permission = PermissionState::Requesting;
-            return Outcome::with_effects(false, vec![Effect::RequestPermission]);
+            let mut effects = Vec::new();
+            self.ask(&mut effects);
+            self.arm_timer_if_needed(now_epoch_s, &mut effects);
+            return Outcome::with_effects(false, effects);
         }
         // Retire one in-flight fire; a stale one (see `TimerChain::on_fire`)
         // is swallowed whole.
@@ -774,6 +808,13 @@ impl PluginRuntime {
                 tab_position: attention_tab_position,
                 pane_id: attention_pane_id,
             });
+        }
+        if self.permission.is_requesting() {
+            self.requesting_ticks += 1;
+            if PERMISSION_RETRY_TICKS.get(self.permission_retries).is_some_and(|due| self.requesting_ticks >= *due) {
+                self.permission_retries += 1;
+                self.ask(&mut effects);
+            }
         }
         // Capture before re-arming: an in-flight permission request must repaint
         // the needs_permission screen each tick until the user answers.
@@ -1001,13 +1042,33 @@ impl PluginRuntime {
         if !self.config.mini || self.permission != PermissionState::Unprompted || self.grant_wait {
             return Outcome::none();
         }
-        // With a chain fire in flight, a wait's fire could not be told from it.
-        if now || !self.timer_chain.idle() {
-            self.permission = PermissionState::Requesting;
-            return Outcome::with_effects(false, vec![Effect::RequestPermission]);
+        let wait_ms =
+            if now { client_offset_ms(self.client_id) } else { grant_wait_ms(self.plugin_id, self.client_id) };
+        let mut effects = Vec::new();
+        self.ask_after(wait_ms, &mut effects);
+        if self.permission.is_requesting() {
+            self.arm_timer_if_needed(self.last_now_epoch_s, &mut effects);
         }
-        self.grant_wait = true;
-        Outcome::with_effects(false, vec![Effect::ArmGrantWait(grant_wait_ms(self.plugin_id))])
+        Outcome::with_effects(false, effects)
+    }
+
+    /// Ask Zellij for the grant now. The retry clock starts again
+    /// ([`PERMISSION_RETRY_TICKS`]).
+    fn ask(&mut self, effects: &mut Vec<Effect>) {
+        self.permission = PermissionState::Requesting;
+        self.requesting_ticks = 0;
+        effects.push(Effect::RequestPermission);
+    }
+
+    /// Ask after a grant wait of `wait_ms`. With no wait, or with a chain fire
+    /// in flight (a wait's fire could not be told from it), ask now.
+    fn ask_after(&mut self, wait_ms: u64, effects: &mut Vec<Effect>) {
+        if wait_ms == 0 || !self.timer_chain.idle() {
+            self.ask(effects);
+        } else {
+            self.grant_wait = true;
+            effects.push(Effect::ArmGrantWait(wait_ms));
+        }
     }
 
     /// A granted full rail tells the minis once that the grant is cached,

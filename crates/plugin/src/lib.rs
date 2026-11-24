@@ -430,6 +430,7 @@ impl ZellijPlugin for State {
         let ids = get_plugin_ids();
         self.plugin_id = Some(ids.plugin_id);
         self.runtime.plugin_id = ids.plugin_id;
+        self.runtime.client_id = u32::from(ids.client_id);
         self.mini_title = format!("{} {}", runtime::MINI_PANE_TITLE, ids.zellij_pid);
         self.runtime.client_tab = Some(client_tab);
         let outcome = self.runtime.load(config::Config::from_map(&config));

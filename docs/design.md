@@ -251,7 +251,8 @@ whichever comes last of its grant and a manifest with another rail in its tab
 so `zellij` must be on the `PATH` of the Zellij server. The pipe reaches a
 plugin that never asked: `ReadCliPipes` gates only pipe commands such as
 `block_cli_pipe_input`. A mini that has not asked yet waits 0.5 to 2.1 s, in a
-100 ms slot set by its plugin id, then asks, and Zellij answers from its cache.
+100 ms slot set by its plugin id plus a 37 ms step set by its client id, then
+asks, and Zellij answers from its cache.
 
 The wait is there because Zellij rewrites `permissions.kdl` on every grant,
 truncating it first: a request that reads it in that instant finds no grant
@@ -259,11 +260,25 @@ and parks at the prompt. Minis that asked all at once hit that in some
 sessions with six or more tabs. Spread out, they hit it more rarely, not
 never. A tab opened in a session at rest needs no wait: when every other tab
 shows its ready mini and its own mini is not ready, the full rail sends
-`grant-ready-now` instead and the mini asks at once. Only that mini asks, and
-no burst of grants is being written. On attach the full rail's own mini is
-already named by another client's instance, so it sends `grant-ready`. A full
-rail parked at its own prompt in a tab not yet visited still holds every CLI
-pipe until it is answered.
+`grant-ready-now` instead and the mini asks after its client step alone. Only
+that mini asks, and no burst of grants is being written. On attach the full
+rail's own mini is already named by another client's instance, so it sends
+`grant-ready`. A full rail parked at its own prompt in a tab not yet visited
+still holds every CLI pipe until it is answered.
+
+**One instance per client.** Zellij runs one instance of each pane per client,
+and one `grant-ready` reaches all of them in the same instant. Twins that asked
+together raced the rewrite: one read the file empty and parked at a prompt in
+the collapsed pane. A prompt freezes the pane's events, timers and pipes for
+every client, so every `zellij pipe` in the session hung. The client step
+(`client_offset_ms`) keeps twins apart; 37 ms never lands on a 100 ms plugin
+slot. The full rail takes no step: it asks at load, ahead of the grants the
+other plugins of a new client write. A rail still `Requesting` when live ticks
+run asks again after 3, 10 and 30 ticks (`PERMISSION_RETRY_TICKS`): a pane with
+a pending prompt gets no ticks, so ticks mean another instance's answer thawed
+it and this instance's own ask was lost. Zellij answers the repeat from its
+cache. The root cause is in Zellij (`PermissionCache::write_to_file` truncates
+in place); with a Zellij that writes the file atomically, none of this fires.
 
 **Selectability.** One level rule, `PluginRuntime::desired_selectable`: the
 rail pane is selectable while its own permission request is in flight
